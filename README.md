@@ -52,34 +52,82 @@ YunNian/
 
 ---
 
-## 快速开始
+## 快速部署
 
-### 前端原型
+从零把一个 YunNian 实例跑起来，需要 4 样东西：**MySQL 8、Redis 7、Go 1.26、Node 18+**。
+MySQL/Redis 用仓库自带的 `docker-compose.dev.yml` 一条命令拉起；Go/Node 装在本机。
+
+### 前置依赖
+
+| 依赖 | 版本 | 用途 |
+| --- | --- | --- |
+| Go | 1.26+ | 编译后端 |
+| Node.js | 18+（建议 20/22） | 构建前端 |
+| MySQL | 8.0 | 业务库（24 张表，首次启动自动建） |
+| Redis | 7 | 会话 / 队列 / 部署锁 / 日志流缓冲 |
+| Docker（可选） | — | 用 `docker-compose.dev.yml` 拉 MySQL/Redis 时用到 |
+
+### 第 1 步 · 准备配置
+
+```bash
+cd backend/configs
+cp config.yaml.example config.yaml   # 填入真实 DSN 密码、JWT 密钥、发信 SMTP 等
+```
+
+`config.yaml.example` 里需要改的项都是显式占位符：DSN 是 `user:password@tcp(...)`、
+JWT/主密钥是 `yunnian-dev-only-*`、SMTP 授权码是 `CHANGE_ME`。按注释逐项替换即可。
+`config.yaml` 已被 `.gitignore` 排除，不会入库。
+
+### 第 2 步 · 启动 MySQL + Redis
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+```
+
+端口 3306 / 6379，账号 `yunnian` / `changeme`（与 `config.yaml.example` 里的 DSN 占位一致，
+改密码时**两边一起改**）。
+
+### 第 3 步 · 启动后端
+
+```bash
+cd backend
+go build -o bin/yunnian-server ./cmd/server
+./bin/yunnian-server -config configs/config.yaml
+```
+
+首次启动会**自动建表（GORM AutoMigrate）+ 灌种子数据**（默认账号 / 角色 / 权限 / 演示项目），
+无需手工导入任何 SQL。表结构参考见 [`docs/schema.sql`](./docs/schema.sql)。
+
+后端默认监听 `:8080`，接口前缀 `/api/v1`。
+
+### 第 4 步 · 启动前端
 
 ```bash
 cd frontend
 npm install
-npm run dev      # http://127.0.0.1:5273
+npm run build        # → frontend/dist（自包含单文件）
 ```
 
-产出自包含单文件（便于发给同事评审，无需服务器）：
+后端会托管 `frontend/dist` 作为静态资源，构建完直接开 http://127.0.0.1:8080 即可。
+开发时用 `npm run dev`（http://127.0.0.1:5173，`/api` 走 Vite 代理到 `:8080`）。
+
+### 默认账号
+
+| 账号 | 角色 | 权限 |
+| --- | --- | --- |
+| `admin` / `changeme` | 超级管理员 | 全部权限 |
+| `ops` / `changeme` | 运维 | 环境 / 部署 / 回滚 / 扩缩容、构建、镜像、审计、日志、AI 查询 |
+| `guest` / `changeme` | 只读 | 仅查看 |
+
+另有 5 个内置角色（admin / ops / dev / qa / readonly）与 40+ 权限点，由
+`backend/internal/store/seed.go` 在首次启动时自动灌入，密码统一为 `changeme`
+（`seedPassword` 常量，生产部署请务必改成强密码）。
+
+### 冒烟自检
 
 ```bash
-npm run build    # → frontend/dist/index.html
+cd backend && bash scripts/smoke.sh   # 需先起后端；50 项断言
 ```
-
-### 后端
-
-```bash
-docker compose -f docker-compose.dev.yml up -d   # MySQL 8 + Redis 7
-cd backend
-go run ./cmd/server -config configs/config.yaml  # 首次自动建表 + 灌种子数据
-bash scripts/smoke.sh                            # 另开终端跑冒烟
-```
-
-演示账号 `ops` / `changeme`（运维）、`admin` / `changeme`（管理员）。
-后端默认监听 `:8080`，接口前缀 `/api/v1`，并会托管 `frontend/dist` 作为静态资源
-（即 `npm run build` 之后直接开 `http://127.0.0.1:8080` 就能看到前端）。
 
 ---
 

@@ -20,6 +20,8 @@ backend/configs/config.yaml
 # ---- 数据库 dump / 备份 ----
 backups/
 *.sql
+# 例外：docs/schema.sql 是脱敏后的表结构参考（无数据、无密码），需要入库
+!docs/schema.sql
 
 # ---- 日志 ----
 *.log
