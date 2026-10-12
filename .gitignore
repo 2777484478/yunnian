@@ -1,0 +1,45 @@
+# ---- 构建产物 ----
+bin/
+dist/
+*.test
+cover.out
+
+# ---- 依赖与工具缓存 ----
+node_modules/
+vendor/
+
+# ---- IDE / 系统 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ---- 敏感配置（含数据库密码/发信授权码/JWT 密钥/内网仓库域名）----
+backend/configs/config.yaml
+
+# ---- 数据库 dump / 备份 ----
+backups/
+*.sql
+
+# ---- 日志 ----
+*.log
+
+# ---- 测试夹具私钥/证书/kubeconfig（假 K8s，但文件名会触发密钥扫描误报）----
+backend/scripts/cluster-e2e/*.pem
+backend/scripts/cluster-e2e/*.log
+backend/scripts/cluster-e2e/kubeconfig.yaml
+*.kubeconfig
+kubeconfig
+
+# ---- 本地环境变量 ----
+.env
+.env.*
+
+# ---- 部署产物（JDK 运行包 / 许可文件） ----
+deploy/
+
+# ---- 开发截图 ----
+artifacts/
+
+# ---- 工具工作目录 ----
+.workbuddy/

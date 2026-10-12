@@ -1,0 +1,1227 @@
+/* ---------------------------------------------------------------------------
+   YunNian 云辇 · 全局样式
+   视觉基调：参考阿里云控制台 —— 浅灰底 + 纯白卡片 + 蓝色主色 + 紧凑信息密度
+--------------------------------------------------------------------------- */
+
+:root {
+  --yn-primary: #1677ff;
+  --yn-primary-hover: #4091ff;
+  --yn-primary-bg: #eaf2ff;
+  --yn-orange: #ff6a00;
+  --yn-bg: #f4f6f9;
+  --yn-card: #ffffff;
+  --yn-border: #eceef2;
+  --yn-border-strong: #dfe3e8;
+  --yn-text: #2c313a;
+  --yn-text-2: #5c6470;
+  --yn-text-3: #9aa0aa;
+  --yn-success: #52c41a;
+  --yn-error: #ff4d4f;
+  --yn-warning: #faad14;
+  --yn-radius: 6px;
+  --yn-header-h: 56px;
+  --yn-sider-w: 224px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--yn-bg);
+  color: var(--yn-text);
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.yn-mono {
+  font-family: 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 12.5px;
+}
+
+.yn-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------- 布局 */
+
+.yn-layout {
+  min-height: 100vh;
+}
+
+.yn-header {
+  height: var(--yn-header-h);
+  background: #fff;
+  border-bottom: 1px solid var(--yn-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px 0 0;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.yn-header__left {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+.yn-logo {
+  width: var(--yn-sider-w);
+  height: var(--yn-header-h);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 20px;
+  border-right: 1px solid var(--yn-border);
+}
+
+/* 品牌标识：橙色渐变方块 + 白色云（矢量见 components/Logo.tsx） */
+.yn-logo__mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #ff8a2b 0%, #ff6a00 100%);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 2px 6px rgba(255, 106, 0, 0.28);
+}
+
+.yn-logo__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.yn-logo__name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--yn-text);
+  letter-spacing: 0.3px;
+}
+
+.yn-logo__sub {
+  font-size: 11px;
+  color: var(--yn-text-3);
+}
+
+.yn-header__nav {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  margin-left: 12px;
+}
+
+/* 顶栏中「已排期但未实现」的导航项：弱化颜色 + 二期角标，避免看起来像可用的死链 */
+.yn-header__nav .yn-nav-soon {
+  color: var(--yn-text-3);
+}
+
+.yn-header__nav .yn-nav-soon__badge {
+  font-style: normal;
+  font-size: 11px;
+  line-height: 1;
+  margin-left: 5px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: #f0f1f4;
+  color: #9aa0ab;
+  vertical-align: 1px;
+}
+
+.yn-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.yn-header__env-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 14px;
+  background: #f4f6f9;
+  border: 1px solid var(--yn-border);
+  font-size: 12px;
+  color: var(--yn-text-2);
+  margin-right: 12px;
+}
+
+.yn-sider {
+  background: #fff;
+  border-right: 1px solid var(--yn-border);
+  height: calc(100vh - var(--yn-header-h));
+  position: sticky;
+  top: var(--yn-header-h);
+  overflow-y: auto;
+  padding: 8px 0 24px;
+}
+
+.yn-sider::-webkit-scrollbar {
+  width: 6px;
+}
+.yn-sider::-webkit-scrollbar-thumb {
+  background: #e3e6ea;
+  border-radius: 3px;
+}
+
+.yn-sider .ant-menu {
+  border-inline-end: none !important;
+  background: transparent;
+}
+
+.yn-sider .ant-menu-item,
+.yn-sider .ant-menu-submenu-title {
+  height: 38px;
+  line-height: 38px;
+  margin: 2px 8px !important;
+  width: calc(100% - 16px);
+  border-radius: var(--yn-radius);
+  font-size: 13.5px;
+  color: var(--yn-text-2);
+}
+
+.yn-sider .ant-menu-item:hover,
+.yn-sider .ant-menu-submenu-title:hover {
+  background: #f4f6f9 !important;
+  color: var(--yn-text);
+}
+
+.yn-sider .ant-menu-item-selected {
+  background: var(--yn-primary-bg) !important;
+  color: var(--yn-primary) !important;
+  font-weight: 500;
+}
+
+.yn-sider .ant-menu-sub.ant-menu-inline {
+  background: transparent !important;
+}
+
+.yn-sider .ant-menu-item-icon,
+.yn-sider .ant-menu-submenu-title .anticon {
+  font-size: 15px;
+}
+
+.yn-sider__group {
+  padding: 14px 20px 6px;
+  font-size: 11px;
+  color: var(--yn-text-3);
+  letter-spacing: 0.6px;
+}
+
+.yn-content {
+  padding: 16px 20px 32px;
+  min-height: calc(100vh - var(--yn-header-h));
+}
+
+/* --------------------------------------------------------------------------- 页头 */
+
+.yn-page-header {
+  margin-bottom: 14px;
+}
+
+.yn-page-header__main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.yn-page-header__extra {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* --------------------------------------------------------------------------- 卡片 */
+
+.yn-section-card {
+  border: 1px solid var(--yn-border);
+  border-radius: var(--yn-radius);
+  box-shadow: 0 1px 2px rgba(20, 26, 38, 0.03);
+}
+
+.yn-section-card > .ant-card-head {
+  border-bottom: 1px solid var(--yn-border);
+  min-height: 46px;
+  padding: 0 16px;
+}
+
+.yn-section-card__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--yn-text);
+}
+
+.yn-section-card > .ant-card-head .ant-card-head-title {
+  font-size: 14px;
+  font-weight: 600;
+  padding: 12px 0;
+}
+
+.yn-stat-card {
+  border: 1px solid var(--yn-border);
+  border-radius: var(--yn-radius);
+  box-shadow: 0 1px 2px rgba(20, 26, 38, 0.03);
+  height: 100%;
+}
+
+.yn-stat-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.yn-stat-card__title {
+  font-size: 13px;
+  color: var(--yn-text-2);
+}
+
+.yn-stat-card__icon {
+  font-size: 17px;
+  opacity: 0.16;
+}
+
+.yn-stat-card__value {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 6px 0 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.yn-stat-card__unit {
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 400;
+  margin-left: 4px;
+  color: var(--yn-text-3);
+}
+
+.yn-stat-card__footer {
+  min-height: 20px;
+  font-size: 12px;
+}
+
+/* 指标升降的配色按「对指标是好是坏」决定，不按方向：
+   成功率 +1.8% 是好事（绿），失败率 +2% 是坏事（红）。
+   样式见 styles/motion.css 的 .yn-delta-good / .yn-delta-bad */
+
+/* --------------------------------------------------------------------------- 键值列表 */
+
+.yn-kv {
+  display: grid;
+  gap: 14px 24px;
+  padding: 18px 20px;
+}
+
+.yn-kv__label {
+  font-size: 12px;
+  color: var(--yn-text-3);
+  margin-bottom: 4px;
+}
+
+.yn-kv__value {
+  font-size: 13.5px;
+  color: var(--yn-text);
+  word-break: break-all;
+}
+
+/* --------------------------------------------------------------------------- 日志面板 */
+
+.yn-logpanel {
+  border-radius: var(--yn-radius);
+  overflow: hidden;
+  background: #1b1f27;
+  border: 1px solid #2a303b;
+}
+
+.yn-logpanel__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #232932;
+  border-bottom: 1px solid #2f3742;
+  flex-wrap: wrap;
+}
+
+.yn-logpanel__bar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.yn-logdot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.yn-logpanel__title {
+  margin-left: 8px;
+  color: #d7dce5;
+  font-size: 12.5px;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+}
+
+.yn-logpanel__live {
+  margin-left: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #52c41a;
+  letter-spacing: 1px;
+}
+
+.yn-logpanel__pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #52c41a;
+  box-shadow: 0 0 0 0 rgba(82, 196, 26, 0.6);
+  animation: yn-pulse 1.4s infinite;
+}
+
+@keyframes yn-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(82, 196, 26, 0.6);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(82, 196, 26, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(82, 196, 26, 0);
+  }
+}
+
+.yn-logpanel__done {
+  margin-left: 8px;
+  font-size: 11.5px;
+  color: #7d8494;
+}
+
+.yn-logpanel__bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.yn-logpanel__bar-right .ant-input-affix-wrapper {
+  background: #1b1f27;
+  border-color: #39414e;
+}
+
+.yn-logpanel__bar-right .ant-input {
+  background: transparent;
+  color: #d7dce5;
+}
+
+.yn-logpanel__body {
+  overflow: auto;
+  padding: 10px 0;
+  font-family: 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.yn-logpanel__body::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.yn-logpanel__body::-webkit-scrollbar-thumb {
+  background: #39414e;
+  border-radius: 4px;
+}
+
+.yn-logpanel__empty {
+  color: #6b7280;
+  padding: 24px;
+  text-align: center;
+}
+
+.yn-logline {
+  display: flex;
+  gap: 12px;
+  padding: 0 14px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.yn-logline:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.yn-logline__no {
+  color: #4b5364;
+  width: 34px;
+  flex: 0 0 34px;
+  text-align: right;
+  user-select: none;
+}
+
+.yn-logline__ts {
+  color: #6b7688;
+  flex: 0 0 auto;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.yn-logline__text {
+  color: #c9cfda;
+  flex: 1;
+}
+
+.yn-logline--cmd .yn-logline__text {
+  color: #6fb4ff;
+}
+.yn-logline--error .yn-logline__text {
+  color: #ff7875;
+}
+.yn-logline--success .yn-logline__text {
+  color: #95de64;
+}
+.yn-logline--warn .yn-logline__text {
+  color: #ffd666;
+}
+
+.yn-logpanel__cursor {
+  color: #95de64;
+  padding-left: 60px;
+  animation: yn-blink 1s step-end infinite;
+}
+
+@keyframes yn-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.yn-logpanel__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px 6px;
+  background: #232932;
+  border-top: 1px solid #2f3742;
+}
+
+.yn-logpanel__footer .ant-btn-link {
+  color: #6fb4ff;
+  padding: 0;
+}
+
+/* --------------------------------------------------------------------------- 图表 */
+
+.yn-donut {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.yn-donut__legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-width: 180px;
+}
+
+.yn-donut__legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+.yn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.yn-donut__label {
+  color: var(--yn-text-2);
+  flex: 1;
+}
+
+.yn-donut__value {
+  color: var(--yn-text);
+  font-weight: 500;
+}
+
+.yn-donut__value em {
+  font-style: normal;
+  color: var(--yn-text-3);
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.yn-barlist__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: 13px;
+}
+
+.yn-barlist__label {
+  width: 118px;
+  color: var(--yn-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yn-barlist__track {
+  flex: 1;
+  height: 7px;
+  background: #f0f2f5;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.yn-barlist__fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+
+.yn-barlist__value {
+  width: 54px;
+  text-align: right;
+  color: var(--yn-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.yn-usage {
+  margin-bottom: 12px;
+}
+
+.yn-usage__head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: var(--yn-text-2);
+  margin-bottom: 5px;
+}
+
+.yn-usage__detail {
+  color: var(--yn-text-3);
+}
+
+.yn-usage__track {
+  height: 6px;
+  border-radius: 3px;
+  background: #f0f2f5;
+  overflow: hidden;
+}
+
+.yn-usage__fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+/* --------------------------------------------------------------------------- 表格微调 */
+
+.yn-content .ant-table-thead > tr > th {
+  background: #fafbfc !important;
+  color: var(--yn-text-2);
+  font-weight: 500;
+  font-size: 13px;
+  border-bottom: 1px solid var(--yn-border) !important;
+}
+
+.yn-content .ant-table-tbody > tr > td {
+  font-size: 13px;
+}
+
+.yn-content .ant-table-tbody > tr:hover > td {
+  background: #f7faff !important;
+}
+
+/* --------------------------------------------------------------------------- 环境卡片 */
+
+.yn-env-card {
+  border: 1px solid var(--yn-border);
+  border-radius: var(--yn-radius);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(20, 26, 38, 0.03);
+  transition: box-shadow 0.2s, border-color 0.2s, transform 0.2s;
+  cursor: pointer;
+  height: 100%;
+}
+
+.yn-env-card:hover {
+  border-color: #bcd7ff;
+  box-shadow: 0 6px 18px rgba(22, 119, 255, 0.1);
+  transform: translateY(-1px);
+}
+
+.yn-env-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid #f4f6f9;
+}
+
+.yn-env-card__name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--yn-text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.yn-env-card__key {
+  font-size: 11.5px;
+  color: var(--yn-text-3);
+  margin-top: 3px;
+}
+
+.yn-env-card__body {
+  padding: 14px 18px;
+}
+
+.yn-env-card__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.yn-env-card__metric {
+  background: #fafbfc;
+  border-radius: 5px;
+  padding: 8px 10px;
+}
+
+.yn-env-card__metric-label {
+  font-size: 11.5px;
+  color: var(--yn-text-3);
+}
+
+.yn-env-card__metric-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--yn-text);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.yn-env-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  border-top: 1px solid #f4f6f9;
+  font-size: 12px;
+  color: var(--yn-text-3);
+}
+
+/* --------------------------------------------------------------------------- 其他 */
+
+.yn-kveq {
+  color: var(--yn-text-3);
+}
+
+.yn-service-name {
+  font-weight: 500;
+  color: var(--yn-text);
+}
+
+.yn-service-sub {
+  font-size: 12px;
+  color: var(--yn-text-3);
+  margin-top: 2px;
+}
+
+.yn-pod-status {
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.yn-ai-shell {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--yn-header-h) - 48px);
+  min-height: 520px;
+}
+
+.yn-ai-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 4px 8px;
+}
+
+.yn-ai-msg {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.yn-ai-msg--user {
+  flex-direction: row-reverse;
+}
+
+.yn-ai-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  flex: 0 0 32px;
+}
+
+.yn-ai-msg--assistant .yn-ai-avatar {
+  background: linear-gradient(135deg, #ff8a2b, #ff6a00);
+  color: #fff;
+}
+
+.yn-ai-msg--user .yn-ai-avatar {
+  background: #eaf2ff;
+  color: var(--yn-primary);
+}
+
+.yn-ai-bubble {
+  max-width: 760px;
+  background: #fff;
+  border: 1px solid var(--yn-border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: var(--yn-text);
+  white-space: pre-wrap;
+}
+
+.yn-ai-msg--user .yn-ai-bubble {
+  background: var(--yn-primary);
+  border-color: var(--yn-primary);
+  color: #fff;
+}
+
+.yn-ai-attach {
+  margin-top: 10px;
+  border: 1px solid var(--yn-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fbfcfd;
+}
+
+.yn-ai-attach__title {
+  padding: 7px 12px;
+  font-size: 12px;
+  color: var(--yn-text-2);
+  background: #f4f6f9;
+  border-bottom: 1px solid var(--yn-border);
+  font-weight: 500;
+}
+
+.yn-ai-attach__body {
+  padding: 4px 12px 10px;
+}
+
+.yn-ai-kv-row {
+  display: flex;
+  padding: 5px 0;
+  border-bottom: 1px dashed #f0f2f5;
+  font-size: 12.5px;
+}
+
+.yn-ai-kv-row:last-child {
+  border-bottom: none;
+}
+
+.yn-ai-kv-row > span:first-child {
+  width: 110px;
+  color: var(--yn-text-3);
+  flex: 0 0 110px;
+}
+
+.yn-ai-kv-row > span:last-child {
+  color: var(--yn-text);
+  flex: 1;
+  word-break: break-all;
+}
+
+/* ---- 查询过程（模型自己发起的只读工具调用） ------------------------------------
+   为什么要有这块：查集群的两个工具要几百毫秒到几秒，这期间后端一个 token 都不推，
+   界面上就是空白。不把这一步显示出来，用户看到的就是"发出去没反应"。
+   做成浅色、等宽、可折叠的样子，是为了让人**可以忽略它**——
+   它是过程证据，不是回答本身。 */
+.yn-ai-tools__title {
+  font-size: 12px;
+  color: var(--yn-text-3);
+  margin-bottom: 6px;
+}
+
+.yn-ai-tool {
+  border: 1px solid var(--yn-border);
+  border-left: 2px solid var(--yn-primary);
+  border-radius: 6px;
+  background: #fbfcfd;
+  margin-bottom: 6px;
+  padding: 6px 10px;
+}
+
+.yn-ai-tool__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--yn-text-2);
+}
+
+.yn-ai-tool__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--yn-primary);
+  flex: 0 0 6px;
+}
+
+/* 默认折叠：等待时才展开，回答出来之后它应该退到背景里。 */
+.yn-ai-tool__body {
+  margin-top: 6px;
+  padding-left: 14px;
+  font-size: 11.5px;
+}
+
+.yn-ai-tool__body > div {
+  margin-bottom: 2px;
+}
+
+.yn-ai-tool__body pre {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  background: #f4f6f9;
+  border-radius: 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.yn-ai-suggest {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.yn-ai-chip {
+  border: 1px solid var(--yn-border);
+  background: #fff;
+  border-radius: 16px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  color: var(--yn-text-2);
+  cursor: pointer;
+  transition: all 0.18s;
+}
+
+.yn-ai-chip:hover {
+  border-color: var(--yn-primary);
+  color: var(--yn-primary);
+  background: #f7faff;
+}
+
+.yn-suggest-card {
+  border: 1px solid #ffe0b2;
+  background: #fffbf5;
+  border-radius: var(--yn-radius);
+  padding: 12px 14px;
+}
+
+.yn-suggest-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #ad4e00;
+  margin-bottom: 8px;
+}
+
+.yn-suggest-card__row {
+  font-size: 13px;
+  color: var(--yn-text-2);
+  line-height: 1.7;
+}
+
+.yn-suggest-card__row b {
+  color: var(--yn-text);
+  font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------- 筛选栏 / 批量操作栏 */
+
+.yn-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--yn-border);
+}
+
+.yn-bulk-bar {
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  background: #f0f7ff;
+  border-bottom: 1px solid #d6e8ff;
+}
+
+/* --------------------------------------------------------------------------- 图例 */
+
+.yn-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--yn-text-2);
+}
+
+.yn-legend i {
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+/* --------------------------------------------------------------------------- 列表悬停行 */
+
+.yn-env-row {
+  transition: background 0.18s;
+}
+
+.yn-env-row:hover {
+  background: #f7faff;
+}
+
+/* --------------------------------------------------------------------------- 事件订阅矩阵 */
+
+.yn-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 640px;
+}
+
+.yn-matrix th,
+.yn-matrix td {
+  border: 1px solid var(--yn-border);
+  padding: 8px 10px;
+  color: var(--yn-text-2);
+}
+
+.yn-matrix thead th {
+  background: #fafbfc;
+  font-weight: 500;
+  text-align: center;
+}
+
+.yn-matrix tbody tr:hover {
+  background: #f7faff;
+}
+
+/* --------------------------------------------------------------------------- 展开行小标题 */
+
+.yn-sub-title {
+  font-size: 12px;
+  color: #9aa0aa;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------- 抽屉内表单留白 */
+
+.ant-drawer-body .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+/* --------------------------------------------------------------------------- 模型设置（/system/models） */
+
+.yn-model-card__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 18px;
+}
+
+.yn-model-card__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.yn-model-card__label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--yn-text-3);
+}
+
+/* Base URL / 内网地址等长串必须能断行，否则会把卡片撑破 */
+.yn-model-card__break {
+  word-break: break-all;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.yn-model-card__models {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.yn-model-card__params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 1px;
+}
+
+.yn-model-card__params em {
+  font-style: normal;
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: #f4f6f9;
+  color: #5c6470;
+  white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+  .yn-model-card__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+
+/* ---------------------------------------------------------------------------
+   顶栏下拉面板：项目搜索 / 待审批部署
+   （顶栏原来挂的是写死的"3 条未读通知"，现在这两个面板都是真实数据）
+   --------------------------------------------------------------------------- */
+.yn-search-pop {
+  width: 380px;
+  padding: 4px 0;
+  border: 1px solid var(--yn-border-strong);
+  border-radius: var(--yn-radius);
+  background: var(--yn-card);
+  box-shadow: 0 6px 20px rgba(28, 36, 51, 0.12);
+}
+
+.yn-search-pop__title {
+  padding: 8px 12px 6px;
+  color: var(--yn-text-3);
+  font-size: 12px;
+  border-bottom: 1px solid var(--yn-border);
+}
+
+.yn-search-pop__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.yn-search-pop__item:hover {
+  background: var(--yn-primary-bg);
+}
+
+.yn-search-pop__name {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--yn-text);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yn-search-pop__key {
+  flex: none;
+  color: var(--yn-primary);
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 11.5px;
+}
+
+.yn-search-pop__meta {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--yn-text-3);
+  font-size: 11.5px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yn-search-pop__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 14px 12px;
+  color: var(--yn-text-3);
+  font-size: 12.5px;
+}
+
+.yn-search-pop__foot {
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--yn-border);
+  color: var(--yn-text-3);
+  font-size: 11.5px;
+}
+
+.yn-search-pop__foot--link {
+  color: var(--yn-primary);
+  cursor: pointer;
+}
+
+.yn-search-pop__foot--link:hover {
+  text-decoration: underline;
+}

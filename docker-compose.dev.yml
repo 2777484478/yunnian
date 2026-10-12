@@ -1,0 +1,82 @@
+# YunNian 云辇 · 本地开发依赖编排
+#
+# 用途：一条命令拉起平台依赖的 MySQL 8 与 Redis 7，供后端本地开发使用。
+# 生产环境不使用本文件（生产用公司自建的 MySQL/Redis 集群）。
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml logs -f mysql
+#   docker compose -f docker-compose.dev.yml down          # 停容器，保留数据
+#   docker compose -f docker-compose.dev.yml down -v       # 连数据一起清掉
+#
+# 端口刻意用 3306 / 6379 与本机常见默认值一致，这样 configs/config.yaml
+# 里不需要写奇怪的端口；若本机已占用，改 ports 左边的数字即可。
+name: yunnian-dev
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: yunnian-mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: "changeme-root"
+      MYSQL_DATABASE: "yunnian"
+      MYSQL_USER: "yunnian"
+      MYSQL_PASSWORD: "changeme"
+      TZ: "Asia/Shanghai"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      # 平台侧用 go-sql-driver，兼容 caching_sha2_password；
+      # 但保留 native 插件可让 Navicat 等老客户端也能连，方便排障。
+      - --default-authentication-plugin=mysql_native_password
+      - --explicit_defaults_for_timestamp=ON
+      - --max_connections=500
+      # audit_log 会持续增长，单独放慢查询阈值便于观察
+      - --long_query_time=0.3
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pchangeme-root"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: yunnian-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    environment:
+      TZ: "Asia/Shanghai"
+    # appendonly：日志流缓冲、会话键、部署锁都是"重启后仍应保持自洽"的状态，
+    # 尤其部署锁若不持久化，重启期间可能出现同一服务并发部署。
+    command:
+      - redis-server
+      - --appendonly
+      - yes
+      - --appendfsync
+      - everysec
+      # 平台键全部带 TTL，理论上不会堆满；但共享实例上仍设上限并拒绝写入，
+      # 避免平台把别人的 Redis 挤爆（noeviction 会写失败但不影响既有数据）。
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mysql-data:
+    name: yunnian-mysql-data
+  redis-data:
+    name: yunnian-redis-data

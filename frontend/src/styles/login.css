@@ -1,0 +1,462 @@
+/* ---------------------------------------------------------------------------
+   YunNian 云辇 · 登录页样式
+   视觉：左侧深空蓝品牌区（动态网格 / 扫描光带 / 漂浮光点）+ 右侧纯白登录卡
+   动效全部为纯 CSS，不引第三方动画库
+--------------------------------------------------------------------------- */
+
+.yn-login {
+  display: flex;
+  min-height: 100vh;
+  background: #fff;
+}
+
+/* --------------------------------------------------------------------------- 左侧品牌区 */
+
+.yn-login__brand {
+  position: relative;
+  flex: 1 1 58%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 44px 56px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  color: #fff;
+  background:
+    radial-gradient(900px 620px at 16% 10%, rgba(22, 119, 255, 0.44) 0%, transparent 62%),
+    radial-gradient(720px 520px at 90% 92%, rgba(255, 106, 0, 0.22) 0%, transparent 58%),
+    linear-gradient(152deg, #061530 0%, #0b2450 46%, #071a3a 100%);
+}
+
+/* 缓慢平移的科技网格 */
+.yn-login__grid {
+  position: absolute;
+  inset: -80px;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(140, 190, 255, 0.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(140, 190, 255, 0.09) 1px, transparent 1px);
+  background-size: 46px 46px;
+  animation: yn-login-grid-move 24s linear infinite;
+}
+
+@keyframes yn-login-grid-move {
+  from {
+    background-position: 0 0, 0 0;
+  }
+  to {
+    background-position: 46px 46px, 46px 46px;
+  }
+}
+
+/* 自上而下的扫描光带 */
+.yn-login__scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 200px;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent, rgba(90, 165, 255, 0.15), transparent);
+  animation: yn-login-scan 7.5s ease-in-out infinite;
+}
+
+@keyframes yn-login-scan {
+  0% {
+    transform: translateY(-220px);
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100vh);
+    opacity: 0;
+  }
+}
+
+/* 漂浮光点 */
+.yn-login__orb {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle at 32% 32%, rgba(150, 205, 255, 0.95), rgba(22, 119, 255, 0.1) 70%);
+  animation: yn-login-float 9s ease-in-out infinite;
+}
+
+.yn-login__orb--a {
+  width: 10px;
+  height: 10px;
+  top: 20%;
+  left: 16%;
+}
+
+.yn-login__orb--b {
+  width: 7px;
+  height: 7px;
+  top: 62%;
+  left: 76%;
+  animation-delay: 1.6s;
+}
+
+.yn-login__orb--c {
+  width: 13px;
+  height: 13px;
+  top: 80%;
+  left: 28%;
+  animation-delay: 3.2s;
+}
+
+.yn-login__orb--d {
+  width: 6px;
+  height: 6px;
+  top: 36%;
+  left: 88%;
+  animation-delay: 4.6s;
+}
+
+@keyframes yn-login-float {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.72;
+  }
+  50% {
+    transform: translate3d(10px, -26px, 0) scale(1.35);
+    opacity: 1;
+  }
+}
+
+.yn-login__brand-inner {
+  position: relative;
+  z-index: 2;
+  max-width: 520px;
+}
+
+.yn-login__logo {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.yn-login__logo-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 16px;
+  color: #fff;
+  background: linear-gradient(135deg, #ff8a2b 0%, #ff6a00 100%);
+  box-shadow: 0 4px 14px rgba(255, 106, 0, 0.35);
+}
+
+.yn-login__logo-name {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+}
+
+.yn-login__logo-sub {
+  font-size: 11.5px;
+  color: rgba(190, 214, 248, 0.62);
+}
+
+.yn-login__headline {
+  margin: 44px 0 14px;
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1.42;
+  letter-spacing: 0.5px;
+}
+
+.yn-login__headline em {
+  font-style: normal;
+  color: #6db4ff;
+}
+
+.yn-login__sub {
+  font-size: 13.5px;
+  line-height: 2;
+  color: rgba(204, 224, 252, 0.7);
+  max-width: 440px;
+}
+
+.yn-login__points {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 40px;
+}
+
+.yn-login__point {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  font-size: 13.5px;
+  color: rgba(214, 232, 255, 0.92);
+}
+
+.yn-login__point-icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: #7cc0ff;
+  background: rgba(60, 140, 255, 0.16);
+  border: 1px solid rgba(110, 180, 255, 0.24);
+}
+
+.yn-login__point em {
+  display: block;
+  font-style: normal;
+  font-size: 12px;
+  color: rgba(180, 206, 244, 0.58);
+  margin-top: 3px;
+}
+
+.yn-login__stats {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  gap: 46px;
+  flex-wrap: wrap;
+}
+
+.yn-login__stat b {
+  font-size: 24px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.yn-login__stat span {
+  display: block;
+  font-size: 12px;
+  margin-top: 3px;
+  color: rgba(180, 206, 244, 0.58);
+}
+
+/* --------------------------------------------------------------------------- 右侧表单区 */
+
+.yn-login__panel {
+  flex: 0 0 42%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 48px;
+  background: #fff;
+}
+
+.yn-login__card {
+  width: 100%;
+  max-width: 376px;
+  animation: yn-login-card-in 0.55s cubic-bezier(0.22, 0.68, 0.36, 1) both;
+}
+
+@keyframes yn-login-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.yn-login__card--shake {
+  animation: yn-login-shake 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+@keyframes yn-login-shake {
+  10%,
+  90% {
+    transform: translateX(-4px);
+  }
+  20%,
+  80% {
+    transform: translateX(6px);
+  }
+  30%,
+  50%,
+  70% {
+    transform: translateX(-8px);
+  }
+  40%,
+  60% {
+    transform: translateX(8px);
+  }
+}
+
+.yn-login__title {
+  margin: 0 0 6px;
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--yn-text);
+}
+
+.yn-login__title-sub {
+  font-size: 13px;
+  color: var(--yn-text-3);
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* 运行状态脉冲点 */
+.yn-login__pulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--yn-success);
+  white-space: nowrap;
+}
+
+.yn-login__pulse i {
+  position: relative;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yn-success);
+}
+
+.yn-login__pulse i::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1px solid rgba(82, 196, 26, 0.55);
+  animation: yn-login-pulse 1.9s ease-out infinite;
+}
+
+@keyframes yn-login-pulse {
+  0% {
+    transform: scale(0.6);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+/* 图形验证码 */
+.yn-login__captcha {
+  position: relative;
+  overflow: hidden;
+  width: 108px;
+  height: 32px;
+  flex: none;
+  cursor: pointer;
+  border-radius: var(--yn-radius);
+  border: 1px solid #d6e4ff;
+  background: linear-gradient(105deg, #eef4ff, #e3eeff 62%, #f6f9ff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 19px;
+  font-style: italic;
+  font-weight: 600;
+  letter-spacing: 6px;
+  color: #1d39c4;
+  user-select: none;
+  transition: border-color 0.2s ease;
+}
+
+.yn-login__captcha:hover {
+  border-color: var(--yn-primary);
+}
+
+/* 干扰线：纯 CSS 斜纹，避免用 canvas */
+.yn-login__captcha::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(72deg, transparent 0 6px, rgba(22, 119, 255, 0.2) 6px 7px);
+}
+
+.yn-login__captcha span {
+  position: relative;
+  z-index: 1;
+}
+
+.yn-login__row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.yn-login__row > .ant-form-item:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.yn-login__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.yn-login__alt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0 0;
+  font-size: 12px;
+  color: #c2c7d0;
+}
+
+.yn-login__alt::before,
+.yn-login__alt::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--yn-border);
+}
+
+.yn-login__sso {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.yn-login__foot {
+  margin-top: 26px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.9;
+  color: #b5bac4;
+}
+
+/* --------------------------------------------------------------------------- 响应式 / 无障碍 */
+
+@media (max-width: 991px) {
+  .yn-login__brand {
+    display: none;
+  }
+
+  .yn-login__panel {
+    flex: 1 1 100%;
+    padding: 32px 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .yn-login__grid,
+  .yn-login__scan,
+  .yn-login__orb,
+  .yn-login__pulse i::after {
+    animation: none;
+  }
+}

@@ -1,0 +1,323 @@
+/* ---------------------------------------------------------------------------
+   YunNian 云辇 · 动效层（概览页为主）
+   原则：动效服务于「信息在流动」的感觉，不喧宾夺主。
+   阿里云控制台的浅色基调不变，动效集中在横幅、数字、卡片与状态指示上。
+--------------------------------------------------------------------------- */
+
+/* --------------------------------------------------------------------------- 数字与增量 */
+
+.yn-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 指标升降配色与 .yn-delta-up / .yn-delta-down 分开：
+   旧的 up/down 只表达方向，无法表达「对指标是好是坏」（如失败率上涨是坏事）。
+   这里按语义命名，由组件传入 good / bad。 */
+.yn-delta-good {
+  color: var(--yn-success);
+  font-weight: 500;
+}
+
+.yn-delta-bad {
+  color: var(--yn-error);
+  font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------- 卡片交互 */
+
+.yn-stat-card {
+  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+}
+
+.yn-stat-card:hover {
+  transform: translateY(-3px);
+  border-color: #cddffb;
+  box-shadow: 0 8px 22px rgba(20, 60, 130, 0.1);
+}
+
+.yn-section-card {
+  transition: box-shadow 0.22s ease, border-color 0.22s ease;
+}
+
+.yn-section-card:hover {
+  box-shadow: 0 6px 18px rgba(20, 60, 130, 0.07);
+}
+
+/* --------------------------------------------------------------------------- 入场动画 */
+
+.yn-rise {
+  animation: yn-rise-in 0.5s cubic-bezier(0.22, 0.68, 0.36, 1) both;
+}
+
+@keyframes yn-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 逐项延迟出场，形成自上而下的推进感 */
+.yn-stagger > * {
+  animation: yn-rise-in 0.5s cubic-bezier(0.22, 0.68, 0.36, 1) both;
+}
+
+.yn-stagger > *:nth-child(1) {
+  animation-delay: 0.04s;
+}
+.yn-stagger > *:nth-child(2) {
+  animation-delay: 0.1s;
+}
+.yn-stagger > *:nth-child(3) {
+  animation-delay: 0.16s;
+}
+.yn-stagger > *:nth-child(4) {
+  animation-delay: 0.22s;
+}
+.yn-stagger > *:nth-child(5) {
+  animation-delay: 0.28s;
+}
+.yn-stagger > *:nth-child(6) {
+  animation-delay: 0.34s;
+}
+.yn-stagger > *:nth-child(7) {
+  animation-delay: 0.4s;
+}
+.yn-stagger > *:nth-child(8) {
+  animation-delay: 0.46s;
+}
+
+/* --------------------------------------------------------------------------- 概览页顶部横幅 */
+
+.yn-hero {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 16px;
+  padding: 22px 26px;
+  border-radius: var(--yn-radius);
+  border: 1px solid #dbe9ff;
+  background:
+    radial-gradient(680px 320px at 8% 0%, rgba(22, 119, 255, 0.13) 0%, transparent 65%),
+    radial-gradient(520px 280px at 92% 100%, rgba(255, 106, 0, 0.1) 0%, transparent 62%),
+    linear-gradient(120deg, #eef5ff 0%, #f8fbff 48%, #eef4ff 100%);
+}
+
+/* 缓慢平移的细网格 */
+.yn-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(22, 119, 255, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(22, 119, 255, 0.055) 1px, transparent 1px);
+  background-size: 34px 34px;
+  animation: yn-hero-grid 26s linear infinite;
+}
+
+@keyframes yn-hero-grid {
+  from {
+    background-position: 0 0, 0 0;
+  }
+  to {
+    background-position: 34px 34px, 34px 34px;
+  }
+}
+
+/* 右上角缓慢游移的光斑 */
+.yn-hero::after {
+  content: '';
+  position: absolute;
+  top: -130px;
+  right: -60px;
+  width: 270px;
+  height: 270px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(22, 119, 255, 0.17), transparent 68%);
+  animation: yn-hero-glow 9s ease-in-out infinite;
+}
+
+@keyframes yn-hero-glow {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.8;
+  }
+  50% {
+    transform: translate3d(-26px, 20px, 0) scale(1.12);
+    opacity: 1;
+  }
+}
+
+.yn-hero__inner {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.yn-hero__greet {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 19px;
+  font-weight: 600;
+  color: #1c2a44;
+}
+
+.yn-hero__sub {
+  margin-top: 7px;
+  font-size: 13px;
+  line-height: 1.9;
+  color: #5c6470;
+  max-width: 620px;
+}
+
+.yn-hero__clock {
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--yn-primary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.yn-hero__clock-label {
+  font-size: 12px;
+  color: var(--yn-text-3);
+  text-align: right;
+  margin-top: 4px;
+}
+
+.yn-hero__chips {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.yn-hero__chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #44506a;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #dbe9ff;
+  border-radius: 20px;
+  padding: 5px 13px;
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.yn-hero__chip:hover {
+  transform: translateY(-1px);
+  border-color: #a9caff;
+}
+
+.yn-hero__chip b {
+  font-weight: 600;
+  color: #1c2a44;
+}
+
+/* --------------------------------------------------------------------------- 实时状态脉冲点 */
+
+.yn-live-dot {
+  position: relative;
+  flex: none;
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--yn-success);
+}
+
+.yn-live-dot::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1px solid var(--yn-success);
+  animation: yn-live-pulse 1.9s ease-out infinite;
+}
+
+.yn-live-dot--warning {
+  background: var(--yn-warning);
+}
+
+.yn-live-dot--warning::after {
+  border-color: var(--yn-warning);
+}
+
+.yn-live-dot--error {
+  background: var(--yn-error);
+}
+
+.yn-live-dot--error::after {
+  border-color: var(--yn-error);
+}
+
+@keyframes yn-live-pulse {
+  0% {
+    transform: scale(0.55);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.55);
+    opacity: 0;
+  }
+}
+
+/* --------------------------------------------------------------------------- 进行中任务的进度条流动 */
+
+.yn-progress-live .ant-progress-bg {
+  position: relative;
+  overflow: hidden;
+}
+
+.yn-progress-live .ant-progress-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+    115deg,
+    transparent 0 12px,
+    rgba(255, 255, 255, 0.45) 12px 22px,
+    transparent 22px 34px
+  );
+  background-size: 34px 100%;
+  animation: yn-progress-flow 0.9s linear infinite;
+}
+
+@keyframes yn-progress-flow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 34px 0;
+  }
+}
+
+/* --------------------------------------------------------------------------- 无障碍 */
+
+@media (prefers-reduced-motion: reduce) {
+  .yn-hero::before,
+  .yn-hero::after,
+  .yn-live-dot::after,
+  .yn-progress-live .ant-progress-bg::after,
+  .yn-rise,
+  .yn-stagger > * {
+    animation: none;
+  }
+
+  .yn-stat-card:hover {
+    transform: none;
+  }
+}

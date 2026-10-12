@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="YunNian 云辇">
+  <title>YunNian 云辇</title>
+  <defs>
+    <linearGradient id="ynBrand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff8a2b" />
+      <stop offset="1" stop-color="#ff6a00" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#ynBrand)" />
+  <g transform="translate(14.5 13.5) scale(1.5)">
+    <path
+      fill="#ffffff"
+      d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"
+    />
+  </g>
+</svg>

@@ -1,0 +1,210 @@
+# YunNian 云辇平台 · 后端配置（示例）
+# 复制为 config.yaml 并填入真实值后使用；config.yaml 已被 .gitignore 排除，不会入库。
+#
+# 加载顺序：内置默认值 → 本文件 → 环境变量（YUNNIAN_ 前缀）。
+# 敏感项（JWT 密钥、加密主密钥、下游密码）**不要写进本文件并提交**，
+# 用 ${VAR} 占位或直接走环境变量注入。
+# 注意：未定义的环境变量会原样保留（不会静默变成空串），便于发现"忘了注入"。
+
+app:
+  name: yunnian
+  env: dev
+  httpAddr: ":8080"
+  basePath: "/api/v1"
+  # 前端单文件产物目录；留空则不托管静态资源（生产一般由 Nginx 托管）
+  staticDir: "../frontend/dist"
+  corsOrigins:
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+    - "http://localhost:8080"
+  shutdownTimeout: 10s
+
+log:
+  level: info
+  format: text
+
+database:
+  # 本地开发用 Docker 起的 MySQL 8（见仓库根目录 docker-compose.dev.yml）
+  driver: mysql
+  dsn: "user:password@tcp(127.0.0.1:3306)/yunnian?charset=utf8mb4&parseTime=true&loc=Local"
+  # driver=sqlite 时生效（零依赖启动，便于快速验证）
+  sqlitePath: "./data/yunnian.db"
+  maxOpenConns: 50
+  maxIdleConns: 10
+  connMaxLifetime: 1h
+  slowThreshold: 300ms
+  autoMigrate: true
+  # 首次启动写入种子数据（20 个项目 / 5 个环境 / 构建与部署记录）。
+  # 已有用户数据时会自动跳过，不会覆盖。
+  seed: true
+
+redis:
+  # 本地 Docker 起的 Redis 7（见 docker-compose.dev.yml）。无密码。
+  enabled: true
+  addr: "127.0.0.1:6379"
+  username: ""
+  password: ""
+  db: 0
+  prefix: "yn:"
+  logStreamTTL: 24h
+  deployLockTTL: 30m
+  sessionTTL: 2h
+
+auth:
+  # 这里是内置的开发密钥（明文可见 = 已被公开）。它的作用不是"能用"，
+  # 而是让 app.env=prod 时 Validate 能识别出"你还在用开发密钥"并拒绝启动。
+  # 生产：用环境变量 YUNNIAN_JWT_SECRET 注入随机密钥覆盖本项。
+  jwtSecret: "yunnian-dev-only-jwt-secret-please-change"
+  issuer: yunnian
+  accessTokenTTL: 2h
+  refreshTokenTTL: 336h
+  bcryptCost: 10
+  loginFailLimit: 5
+  loginFailWindow: 5m
+  oidc:
+    # 未接入 SSO 时保持 false：/auth/oidc/* 会返回明确的「未接入」错误，
+    # 前端据此隐藏 SSO 入口，而不是点了没反应。
+    enabled: false
+    issuer: ""
+    clientId: ""
+    clientSecret: ""
+    redirectUrl: ""
+    scopes: "openid profile email"
+
+security:
+  # 用于加密凭证与模型通道密钥（AES-256-GCM）。同样是可公开的开发密钥，
+  # app.env=prod 时会拒绝启动；生产用 YUNNIAN_MASTER_KEY 覆盖。
+  masterKey: "yunnian-dev-only-master-key-please-change"
+
+runner:
+  # inline = 平台进程内执行（单机/原型阶段）；agent = 独立 Runner 领取任务。
+  mode: inline
+  # 构建这件事怎么发生：
+  #   docker    真跑 docker build / push（本机即构建机）—— 默认；
+  #   simulated 本地模拟，只打日志，**不产出镜像、不产出 digest**，仅供本地开发把编排链路跑通。
+  # ⚠️ 选 simulated 时构建记录里的"成功"是假的（仓库里没有镜像），界面上会标「本地模拟」。
+  executor: docker
+  # 构建工作根目录。留空用系统临时目录。
+  # ⚠️ 以容器方式挂 docker.sock 跑 Agent 时，这个目录必须**按原路径**挂进容器，
+  #    否则 docker daemon 在自己文件系统上找不到它（报的错与"目录不存在"毫无关系，很难查）。
+  buildWorkRoot: ""
+  # 目标平台。**不要为了"能跑"改成 arm64**：目标服务跑在 x86_64 上，
+  # 构建出 arm64 镜像推到生产会直接 exec format error，而且要到容器起不来才发现。
+  buildPlatform: linux/amd64
+  agentId: "runner-local"
+  buildConcurrency: 3
+  deployConcurrency: 1
+  pollInterval: 2s
+  buildTimeout: 30m
+  deployTimeout: 15m
+  maxLogBytes: 52428800 # 50MB
+  keepAlive: 10s
+
+integration:
+  # 三个下游全部 enabled=false 时走内置本地实现：
+  # 平台在没有 Harbor / GitLab / K8s 的环境里也能把编排闭环跑通，
+  # 接口响应里的 source 字段会标明"当前是本地模拟"。
+  harbor:
+    # 开启后，构建成功时平台会拿日志里解析出的 repo:tag 去仓库核对，
+    # 把 digest / 镜像大小 / 架构回填进 image_record（这三个值日志里没有）。
+    enabled: true
+    # 平台主动去问的地址。注意读的是 /v2/（OCI Distribution 协议），
+    # **不是** Harbor 的 /api/v2.0 管理接口 —— 实测这台仓库只对外暴露了
+    # registry 组件（:5000），/api/v2.0/systeminfo 在 :5000/:443/:80 上全是 404。
+    baseUrl: "https://registry.example.com:5000"
+    # 日志 / 库里出现的镜像地址中的 registry 部分。只有与上面是**同一个仓库**时，
+    # 平台才会拿它去核对并回填；其它地址一律不碰（不同仓库里同名 repo 内容可能完全不同）。
+    registry: "registry.example.com:5000"
+    # 该仓库对 public 项目允许匿名 pull，读 tag / digest 不需要账号，所以先留空。
+    # 将来接入 private 项目、或要做镜像清理时再填 robot 账号（只给 pull 权限即可，
+    # 平台目前只读不写）。
+    username: ""
+    password: ""
+    insecure: false
+    timeout: 10s
+
+  gitlab:
+    enabled: false
+    baseUrl: "https://gitlab.yunnian.internal"
+    token: ""
+    timeout: 10s
+
+  kubernetes:
+    # 开启后走真实集群（client-go）。**凭据不在这个文件里**：
+    # 它在「系统管理 › 集群接入」页导入，加密存 secret_credential 表，
+    # 由装配层按环境引用的集群解出来。下面 clusters 只是没有 DB 来源时的兜底。
+    #
+    # 关闭时走 LocalCluster，而它**不模拟成功**：读接口如实返回"读不到"，
+    # 写接口一律报错。这是刻意的——"部署显示已完成、集群毫无变化"比报错危险得多。
+    enabled: true
+    timeout: 15s
+    clusters:
+      - key: "k8s-test-01"
+        name: "测试集群"
+        apiServer: "https://k8s-test-01.yunnian.internal:6443"
+        kubeconfig: ""
+        context: ""
+        defaultNamespace: "yunnian-test"
+      - key: "k8s-prod-01"
+        name: "生产集群"
+        apiServer: "https://k8s-prod-01.yunnian.internal:6443"
+        kubeconfig: ""
+        context: ""
+        defaultNamespace: "yunnian-prod"
+
+  llm:
+    # AI 能力总开关。具体模型通道（百炼 / 千问 / DeepSeek…）在
+    # 「系统管理 › 模型设置」里落库管理，因为密钥需要脱敏回显与运行时变更。
+    enabled: true
+    defaultProvider: dashscope
+    timeout: 60s
+    maxConcurrency: 3
+
+  webhook:
+    # 代码托管推送回调密钥。留空时对应接口**直接拒绝**（403）：
+    # 一个免鉴权的 webhook 等于给公网开了一个构建触发器。
+    # 本地联调需要时用环境变量注入，例如：
+    #   YUNNIAN_WEBHOOK_GITLAB_SECRET=dev-webhook-secret ./yunnian-server
+    gitlabSecret: ""
+    githubSecret: ""
+    allowedBranches: []
+
+notify:
+  # 通知**投递**链路的平台级配置。
+  #
+  # 注意分界：渠道自己（收件人 / 机器人地址 / 订阅哪些事件）在
+  # 「系统管理 › 通知渠道」页维护，落在 notify_channel 表；
+  # 这里只放"平台以什么身份发出去"。两者变更节奏不同：
+  # 渠道是随时改的运营配置，发信服务器不是。
+  #
+  # 一期只接了邮件与钉钉两种通道（见 service/notify.go 文件头）。
+
+  # 通知正文里「查看详情」链接的前缀，供收件人点回平台。
+  # 留空则正文不带链接 —— 一个点不开的链接比没有链接更让人困惑。
+  publicBaseURL: "http://127.0.0.1:8080"
+  # 单次投递超时；对"可能自己好"的失败额外重试 retry 次（凭据错这类不重试）。
+  timeout: 10s
+  retry: 2
+  concurrency: 4
+
+  # 邮件通道。字段与常见的 MAIL_* 环境变量一一对应（见 config.go 的 NotifyEmailConfig）：
+  #   MAIL_SERVER_URL → host      MAIL_SERVER_PORT → port
+  #   MAIL_SERVER_USERNAME → username    MAIL_SERVER_PASSWORD → password
+  #   MAIL_SENDER_ADDRESS → from  MAIL_TRANSPORT_PROTOCOL → protocol
+  #   MAIL_SMTP_AUTH → auth
+  # 对方给的 MAIL_SMTP_STARTTLS_* 两项在 465 端口下不适用：smtps 是"连上即 TLS"，
+  # 没有 STARTTLS 这一步。真要换成 587 时把 protocol 改成 starttls 即可。
+  #
+  # ⚠️ password 是发信账号的授权码，敏感级别与上面的数据库密码相同。
+  #    本项目没有 git 仓库，不存在"误提交"；但换环境部署时请用环境变量覆盖：
+  #      YUNNIAN_NOTIFY_EMAIL_PASSWORD=xxx ./yunnian-server
+  email:
+    protocol: "smtps" # smtps = 465 连上即 TLS（默认，绝不默认明文）；starttls = 587
+    host: "smtp.example.com"
+    port: 465
+    username: "no-reply@example.com"
+    password: "CHANGE_ME"
+    from: "no-reply@example.com"
+    fromName: "云辇平台"
+    auth: true
+    insecureSkipVerify: false
