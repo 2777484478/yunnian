@@ -50,7 +50,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // --------------------------------------------------------------------------- 夹具

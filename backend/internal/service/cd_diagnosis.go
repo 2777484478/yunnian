@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/llm"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/llm"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // 部署失败归因：模型优先、规则兜底。**这是 CI 侧 CIService.BuildAIDiagnosis 的姊妹实现**，

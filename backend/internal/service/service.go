@@ -23,15 +23,15 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/auth"
-	"github.com/yunnian/yunnian/internal/cache"
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/crypto"
-	"github.com/yunnian/yunnian/internal/errs"
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/logstream"
-	"github.com/yunnian/yunnian/internal/model"
-	"github.com/yunnian/yunnian/internal/queue"
+	"github.com/2777484478/yunnian/internal/auth"
+	"github.com/2777484478/yunnian/internal/cache"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/crypto"
+	"github.com/2777484478/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/logstream"
+	"github.com/2777484478/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/queue"
 )
 
 // Deps 服务层依赖。

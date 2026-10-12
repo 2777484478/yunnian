@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // 归因链路里唯一"模型说了算"的一段就是解析：模型输出格式漂移是常态，

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // 本文件提供各下游的「本地实现」（local implementation）。

@@ -5,9 +5,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/yunnian/yunnian/internal/httpx"
-	"github.com/yunnian/yunnian/internal/middleware"
-	"github.com/yunnian/yunnian/internal/service"
+	"github.com/2777484478/yunnian/internal/httpx"
+	"github.com/2777484478/yunnian/internal/middleware"
+	"github.com/2777484478/yunnian/internal/service"
 )
 
 // --------------------------------------------------------------------------- 认证

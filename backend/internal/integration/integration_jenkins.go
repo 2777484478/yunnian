@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // ErrJobNotFound 目标 Job 在 Jenkins 上不存在（HTTP 404）。

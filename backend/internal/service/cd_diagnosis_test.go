@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // 本文件钉住三件"看不见但对用户很重要"的事：

@@ -9,9 +9,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/buildscript"
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/buildscript"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // 种子数据中的固定常量。

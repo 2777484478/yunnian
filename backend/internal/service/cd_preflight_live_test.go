@@ -15,8 +15,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/integration"
 )
 
 func TestLivePreflight(t *testing.T) {

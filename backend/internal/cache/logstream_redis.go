@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/yunnian/yunnian/internal/logstream"
+	"github.com/2777484478/yunnian/internal/logstream"
 )
 
 // 本文件实现基于 Redis 的日志流，是 logstream.Stream 的分布式版本。

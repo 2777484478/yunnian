@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/errs"
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/logstream"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/logstream"
 )
 
 // 本文件验证一件打真实仓库**做不出确定性复现**的事：发单前镜像预检的判定口径。

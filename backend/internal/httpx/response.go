@@ -14,7 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
-	"github.com/yunnian/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/errs"
 )
 
 const ctxTraceID = "yn.traceId"

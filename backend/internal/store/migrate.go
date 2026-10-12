@@ -1,7 +1,7 @@
 package store
 
 import (
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/model"
 	"gorm.io/gorm"
 )
 

@@ -25,16 +25,16 @@ import (
 
 	"github.com/glebarez/sqlite"
 
-	"github.com/yunnian/yunnian/internal/api"
-	"github.com/yunnian/yunnian/internal/auth"
-	"github.com/yunnian/yunnian/internal/cache"
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/crypto"
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/logstream"
-	"github.com/yunnian/yunnian/internal/queue"
-	"github.com/yunnian/yunnian/internal/service"
-	"github.com/yunnian/yunnian/internal/store"
+	"github.com/2777484478/yunnian/internal/api"
+	"github.com/2777484478/yunnian/internal/auth"
+	"github.com/2777484478/yunnian/internal/cache"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/crypto"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/logstream"
+	"github.com/2777484478/yunnian/internal/queue"
+	"github.com/2777484478/yunnian/internal/service"
+	"github.com/2777484478/yunnian/internal/store"
 )
 
 func main() {

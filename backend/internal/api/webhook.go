@@ -10,9 +10,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/yunnian/yunnian/internal/errs"
-	"github.com/yunnian/yunnian/internal/httpx"
-	"github.com/yunnian/yunnian/internal/service"
+	"github.com/2777484478/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/httpx"
+	"github.com/2777484478/yunnian/internal/service"
 )
 
 // maxWebhookBody 回调体积上限。

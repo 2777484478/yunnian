@@ -23,7 +23,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // releaseScript 释放锁：只有持有者本人（token 匹配）才能删。

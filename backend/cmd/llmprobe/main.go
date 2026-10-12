@@ -23,8 +23,8 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/crypto"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/crypto"
 )
 
 type row struct {

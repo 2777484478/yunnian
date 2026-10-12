@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // 本文件的桩注册表按 Docker Registry v2 的真实交互来应答：

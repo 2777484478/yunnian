@@ -21,11 +21,11 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/errs"
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/logstream"
-	"github.com/yunnian/yunnian/internal/model"
-	"github.com/yunnian/yunnian/internal/queue"
+	"github.com/2777484478/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/logstream"
+	"github.com/2777484478/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/queue"
 )
 
 const (

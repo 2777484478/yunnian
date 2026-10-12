@@ -6,7 +6,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // latestDeployStatus 根据服务当前状态推断「最近一次部署单」的状态，

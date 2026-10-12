@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/logstream"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/logstream"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // 本文件钉住「平台重启中断」这条通知链路。

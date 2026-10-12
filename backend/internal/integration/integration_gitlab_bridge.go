@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // GitLabConfigSource 运行期解析 GitLab 连接配置。

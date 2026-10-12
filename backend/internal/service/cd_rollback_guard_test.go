@@ -6,9 +6,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/errs"
-	"github.com/yunnian/yunnian/internal/httpx"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/httpx"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // TestResolveRollbackTarget_RejectsImageOfAnotherProject 回滚目标必须属于本服务所在的项目。

@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/model"
-	"github.com/yunnian/yunnian/internal/store"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/store"
 )
 
 // 种子数据的产品约束：**能配置 == 能收到**。

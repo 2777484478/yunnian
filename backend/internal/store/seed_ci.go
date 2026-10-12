@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // --------------------------------------------------------------------------- 环境

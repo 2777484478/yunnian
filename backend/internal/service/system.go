@@ -13,14 +13,14 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/crypto"
-	"github.com/yunnian/yunnian/internal/errs"
-	"github.com/yunnian/yunnian/internal/httpx"
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/llm"
-	"github.com/yunnian/yunnian/internal/model"
-	"github.com/yunnian/yunnian/internal/store"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/crypto"
+	"github.com/2777484478/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/httpx"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/llm"
+	"github.com/2777484478/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/store"
 )
 
 // SystemService 系统管理：统计、集成状态、配置、审计、用户角色、通知、模型通道、凭证。

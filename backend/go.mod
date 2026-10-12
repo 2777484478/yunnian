@@ -1,4 +1,4 @@
-module github.com/yunnian/yunnian
+module github.com/2777484478/yunnian
 
 go 1.26.0
 

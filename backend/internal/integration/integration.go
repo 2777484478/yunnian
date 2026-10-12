@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // --------------------------------------------------------------------------- 镜像仓库

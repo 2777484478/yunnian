@@ -8,8 +8,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/crypto"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/crypto"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // LoadClusterKubeconfig 按集群引用解析出 kubeconfig 明文。

@@ -10,8 +10,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/llm"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/llm"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // --------------------------------------------------------------------------- AI 只读工具

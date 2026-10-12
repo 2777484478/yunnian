@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // ErrJenkinsDisabled 表示"平台没有启用 Jenkins 接入"。

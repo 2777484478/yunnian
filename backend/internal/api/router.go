@@ -6,12 +6,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/yunnian/yunnian/internal/auth"
-	"github.com/yunnian/yunnian/internal/cache"
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/httpx"
-	"github.com/yunnian/yunnian/internal/middleware"
-	"github.com/yunnian/yunnian/internal/service"
+	"github.com/2777484478/yunnian/internal/auth"
+	"github.com/2777484478/yunnian/internal/cache"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/httpx"
+	"github.com/2777484478/yunnian/internal/middleware"
+	"github.com/2777484478/yunnian/internal/service"
 )
 
 // Deps HTTP 层依赖。全部由 cmd/server 装配后注入——api 包自己不读配置、不建连接。

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/config"
 )
 
 // 本文件提供真实下游的 HTTP 实现。

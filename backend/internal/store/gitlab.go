@@ -26,9 +26,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/config"
-	"github.com/yunnian/yunnian/internal/crypto"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/config"
+	"github.com/2777484478/yunnian/internal/crypto"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // GitLab 配置在 system_config 里的键名。

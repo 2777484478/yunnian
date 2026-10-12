@@ -12,15 +12,15 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/yunnian/yunnian/internal/auth"
-	"github.com/yunnian/yunnian/internal/buildscript"
-	"github.com/yunnian/yunnian/internal/errs"
-	"github.com/yunnian/yunnian/internal/httpx"
-	"github.com/yunnian/yunnian/internal/integration"
-	"github.com/yunnian/yunnian/internal/llm"
-	"github.com/yunnian/yunnian/internal/logstream"
-	"github.com/yunnian/yunnian/internal/model"
-	"github.com/yunnian/yunnian/internal/queue"
+	"github.com/2777484478/yunnian/internal/auth"
+	"github.com/2777484478/yunnian/internal/buildscript"
+	"github.com/2777484478/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/httpx"
+	"github.com/2777484478/yunnian/internal/integration"
+	"github.com/2777484478/yunnian/internal/llm"
+	"github.com/2777484478/yunnian/internal/logstream"
+	"github.com/2777484478/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/queue"
 )
 
 // CIService 持续集成：项目配置、构建、镜像。

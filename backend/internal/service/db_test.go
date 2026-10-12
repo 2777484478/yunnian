@@ -8,7 +8,7 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
-	"github.com/yunnian/yunnian/internal/store"
+	"github.com/2777484478/yunnian/internal/store"
 )
 
 // newTestDB 开一个临时 SQLite 库并建好全部表，供"需要真库但不需要真集群"的用例。

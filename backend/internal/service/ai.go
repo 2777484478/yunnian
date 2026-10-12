@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yunnian/yunnian/internal/errs"
-	"github.com/yunnian/yunnian/internal/llm"
-	"github.com/yunnian/yunnian/internal/model"
+	"github.com/2777484478/yunnian/internal/errs"
+	"github.com/2777484478/yunnian/internal/llm"
+	"github.com/2777484478/yunnian/internal/model"
 )
 
 // AIService AI 运维助手（只读 + 只读工具）。
