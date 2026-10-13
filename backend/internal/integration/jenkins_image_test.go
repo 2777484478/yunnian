@@ -101,6 +101,85 @@ func TestParsePushedImage(t *testing.T) {
 			wantRef:  "demowarning:1.2.0.1058",
 			wantTag:  "1.2.0.1058",
 		},
+		// ---- 证据②：整行就是一个完整镜像引用（Job 没开 set -x 时的唯一线索）----
+		{
+			name: "真实日志：没有 set -x，只有一行完整镜像地址 → 必须认出来",
+			log: "937c0a24da44: Layer already exists\n" +
+				"16a9861a9747: Layer already exists\n" +
+				"8dcb357d1df3: Pushed\n" +
+				"ebe10f29c4bd: Pushed\n" +
+				"1.2.0.3411: digest: sha256:c59a68d94eca3f358004215c6706f0b75fff5f489801fe46baab63de8b576bc5 size: 2001\n" +
+				"es-repo.example.com:5000/escloud/aio-mcp-server:1.2.0.3411\n",
+			wantRepo: "escloud/aio-mcp-server",
+			wantRef:  "es-repo.example.com:5000/escloud/aio-mcp-server:1.2.0.3411",
+			wantTag:  "1.2.0.3411",
+		},
+		{
+			name:     "整行地址带首尾空白也认（日志里常有缩进）",
+			log:      "   es-repo.example.com:5000/escloud/aio-mcp-server:1.2.0.3411   \n",
+			wantRepo: "aio-mcp-server",
+			wantRef:  "es-repo.example.com:5000/escloud/aio-mcp-server:1.2.0.3411",
+			wantTag:  "1.2.0.3411",
+		},
+		{
+			name: "两种证据混排：保持日志顺序，同名取最后一次",
+			log: "+ docker push es-repo.example.com:5000/escloud/demowarning:1.2.0.1057\n" +
+				"es-repo.example.com:5000/escloud/demowarning:1.2.0.1058\n",
+			wantRepo: "demowarning",
+			wantRef:  "es-repo.example.com:5000/escloud/demowarning:1.2.0.1058",
+			wantTag:  "1.2.0.1058",
+		},
+		{
+			name: "整行引用与辅助镜像混排：仍取与项目同名的那个",
+			log: "es-repo.example.com:5000/library/build-base:2024.03\n" +
+				"es-repo.example.com:5000/escloud/demowarning:1.2.0.1058\n",
+			wantRepo: "demowarning",
+			wantRef:  "es-repo.example.com:5000/escloud/demowarning:1.2.0.1058",
+			wantTag:  "1.2.0.1058",
+		},
+		// ---- 反例：日志里"看着像镜像"但其实不是的东西，一个都不能认 ----
+		{
+			name:     "反例：时间戳不是镜像（没有斜杠）",
+			log:      "11:37:35\n11:37:19\n",
+			wantRepo: "aio-mcp-server",
+			wantRef:  "",
+			wantTag:  "",
+		},
+		{
+			name:     "反例：URL 不是镜像（带 scheme）",
+			log:      "http://47.100.239.15:22691/job/x/40/console\n",
+			wantRepo: "aio-mcp-server",
+			wantRef:  "",
+			wantTag:  "",
+		},
+		{
+			name:     "反例：绝对路径不是镜像（斜杠在行首）",
+			log:      "/root/images/demowarning/ver.config\n",
+			wantRepo: "demowarning",
+			wantRef:  "",
+			wantTag:  "",
+		},
+		{
+			name:     "反例：push 的摘要行不是镜像（行内有空白）",
+			log:      "1.2.0.3411: digest: sha256:c59a68d94eca3f358004215c6706f0b75fff5f489801fe46baab63de8b576bc5 size: 2001\n",
+			wantRepo: "aio-mcp-server",
+			wantRef:  "",
+			wantTag:  "",
+		},
+		{
+			name:     "反例：The push refers to a repository [...] 不带 tag，不是版本号",
+			log:      "The push refers to a repository [es-repo.example.com:5000/escloud/aio-mcp-server]\n",
+			wantRepo: "aio-mcp-server",
+			wantRef:  "",
+			wantTag:  "",
+		},
+		{
+			name:     "反例：单独一行完整地址但不带 tag（推的是 latest）",
+			log:      "es-repo.example.com:5000/escloud/aio-mcp-server\n",
+			wantRepo: "aio-mcp-server",
+			wantRef:  "",
+			wantTag:  "",
+		},
 	}
 
 	for _, c := range cases {

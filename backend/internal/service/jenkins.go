@@ -568,17 +568,35 @@ func (s *CIService) runJenkinsBuild(taskCtx context.Context, buildID uint64, pro
 
 		fin := now()
 		duration := uint32(fin.Sub(started).Seconds())
+
+		// ⚠️ Jenkins 上"构建成功"≠ 平台拿到了产物。
+		//
+		// 这类 Job 的核心产物就是镜像，而平台**只能从日志里**认出它。认不出来有两种可能：
+		// Job 根本没推镜像，或者推了但日志里没有可识别的地址。**两种都不该显示"成功"**——
+		// 界面上会留下「成功 + 镜像 —」，项目列表 / 镜像列表 / CD 选版本三处都看不到它，
+		// 用户直到要发版、发现一个版本都选不到时才会撞上（实测就是这么撞上的）。
+		//
+		// 所以：先尝试登记产物，登记不到就把这次构建改判失败，并给出可操作的下一步。
+		// 顺序很关键——必须在写终态**之前**改，否则库里会先落一个 success 再改成 failed，
+		// 日志里出现两个互相矛盾的终态。
+		//
+		// 为什么不再要求 `len(pushedLines) > 0`：以前那条件是"没有候选就不白跑一次解析"的
+		// 优化，而现在"解析不出结果"本身就是要判定的结论，必须每次都试。
+		if status == "success" {
+			if !s.recordJenkinsImage(fctx, buildID, projectKey, strings.Join(pushedLines, "\n"), log) {
+				status = "failed"
+				stage = "未识别到镜像产物"
+				code = "JENKINS_NO_IMAGE"
+				msg = jenkinsNoImageMessage
+			}
+		}
+
 		pct := uint8(0)
 		if status == "success" {
 			pct = 100
 		}
 		s.finishBuild(fctx, buildID, status, stage, pct, duration, code, msg, nil, fin)
 		s.persistBuildLogs(fctx, buildID, collected)
-		if status == "success" && len(pushedLines) > 0 {
-			// 构建成功才登记镜像。日志里出现 push 只说明"执行过这条命令"，
-			// 构建最终失败时那次推送很可能并没有成功——登记了就等于编造产物。
-			s.recordJenkinsImage(fctx, buildID, projectKey, strings.Join(pushedLines, "\n"), log)
-		}
 		_ = s.deps.Stream.Finish(fctx, streamKey, status)
 	}
 
@@ -722,15 +740,17 @@ func (s *CIService) runJenkinsBuild(taskCtx context.Context, buildID uint64, pro
 // recordJenkinsImage 把 Jenkins 构建日志里读到的镜像登记成平台的一个镜像版本。
 //
 // 为什么非做不可：Jenkins 不提供任何接口能问出"这次产出的是哪个镜像"，日志里那句
-// `docker push` 是唯一的事实来源。不解析它，这次构建在平台上就只有"成功"两个字——
-// 项目列表的「最近镜像版本」、镜像列表、CD 选镜像版本全都看不到它，
-// 而它明明已经推到仓库里了。
+// `docker push`（或一行完整的镜像地址）是唯一的事实来源。不解析它，这次构建在平台上
+// 就只有"成功"两个字——项目列表的「最近镜像版本」、镜像列表、CD 选镜像版本全都看不到它。
 //
 // digest、镜像大小与架构日志里没有，只能问仓库（见 resolveImageMeta）。
 // 问不到就留空（界面显示"—"），也不要填一个看起来合理的假值——
 // 那种值会被 CD 当真用到部署上去。
 //
-// 返回值表示"这次是否登记了一个镜像版本"，供启动补偿统计用。
+// 返回值有两处用途，**不要只看成"统计"**：
+//   - 调用方（finish）据它决定这次构建是 success 还是 failed ——
+//     认不出产物就不能算成功，否则界面会出现「成功 + 镜像 —」；
+//   - 启动补偿 BackfillJenkinsImages 据它统计补登记了多少条。
 func (s *CIService) recordJenkinsImage(ctx context.Context, buildID uint64, projectKey, pushLog string, log *slog.Logger) bool {
 	var rec model.BuildRecord
 	if err := s.db(ctx).First(&rec, buildID).Error; err != nil {
@@ -751,8 +771,10 @@ func (s *CIService) recordJenkinsImage(ctx context.Context, buildID uint64, proj
 
 	ref, tag := integration.ParsePushedImage(pushLog, wantRepo)
 	if ref == "" {
-		// 如实记录：这类 Job 可能根本不推镜像（只做编译），不是错误。
-		log.Info("构建成功，但日志里没有可识别的镜像推送，本次不登记镜像版本", "project", projectKey)
+		// 认不出产物。两个调用方都据此做判断，所以这里只说"没登记"，不下结论：
+		//   - runJenkinsBuild 会把它变成一次失败（界面上不能留「成功 + 镜像 —」）；
+		//   - BackfillJenkinsImages 只是补登记，历史构建不会被改判。
+		log.Warn("日志里没有可识别的镜像推送，未登记镜像版本", "project", projectKey)
 		return false
 	}
 
@@ -1031,6 +1053,17 @@ func (s *CIService) appendJenkinsLog(ctx context.Context, streamKey, level, line
 }
 
 // --------------------------------------------------------------------------- 小工具
+
+// jenkinsNoImageMessage：Jenkins 构建成功、但平台认不出产物镜像时，判失败的依据。
+//
+// 必须给出**可操作的下一步**：只写"失败"用户不知道要改什么。平台读日志的规则是
+// 两种形态任一即可 —— 有 `docker push <完整地址>` 那一行（`set -x` 回显也算），
+// 或者**有一行只放完整镜像地址**。后者不依赖任何 shell 选项，是最稳的做法。
+const jenkinsNoImageMessage = "Jenkins 上这次构建执行成功，但平台没能从日志里认出产出的镜像地址，" +
+	"因此没有登记任何版本 —— 这样部署时一个版本都选不到，所以本次判为失败。" +
+	"请让 Job 在推送完成后把**完整镜像地址单独打印一行**（形如 " +
+	"<仓库地址>/<镜像名>:<版本号>，整行只放这一个地址、不要带别的前后缀），" +
+	"或保留 `docker push <完整地址>` 那一行（脚本里 set -x 回显出来的也算）。"
 
 // jenkinsStatusView 把 Jenkins 的 result 映射成平台的状态、阶段文案与错误码。
 //
