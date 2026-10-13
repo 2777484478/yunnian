@@ -1497,7 +1497,10 @@ const ProjectList: React.FC = () => {
           scroll={{ x: 1560 }}
           rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
           pagination={{
-            pageSize: 10,
+            // 20：项目从 6 个涨到 14 个之后，10 条/页已经装不下（新项目排在前面，
+            // 老项目被挤到第 2 页，用户找 aioai 时以为它不见了 —— 实测踩过）。
+            // 接口那边是**一次拉全量**（pageSize 200，见上面的注释），所以放大这里不增加请求。
+            pageSize: 20,
             showSizeChanger: true,
             showTotal: (t) => `共 ${t} 条`,
             size: 'default',
