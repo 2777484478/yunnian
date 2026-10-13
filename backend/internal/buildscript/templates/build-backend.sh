@@ -3,15 +3,20 @@
 # 云辇 · 自建构建脚本（后端 / Java · Maven）
 #
 # 执行环境
-#   平台已经 cd 到这个项目本次构建的**空白工作目录**，
-#   PATH 里有 git 与 docker，代码仓库的账号密码已配好（直接 clone 即可，不用写凭据）。
+#   平台已经 cd 到这个项目本次构建的**空白工作目录**，PATH 里有 git 与 docker，
+#   代码仓库的账号密码已配好（直接 clone 即可，不用写凭据）。
 #   构建机上**不需要装 JDK / Maven** —— 编译在下面的编译容器里跑。
 #
 #   ⚠️ 这个「空白工作目录」每次构建都会被平台**整个删掉重建**，所以代码和依赖
 #      **不能**放在它里面。本脚本把两者都落在**宿主机持久化目录** HOST_BASE 下：
 #        $HOST_BASE/src/<项目>   各项目的代码（按项目分目录，互不干扰）
 #        $HOST_BASE/m2           Maven 本地仓库（所有项目共用，依赖只下一次）
-#      好处：① 代码增量更新，不用每次整仓重拉；② m2 依赖跨构建 / 跨项目复用。
+#
+#   ⚠️ 打包方式：**优先用仓库自带的 Dockerfile**；仓库里没有时，**脚本自动生成一份**
+#      （FROM 运行时镜像 + ADD 编译产物），仓库不必为此改动。
+#      注意：Dockerfile 里 `ADD <jar>` 的路径是**相对构建上下文根**的 ——
+#      本脚本会专门建一个只含「Dockerfile + 编译产物」的干净上下文，所以
+#      哪怕 jar 在仓库里位于 `子模块/target/` 下，Dockerfile 里直接写文件名即可。
 #
 # 可用变量（平台注入，出现在日志里会自动打码成 ***）
 #   $YUNNIAN_REPO       代码仓库地址          http://gitlab.example.com/group/app.git
@@ -36,17 +41,23 @@
 set -e
 
 # ---------------------------------------------------------------- 按项目改这几行
-BUILD_IMAGE="es-repo.example.com:5000/escloud/maven:3.6.3-jdk21"  # 编译环境镜像（JDK21 + Maven 3.6.3）
-BUILD_CMD="mvn -B -DskipTests clean package"                             # 编译命令
-DOCKERFILE="Dockerfile"                                                  # 打包用哪个 Dockerfile
+BUILD_IMAGE="es-repo.example.com:5000/escloud/maven:3.6.3-jdk21"   # 编译环境镜像（JDK21 + Maven 3.6.3）
+BUILD_CMD="mvn -B -DskipTests clean package"                       # 编译命令
+DOCKERFILE_PATH="Dockerfile"                                       # 仓库自带 Dockerfile 的路径（有就用它）
+APP_JAR="target/*.jar"                                             # 编译产物（相对仓库根）：
+                                                                   #   单模块 → target/*.jar
+                                                                   #   多模块 → 子模块/target/xxx.jar
+
+# 仓库**没有** Dockerfile 时，用下面几项自动生成一份最小的（仓库有则忽略）：
+RUNTIME_IMAGE="es-repo.example.com:5000/escloud/openjdk:21.0.11_10"  # 运行时基础镜像
+APP_PORT="8080"                                                      # 容器监听端口（只写进 EXPOSE，不影响运行）
+APP_CMD="java -jar /app.jar"                                         # 容器启动命令
 
 # 宿主机持久化根目录：代码与 m2 都落在这里。
 #   默认 $HOME/yunnian-build（本机即 /Users/liudongchneg/yunnian-build）。
-#   想放别处，在项目的「构建参数」里加一项 YUNNIAN_HOST_BASE=<绝对路径> 即可覆盖，
-#   不用改这段脚本。
+#   想放别处，在项目的「构建参数」里加一项 YUNNIAN_HOST_BASE=<绝对路径> 即可覆盖。
 # ⚠️ 必须是**构建机 docker 能访问的真实路径**：
-#     macOS 要在 Docker Desktop 的 File Sharing 里（/Users 默认已共享）；
-#     Linux 上要有写权限。路径不存在也没关系，下面会 mkdir -p 建出来。
+#     macOS 要在 Docker Desktop 的 File Sharing 里（/Users 默认已共享）；Linux 上要有写权限。
 HOST_BASE="${YUNNIAN_HOST_BASE:-$HOME/yunnian-build}"
 CODE_DIR="$HOST_BASE/src/$YUNNIAN_PROJECT"
 M2_DIR="$HOST_BASE/m2"
@@ -109,17 +120,50 @@ docker run --rm \
   "$BUILD_IMAGE" \
   sh -c "$BUILD_CMD"
 
-echo "===== [5/6] 打包镜像 ====="
-# 如果你的 Dockerfile 里写死了产物文件名（比如 `ADD app-1.0.0.jar /app.jar`），
-# 而 Maven 打出来的 jar 带版本号，就在这行前面加一句改名，例如：
-#   cp target/app-*.jar target/app-1.0.0.jar
-#
+echo "===== [5/6] 组装构建上下文并打包镜像 ====="
+# 构建上下文 = 临时工作目录下一个**干净的**目录，只放「Dockerfile + 编译产物」。
+# 为什么不直接在仓库根打包：
+#   ① 仓库是持久化的，往里写产物/文件会污染它（还会被 git status 看到）；
+#   ② 只把需要的产物放进去，上下文小、打包快（不会把整个仓库打包传给 daemon）。
+CTX="$YUNNIAN_WORKDIR/build-ctx"
+rm -rf "$CTX"
+mkdir -p "$CTX"
+
+# 1) 把编译产物复制进上下文根，**保持原文件名** —— Dockerfile 里的 `ADD <文件名>`
+#    就是按这个名字相对上下文根找它的。
+JAR=$(ls $CODE_DIR/$APP_JAR 2>/dev/null | head -1)
+if [ -z "$JAR" ] || [ ! -f "$JAR" ]; then
+  echo "❌ 找不到编译产物：$APP_JAR（检查 APP_JAR 或 BUILD_CMD）" >&2
+  exit 1
+fi
+JAR_NAME=$(basename "$JAR")
+cp "$JAR" "$CTX/$JAR_NAME"
+echo "编译产物：$JAR_NAME"
+
+# 2) 准备 Dockerfile：仓库自带优先；没有就自动生成一份最小的。
+if [ -f "$CODE_DIR/$DOCKERFILE_PATH" ]; then
+  cp "$CODE_DIR/$DOCKERFILE_PATH" "$CTX/Dockerfile"
+  echo "使用仓库自带的 Dockerfile：$DOCKERFILE_PATH"
+else
+  cat > "$CTX/Dockerfile" <<EOF
+FROM $RUNTIME_IMAGE
+EXPOSE $APP_PORT
+ADD $JAR_NAME /app.jar
+RUN sh -c 'touch /app.jar'
+CMD ["sh", "-c", "$APP_CMD"]
+EOF
+  echo "仓库未自带 Dockerfile，已自动生成一份："
+fi
+echo "--- 本次使用的 Dockerfile ---"
+cat "$CTX/Dockerfile"
+echo "-----------------------------"
+
 # ⚠️ `--provenance=false` 不能删。BuildKit 默认会给镜像挂上 attestation，
 # 于是产出的其实是一个 **manifest list**（多出一个 unknown/unknown 平台条目）。
 # 本地看不出任何异常，但 `docker push` 到老一些的 registry（含 Harbor）会直接
 # 报 `error from registry: manifest invalid` —— 失败点离原因很远，很难查。
 # 平台自己的「自带 Dockerfile」构建路径同样带着这个参数。
-docker build --platform "$YUNNIAN_PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$YUNNIAN_IMAGE" .
+docker build --platform "$YUNNIAN_PLATFORM" --provenance=false -f "$CTX/Dockerfile" -t "$YUNNIAN_IMAGE" "$CTX"
 
 echo "===== [6/6] 推送镜像 ====="
 docker push "$YUNNIAN_IMAGE"
