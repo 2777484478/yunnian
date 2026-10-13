@@ -24,7 +24,7 @@
 #   $YUNNIAN_COMMIT     本次构建提交号        3f2a91c
 #   $YUNNIAN_PROJECT    项目 key               aio-mcp-server
 #   $YUNNIAN_BUILD_NO   本项目第几次构建      7          ← 每构建一次 +1，可用来做自增版本号
-#   $YUNNIAN_REGISTRY   镜像仓库地址          es-repo.example.com:5000
+#   $YUNNIAN_REGISTRY   镜像仓库地址          registry.example.com:5000
 #   $YUNNIAN_IMAGE_NAME 镜像名（不含仓库/tag） escloud/esc-mcp-bridge
 #   $YUNNIAN_TAG        本次 tag（按 Tag 规则算出）v7
 #   $YUNNIAN_IMAGE      完整镜像地址，= $YUNNIAN_REGISTRY/$YUNNIAN_IMAGE_NAME:$YUNNIAN_TAG
@@ -41,7 +41,18 @@
 set -e
 
 # ---------------------------------------------------------------- 按项目改这几行
-BUILD_IMAGE="es-repo.example.com:5000/escloud/maven:3.6.3-jdk21"   # 编译环境镜像（JDK21 + Maven 3.6.3）
+# 基础镜像所在的仓库：**从平台注入的 $YUNNIAN_REGISTRY 派生，不要写死主机名**。
+#
+# 写死有两个后果：
+#   1. 这份模板会进公开仓库，真实内网地址不能写进去，只能放一个占位域名 —— 而占位域名
+#      不可解析：谁点了「恢复默认脚本」把它照抄下来，构建必然挂在拉/跑编译镜像那一步，
+#      且报错与"这个域名是我编的"毫无关系（[3/6] 的 `docker pull ... ||` 容忍分支
+#      还会把第一次失败吞掉，更难查）；
+#   2. 换一台 registry（或多套环境各有一套）就得回来改脚本，而它本该跟着项目配置走。
+# `$YUNNIAN_REGISTRY` 由平台按项目的「镜像仓库地址」注入，正是这件事的真相来源。
+# 下面 `/escloud/` 是这两个基础镜像在仓库里的项目名，按你们仓库的实际情况改。
+BASE_REGISTRY="${YUNNIAN_REGISTRY:-registry.example.com}"
+BUILD_IMAGE="$BASE_REGISTRY/escloud/maven:3.6.3-jdk21"      # 编译环境镜像（JDK21 + Maven 3.6.3）
 BUILD_CMD="mvn -B -DskipTests clean package"                       # 编译命令
 DOCKERFILE_PATH="Dockerfile"                                       # 仓库自带 Dockerfile 的路径（有就用它）
 APP_JAR="target/*.jar"                                             # 编译产物（相对仓库根）：
@@ -49,7 +60,7 @@ APP_JAR="target/*.jar"                                             # 编译产�
                                                                    #   多模块 → 子模块/target/xxx.jar
 
 # 仓库**没有** Dockerfile 时，用下面几项自动生成一份最小的（仓库有则忽略）：
-RUNTIME_IMAGE="es-repo.example.com:5000/escloud/openjdk:21.0.11_10"  # 运行时基础镜像
+RUNTIME_IMAGE="$BASE_REGISTRY/escloud/openjdk:21.0.11_10"           # 运行时基础镜像
 APP_PORT="8080"                                                      # 容器监听端口（只写进 EXPOSE，不影响运行）
 APP_CMD="java -jar /app.jar"                                         # 容器启动命令
 
