@@ -1327,8 +1327,18 @@ func (s *CDService) DeleteService(ctx context.Context, id uint64, c Caller) erro
 		return err
 	}
 	// 先删集群侧：删不掉就整体失败，避免"平台里没了、集群里还在跑"。
+	//
+	// ⚠️ 但「集群里**本来就没有**这个工作负载」是例外，不算失败：下线的目标状态
+	// （该服务不再有实例在跑）**已经达成**。这不是理论情况 —— 项目被删掉后留下的
+	// 「幽灵服务实例」（工作负载从没建出来过）唯一的清理入口就是这里，
+	// 卡住的代价是它在环境的服务列表里永远挂着「集群中不存在」、点下线又失败。
 	if err := s.deps.Up.Cluster.Scale(ctx, workloadRefOf(env, svc.WorkloadName), 0); err != nil {
-		return upstreamError(err, "缩容到 0 失败，已中止下线操作")
+		var notFound *integration.WorkloadNotFoundError
+		if !errors.As(err, &notFound) {
+			return upstreamError(err, "缩容到 0 失败，已中止下线操作")
+		}
+		s.log("cd").Info("下线服务：集群里本来就没有该工作负载，跳过缩容、直接清理平台记录",
+			"env", svc.EnvKey, "project", svc.ProjectKey, "workload", svc.WorkloadName)
 	}
 	if err := s.db(ctx).Delete(&model.ServiceInstance{}, svc.ID).Error; err != nil {
 		return errs.Internalf(err, "删除服务实例失败")

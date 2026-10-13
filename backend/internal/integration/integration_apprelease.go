@@ -199,6 +199,26 @@ type appReleaseHandle struct {
 	HPAName string
 }
 
+// WorkloadNotFoundError 目标工作负载在集群里**不存在**。
+//
+// 为什么要单独一个类型，而不是一条普通错误：调用方必须能把「集群里**本来就没有**」
+// 与「改不动」分开。最典型的是「下线服务」—— 它的目标是"这个服务不再有实例在跑"，
+// 而目标工作负载不存在时这个状态**已经达成**了，不该因此把自己卡死。
+//
+// 实测就是被这条卡住的：项目删掉之后留下的「幽灵服务实例」（工作负载从来没建出来过），
+// 因为下线永远失败而无法从环境里清掉，只能靠手工改库。
+type WorkloadNotFoundError struct {
+	Namespace string
+	Workload  string
+}
+
+func (e *WorkloadNotFoundError) Error() string {
+	return fmt.Sprintf(
+		"集群里没有工作负载 %s/%s：变更通道只负责修改已存在的工作负载，"+
+			"它不会创建 Deployment。请先确认环境 namespace 是否配对，或用运维手段把它部署出来",
+		e.Namespace, e.Workload)
+}
+
 // ensureAppRelease 保证目标工作负载有且只有一个可用的 CR，返回它。
 //
 // 幂等：已有 CR 就直接用，不会重复创建。四种情形分别处置：
@@ -221,10 +241,8 @@ func (k *K8sCluster) ensureAppRelease(
 		if apierrors.IsNotFound(err) {
 			// 这是 operator 的硬约束（只 patch 不 create），不是平台的临时限制。
 			// 说得具体一点：用户需要的是"去把这个工作负载建出来"，而不是"再试一次"。
-			return nil, fmt.Errorf(
-				"集群里没有工作负载 %s/%s：变更通道只负责修改已存在的工作负载，"+
-					"它不会创建 Deployment。请先确认环境 namespace 是否配对，或用运维手段把它部署出来",
-				ref.Namespace, ref.Workload)
+			// 用专门的类型返回，好让「下线服务」这类"目标状态其实已达成"的调用方能分辨。
+			return nil, &WorkloadNotFoundError{Namespace: ref.Namespace, Workload: ref.Workload}
 		}
 		return nil, fmt.Errorf("读取工作负载 %s/%s 失败：%w", ref.Namespace, ref.Workload, err)
 	}
