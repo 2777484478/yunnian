@@ -31,11 +31,13 @@ import {
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { PageHeader, SectionCard, StatCard } from '@/components/ui';
+import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { LogPanel } from '@/components/LogPanel';
 import FailureReason from '@/components/FailureReason';
 import { BuildStatusTag, ImageText, ProjectTypeTag } from '@/components/StatusTag';
 import { buildApi, projectApi, systemApi } from '@/api';
 import { useApi } from '@/hooks/useApi';
+import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
 import { useJobLogs } from '@/hooks/useJobLogs';
 import { humanDuration } from '@/utils/format';
 import type { BuildRecord, BuildStatus, ProjectType } from '@/types';
@@ -132,6 +134,33 @@ const BuildList: React.FC = () => {
     liveApi.refresh();
     statsApi.refresh();
   };
+
+  // ---------------------------------------------------------- 自动刷新
+  // 构建状态是**平台后台在改**的：页面自己不动，就会永远停在"构建中"，
+  // 用户只能一遍遍按 F5（实测就是这么被提出来的）。
+  //
+  // 只轮询"别处会改"的三份数据：构建列表、正在构建面板、今日统计。
+  // ⚠️ `projectsApi`（筛选下拉的候选项目）是**纳管清单**、不会自己变，
+  // 刻意不轮询 —— 每 3 秒为一个下拉框重拉 200 条项目纯属白烧。
+  //
+  // ⚠️ 用一个**独立 scope**，不沿用全局键（项目列表页用的就是全局键）：
+  // 曾经在项目列表把自动刷新关掉过的人，进到这一页不能连开关都是关的 ——
+  // 那看着跟"这页根本没做自动刷新"一模一样，排查时还会被误判成按钮没渲染。
+  const [autoRefreshMs, setAutoRefreshMs] = useAutoRefreshPref(3000, 'ci-builds');
+  useAutoRefresh({
+    enabled: autoRefreshMs !== null,
+    intervalMs: autoRefreshMs ?? 3000,
+    // 走静默刷新：每 3 秒闪一次加载遮罩比不刷新更难受；后台那一拍失败也不该
+    // 把整页打成错误态（"网络抖一下，列表没了"）—— 手上那份数据其实还是对的。
+    // 失败只记进控件里那句话，下一次成功自动清掉。
+    onTick: () => {
+      buildsApi.refreshSilent();
+      liveApi.refreshSilent();
+      statsApi.refreshSilent();
+    },
+    // 三个接口取"任一在飞"就跳过这一拍，否则慢后端下会滚出一串在飞请求
+    isBusy: () => buildsApi.pendingRef.current || liveApi.pendingRef.current || statsApi.pendingRef.current,
+  });
 
   // ------------------------------------------------------------ 日志抽屉
   const [logTarget, setLogTarget] = useState<BuildRecord | null>(null);
@@ -340,6 +369,18 @@ const BuildList: React.FC = () => {
         extra={
           <Space>
             <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={buildsApi.loading} />
+            <AutoRefreshButton
+              value={autoRefreshMs}
+              onChange={setAutoRefreshMs}
+              updatedAt={buildsApi.updatedAt}
+              // 三个接口任一失败都要说出来：只说主列表的话，"正在构建面板拉挂了"
+              // 会被这行字掩盖成"一切正常"，而那正是用户最盯着看的那块。
+              errorText={
+                buildsApi.silentError?.message ||
+                liveApi.silentError?.message ||
+                statsApi.silentError?.message
+              }
+            />
             <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => message.info('请前往「项目管理」选择项目触发编译')}>
               新建构建
             </Button>
