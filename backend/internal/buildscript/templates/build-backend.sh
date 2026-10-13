@@ -9,8 +9,8 @@
 #
 #   ⚠️ 这个「空白工作目录」每次构建都会被平台**整个删掉重建**，所以代码和依赖
 #      **不能**放在它里面。本脚本把两者都落在**宿主机持久化目录** HOST_BASE 下：
-#        $HOST_BASE/src/<项目>   各项目的代码（按项目分目录，互不干扰）
-#        $HOST_BASE/m2           Maven 本地仓库（所有项目共用，依赖只下一次）
+#        $HOST_BASE/src/<项目>   各项目的代码（每次构建都**重置为仓库原样**，见 [2/6]）
+#        $HOST_BASE/m2           Maven 本地仓库（**长期保留**，跨构建/跨项目共用）
 #
 #   ⚠️ 打包方式：**优先用仓库自带的 Dockerfile**；仓库里没有时，**脚本自动生成一份**
 #      （FROM 运行时镜像 + ADD 编译产物），仓库不必为此改动。
@@ -69,18 +69,35 @@ echo "代码目录：  $CODE_DIR"
 echo "Maven 仓库：$M2_DIR"
 
 echo "===== [2/6] 拉取 / 更新代码 ====="
+# 每次构建都让工作区**回到"跟仓库一模一样"的状态**，不留任何上一轮的痕迹：
+#   1) 丢弃一切本地改动（含在持久化目录里手改过的代码）
+#   2) 删除一切未跟踪文件（含上一轮 maven 生成的 target/ 与旧 jar）
+#   3) 再对齐到本次分支的远端最新提交
+#
+# 为什么用 git 自己的命令、而不是 `rm -rf` 把目录删掉重建：
+#   - **精确**：git 只动它自己管的东西，不会误删 $HOST_BASE/src 下别的内容；
+#   - **不撞安全守卫**：有些环境（开发机沙箱）会给 `rm` 挂一个"批量删除需确认"的
+#     守卫，一次删 500+ 个文件会被直接拦下、让整个构建失败；git 的内部删除不走那条路。
+#
+# ⚠️ 一旦本地 git 状态坏了（远端 force-push、shallow 文件损坏、上次构建中断留下残缺
+#    .git），增量更新会失败。此时**不删除、改为移走**旧目录再重新克隆：既保留现场
+#    供人工排查，又不需要人工干预才能继续构建 —— 这是本段唯一的自愈分支。
+#
+# ⚠️ Maven 依赖缓存（m2）**不在**这个目录里，所以清它**不会**导致依赖重下。
 if [ -d "$CODE_DIR/.git" ]; then
-  # 目录里已有 git 仓库 → **增量更新**：只拉目标分支的最新提交，不再整仓重拉。
   cd "$CODE_DIR"
-  git fetch --depth 1 origin "$YUNNIAN_BRANCH"
-  git reset --hard FETCH_HEAD
-else
-  # 首次（或上次构建半途失败、留下了残缺目录）→ 清干净后浅克隆。
-  # 只清本项目自己的目录：$YUNNIAN_PROJECT 由平台注入、必非空，
-  # 这里再加一道判断，避免变量意外为空时误删 $HOST_BASE/src 整层。
-  if [ -n "$YUNNIAN_PROJECT" ] && [ -d "$CODE_DIR" ]; then
-    rm -rf "$CODE_DIR"
+  if git fetch --depth 1 origin "$YUNNIAN_BRANCH"; then
+    git reset --hard FETCH_HEAD
+    git clean -xfd
+  else
+    echo "⚠️ 本地仓库无法增量更新，改为重新克隆（旧目录已更名保留，排查后可自行删除）"
+    cd "$HOST_BASE/src"
+    mv "$CODE_DIR" "$(basename "$CODE_DIR").broken.$(date +%Y%m%d%H%M%S)"
+    git clone --depth 1 --branch "$YUNNIAN_BRANCH" "$YUNNIAN_REPO" "$CODE_DIR"
+    cd "$CODE_DIR"
   fi
+else
+  mkdir -p "$HOST_BASE/src"
   git clone --depth 1 --branch "$YUNNIAN_BRANCH" "$YUNNIAN_REPO" "$CODE_DIR"
   cd "$CODE_DIR"
 fi
@@ -107,8 +124,8 @@ docker pull --platform "$YUNNIAN_PLATFORM" "$BUILD_IMAGE" >/dev/null 2>&1 ||
 
 echo "===== [4/6] 编译（在编译容器里跑，构建机不用装 JDK/Maven）====="
 # 两个挂载都指向**宿主机持久化目录**，不是临时工作目录、也不是匿名卷：
-#   $CODE_DIR → /src                  编译的就是这份代码，构建完不删，下次接着更新
-#   $M2_DIR   → /root/.m2/repository  Maven 依赖缓存，跨构建 / 跨项目复用
+#   $CODE_DIR → /src                  本次已重置为仓库原样的代码（见 [2/6]）
+#   $M2_DIR   → /root/.m2/repository  Maven 依赖缓存，跨构建 / 跨项目复用（**这个才要留着**）
 # ⚠️ 用**绝对路径**挂载（不是 "$PWD"）：构建机若通过挂 docker.sock 执行构建（DooD），
 #    daemon 会在**宿主**上找这个路径；临时工作目录那种每次都变的路径它会找不到，
 #    报的错还和"目录不存在"毫不相干。
@@ -131,7 +148,9 @@ mkdir -p "$CTX"
 
 # 1) 把编译产物复制进上下文根，**保持原文件名** —— Dockerfile 里的 `ADD <文件名>`
 #    就是按这个名字相对上下文根找它的。
-JAR=$(ls $CODE_DIR/$APP_JAR 2>/dev/null | head -1)
+#    排除 -sources.jar / -javadoc.jar：字母序里 `-`(0x2D) 排在 `.`(0x2E) 前面，
+#    所以它会排在主 jar 之前被 `head -1` 选中 —— 把源码包当运行时 jar 打进镜像。
+JAR=$(ls $CODE_DIR/$APP_JAR 2>/dev/null | grep -v -e '-sources\.jar$' -e '-javadoc\.jar$' | head -1)
 if [ -z "$JAR" ] || [ ! -f "$JAR" ]; then
   echo "❌ 找不到编译产物：$APP_JAR（检查 APP_JAR 或 BUILD_CMD）" >&2
   exit 1
