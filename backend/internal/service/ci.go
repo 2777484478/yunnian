@@ -2802,7 +2802,15 @@ var reBuildNo = regexp.MustCompile(`\{buildNo([+-]\d+)?\}`)
 // 就要在构建成功那一刻回写 tag，而那时镜像已经推出去了；一旦回写失败，
 // 下一个成功构建会拿到同一个 tag **覆盖掉上一个** —— 版本号不再唯一，比空洞严重得多。
 //
-// 渲染结果必须能当 Docker tag 用：只保留 [A-Za-z0-9_.-]，且截断到 128 字节。
+// ⚠️ **已知占位符的取值**会被 sanitize（只保留 [A-Za-z0-9_.-]），但**整串不 sanitize**：
+// 认不出的花括号片段（例如大小写写错的 `{buildno}`）会被**原样保留**进最终 tag，
+// 于是失败发生在 `docker build -t` 那一步、报 `invalid reference format`。
+//
+// 这是刻意的：反过来把 {} 悄悄抹掉，`v{buildno}` 会变成合法的 `vbuildno` ——
+// 构建成功、版本号却**永不递增**。一个静默的错误版本号，比一次明确的失败难查得多。
+// 所以拦截放在入口（前端表单校验，见 `ProjectList.tsx` 的 `unknownTagTokens`）。
+//
+// 返回值另截断到 128 字节。
 func renderTag(pattern, branch, commitID string, buildNo int64, at time.Time) string {
 	if strings.TrimSpace(pattern) == "" {
 		pattern = buildscript.DefaultTagPattern

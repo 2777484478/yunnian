@@ -102,11 +102,71 @@ const FORM_LABEL_WIDTH = 104;
 /** Tag 规则可用变量。与后端 renderTag 支持的一一对应，多写一个就是一句假承诺。 */
 const TAG_VARS: { name: string; desc: string }[] = [
   { name: '{buildNo}', desc: '本项目第几次构建，每次 +1（v1、v2、v3…）' },
+  {
+    // 这条不是"另一个占位符"，是 {buildNo} 的**偏移写法** —— 但必须列出来：
+    // 不列，用户就只能靠猜 `{buildNo+995}` 这种写法是否合法（实测就是这么被问的：
+    // 「你这里不显示，我怎么知道有什么规则？」）。
+    name: '{buildNo+N}',
+    desc: '给构建序号加固定偏移，版本号即可从某个数起步：{buildNo+999} → 首次构建就产出 1000，之后每次 +1（也支持 -N）',
+  },
   { name: '{branch}', desc: '分支名（release/2.6 会写成 release-2.6）' },
   { name: '{commitId}', desc: '提交号前 8 位' },
   { name: '{timestamp}', desc: '构建时间 YYYYMMDDhhmmss' },
   { name: '{date}', desc: '构建日期 YYYYMMDD' },
 ];
+
+/**
+ * `{buildNo}` / `{buildNo+999}` / `{buildNo-1}` 的匹配。
+ *
+ * 与后端 `service.renderTag`（ci.go 的 `reBuildNo`）**是同一个正则**，
+ * 改一处必须改两处，否则预览和真实 tag 会对不上。
+ *
+ * ⚠️ 只当 `.replace(...)` 的参数用（带 `g` 的正则配合 `test`/`exec` 会因 lastIndex
+ * 残留而时对时错；`replace` 每次都会把 lastIndex 归零，所以这里安全）。
+ */
+const reBuildNo = /\{buildNo([+-]\d+)?\}/g;
+
+/** 报错时列出来的可用写法。必须跟 TAG_VARS 里**真能用的**写法一致。 */
+const TAG_VAR_HINT = '{buildNo} / {buildNo±N} / {branch} / {commitId} / {timestamp} / {date}';
+
+/**
+ * 找出 Tag 规则里**认不出来、会被原样拼进镜像 tag** 的花括号片段。
+ *
+ * 为什么必须拦：后端 `renderTag` 只替换它认识的那几个占位符，**剩下的原样保留** ——
+ * 于是 `v{buildno}`（大小写写错）会拼出 `v{buildno}` 这个 tag，而 docker 不允许 tag 里
+ * 有花括号，失败发生在 `docker build -t` 那一步、报的是 `invalid reference format`，
+ * 与"你的 Tag 规则写错了"毫无关系。早一步说清楚，比让用户去查 docker 的报错划算。
+ */
+const unknownTagTokens = (pattern: string): string[] => {
+  const rest = String(pattern || '')
+    .replace(reBuildNo, '')
+    .replace('{branch}', '')
+    .replace('{commitId}', '')
+    .replace('{timestamp}', '')
+    .replace('{date}', '');
+  if (!/[{}]/.test(rest)) return [];
+  return rest.match(/\{[^}]*\}/g) ?? ['有未闭合的 { 或 }'];
+};
+
+/**
+ * 预览「下次构建会产出的 tag」。
+ *
+ * ⚠️ 这里是**前端复刻**后端 `service.renderTag`（ci.go）的口径：`{buildNo}` 支持
+ * `+N`/`-N` 内联偏移、负值夹到 0、其余占位符用固定的样例值。两边必须一致。
+ *
+ * 曾经这里只会 `.replace('{buildNo}', …)`，而它匹配不到 `{buildNo+995}`
+ * （花括号位置不同），于是预览把 `2.2.0.{buildNo+995}` **原样**显示出来，
+ * 看起来就像平台会产出一个带花括号的 tag。**改后端 renderTag 时务必回来改这里。**
+ */
+const previewTag = (pattern: string, nextNo: number, branch: string): string =>
+  String(pattern || DEFAULT_TAG_PATTERN)
+    .replace(reBuildNo, (_m, off: string | undefined) =>
+      String(Math.max(0, nextNo + (off ? Number(off) : 0))),
+    )
+    .replace('{branch}', String(branch || 'master').replace(/[^A-Za-z0-9_.-]/g, '-'))
+    .replace('{commitId}', 'a91f3c2')
+    .replace('{timestamp}', '20260910163000')
+    .replace('{date}', '20260910');
 
 /** 脚本可用的环境变量。与后端 integration.scriptEnv 一一对应。 */
 const SCRIPT_VARS: { name: string; desc: string }[] = [
@@ -678,9 +738,22 @@ const ProjectList: React.FC = () => {
           <Form.Item
             name="tagPattern"
             label="Tag 规则"
-            rules={[{ required: true }]}
+            rules={[
+              { required: true },
+              {
+                // 认不出的写法会被后端**原样**拼进镜像 tag，最终在 `docker build -t`
+                // 那一步失败（invalid reference format）。能在这里说清楚就别留给 docker。
+                validator: (_, v: string) => {
+                  const bad = unknownTagTokens(v);
+                  if (!bad.length) return Promise.resolve();
+                  return Promise.reject(
+                    new Error(`认不出的写法 ${bad.join('、')}；可用：${TAG_VAR_HINT}`),
+                  );
+                },
+              },
+            ]}
             extra={
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0,1fr))', gap: '0 12px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0,1fr))', gap: '2px 12px' }}>
                 {TAG_VARS.map((v) => (
                   <span key={v.name}>
                     <Text className="yn-mono" style={{ fontSize: 12 }}>{v.name}</Text>
@@ -700,13 +773,15 @@ const ProjectList: React.FC = () => {
                 // 「下次构建会产出的镜像」。buildNo 预取 totalBuilds + 1，
                 // 因为后端的下一号就是"已构建过的次数 + 1"。标成"预计"是因为
                 // 它终究是算出来的，真正落库的以构建记录为准。
+                //
+                // 渲染交给 previewTag（它复刻后端 renderTag 的口径，含 {buildNo±N} 偏移）——
+                // 别在这里就地写 replace，那是这份预览第二次出现两套口径的起点。
                 const nextNo = (editTarget?.totalBuilds ?? 0) + 1;
-                const tag = String(getFieldValue('tagPattern') || DEFAULT_TAG_PATTERN)
-                  .replace('{buildNo}', String(nextNo))
-                  .replace('{branch}', String(getFieldValue('defaultBranch') || 'master').replace(/[^A-Za-z0-9_.-]/g, '-'))
-                  .replace('{commitId}', 'a91f3c2')
-                  .replace('{timestamp}', '20260910163000')
-                  .replace('{date}', '20260910');
+                const tag = previewTag(
+                  String(getFieldValue('tagPattern') || ''),
+                  nextNo,
+                  String(getFieldValue('defaultBranch') || 'master'),
+                );
                 return (
                   <span>
                     预计下次构建产出：<span className="yn-mono" style={{ color: '#1677ff' }}>
