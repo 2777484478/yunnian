@@ -8,7 +8,6 @@ import {
   Col,
   Divider,
   Drawer,
-  Dropdown,
   Form,
   Input,
   Modal,
@@ -29,7 +28,6 @@ import {
   BranchesOutlined,
   CodeOutlined,
   DeleteOutlined,
-  DownOutlined,
   EditOutlined,
   ExportOutlined,
   HistoryOutlined,
@@ -294,28 +292,14 @@ const ProjectList: React.FC = () => {
   const [form] = Form.useForm();
 
   /**
-   * 抽屉的两种表单形态：
+   * 「构建方式」是表单里的一个字段（jenkins / dockerfile / script），不再是两个入口两种形态。
    *
-   *   full    —— 平台自己构建（Dockerfile / 自定义脚本），要配仓库、构建上下文与镜像规则；
-   *   jenkins —— 只把项目**绑定**到一个 Jenkins Job：仓库、构建参数、镜像地址全在 Job 里，
-   *              平台侧再问一遍就是重复录入（还会和 Jenkins 上的配置各说各话）。
+   * 以前是在门外先选一次，而进去之后 buildMethod 是**禁用**的 —— 选错了只能退出来重进；
+   * 编辑时更是完全不能换方式。现在门外不选（一个入口），门里三选一，**新建默认 Jenkins Job**。
    *
-   * **新建与编辑共用同一套判断**：编辑一个 Jenkins 项目时也渲染 jenkins 形态。
-   * 曾经编辑一律用完整表单（理由是"改构建方式是合法运维动作"），结果是同一个项目
-   * 新建时被告知"仓库与镜像规则不用配"，编辑时又冒出一整套并预填了值——用户只能
-   * 理解为"改了会生效"。而平台的构建链路根本不看这些字段（走 Jenkins 分支时
-   * registry / tagPattern 没有任何代码读），展示即误导。
-   *
-   * 代价：**编辑时不能再切换构建方式**（Jenkins ↔ Dockerfile）。一期先收着。
-   *
-   * 不是两套表单两套接口，只是同一张表单渲染的字段集不同，提交仍走同一个
-   * POST / PUT /projects —— 少一条路径就少一处会漂移的口径。
+   * 渲染哪组字段由它决定（见 isJenkinsForm），但提交仍走同一个 POST / PUT /projects ——
+   * 少一条路径就少一处会漂移的口径。
    */
-  const [formMode, setFormMode] = useState<'full' | 'jenkins'>('full');
-  /** Jenkins 形态：抽屉渲染精简表单，平台构建专属字段一律不出现 */
-  const isJenkinsForm = formMode === 'jenkins';
-  /** 新建一个只绑 Jenkins Job 的项目 —— 标题也换成 Jenkins 口径 */
-  const isJenkinsCreate = isJenkinsForm && !editTarget;
 
   // Jenkins Job：本页只保留"项目表单里的 Job 下拉"。
   // Job 列表本身已经独立成「CI 镜像构建 › Jenkins Job」菜单页了——
@@ -386,8 +370,10 @@ const ProjectList: React.FC = () => {
   );
   const runningHistory = historyApi.data?.list ?? [];
 
-  /** 表单里当前选的构建方式，决定要不要去拉 Jenkins Job 列表 */
+  /** 表单里当前选的构建方式（jenkins / dockerfile / script），它决定渲染哪一组字段 */
   const buildMethodWatch = Form.useWatch('buildMethod', form);
+  /** Jenkins 形态：仓库 / 构建上下文 / 镜像规则等"平台构建专属字段"一律不出现 */
+  const isJenkinsForm = buildMethodWatch === 'jenkins';
 
   // 「测试连接」的状态。结果**留在页面上**而不是只弹一个 toast：
   // 失败原因（账号不对 / 仓库不存在 / 连不上）是用户接着要动手改哪一格的依据，
@@ -543,81 +529,17 @@ const ProjectList: React.FC = () => {
   );
 
   /**
-   * 「新建 Jenkins Job 项目」的精简表单：只保留**能把项目挂上去**的字段。
+   * Jenkins 形态：只把项目**绑定**到一个 Jenkins Job（不含基本信息 —— 那是全表单共用的）。
    *
-   * 为什么砍掉仓库与构建参数：这个项目的代码怎么拉、怎么构建、镜像推到哪儿，
+   * 为什么这里不再出现仓库与构建参数：这个项目的代码怎么拉、怎么构建、镜像推到哪儿，
    * 全写在那个 Jenkins Job 里。平台再让用户录一遍 Git 地址与 Tag 规则，
    * 只会得到一份**没有任何代码去读**的配置——它与 Job 里的真配置各说各话，
    * 半年后没人分得清哪个才算数。
-   *
-   * 「构建方式」保留但禁用：进来的路径已经决定了它是 Jenkins Job，
-   * 显示出来是为了让人一眼确认"这个项目不由平台构建"。
    */
-  const jenkinsOnlyForm = (
+  const jenkinsFields = (
     <>
       <Row gutter={16}>
-        <Col span={12}>
-          <Form.Item name="name" label="项目名称" rules={[{ required: true, message: '请输入项目名称' }]}>
-            <Input placeholder="如 AI 运维告警服务" />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item
-            name="key"
-            label="项目标识"
-            rules={[
-              { required: true, message: '请输入项目标识' },
-              { pattern: /^[a-z0-9-]+$/, message: '仅允许小写字母、数字与中划线' },
-            ]}
-            tooltip="全局唯一，用于构建记录与部署服务名"
-          >
-            {/* 标识是项目的对外身份（镜像名、部署服务名都由它派生），建完即冻结：
-                编辑时锁住，与完整表单同一口径。 */}
-            <Input placeholder="如 demowarning" addonBefore={<CodeOutlined />} disabled={!!editTarget} />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item name="type" label="项目类型" rules={[{ required: true }]}>
-            <Select
-              options={[
-                { label: '前端', value: 'frontend' },
-                { label: '后端', value: 'backend' },
-              ]}
-            />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item name="team" label="所属团队" rules={[{ required: true }]}>
-            <Select showSearch options={TEAMS.map((t) => ({ label: t, value: t }))} />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item name="owner" label="负责人" rules={[{ required: true }]}>
-            <Select showSearch options={ownerOptions()} />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item name="enabled" label="启用状态" valuePropName="checked">
-            <Switch checkedChildren="启用" unCheckedChildren="停用" />
-          </Form.Item>
-        </Col>
         <Col span={24}>
-          <Form.Item name="description" label="项目描述">
-            <Input.TextArea rows={2} placeholder="简要说明项目用途" maxLength={200} showCount />
-          </Form.Item>
-        </Col>
-      </Row>
-
-      <Divider orientation="left" plain style={{ marginTop: 0 }}>
-        Jenkins 绑定
-      </Divider>
-      <Row gutter={16}>
-        <Col span={8}>
-          <Form.Item name="buildMethod" label="构建方式">
-            <Select disabled options={[{ label: 'Jenkins Job', value: 'jenkins' }]} />
-          </Form.Item>
-        </Col>
-        <Col span={16}>
           <Form.Item
             name="jenkinsJob"
             label="Jenkins Job"
@@ -644,73 +566,15 @@ const ProjectList: React.FC = () => {
   );
 
   /**
-   * 平台构建的表单（自带 Dockerfile / 自定义脚本），**一页到底**。
-   *
-   * 改之前是三页签（基本信息 / 仓库与构建 / 构建参数），两个具体毛病：
-   *   1. 选了「自定义脚本」还照样渲染 Dockerfile 路径与构建上下文 —— 用户不知道该不该填；
-   *   2. 配仓库时看不到镜像配置，切过去又忘了刚才填了什么。
-   * 一页 + 每个字段跟一句说明，治的就是"我不知道这个格子填什么"。
+   * 平台构建的字段（自带 Dockerfile / 自定义脚本）。基本信息与「构建方式」由上层 projectForm 提供，
+   * 这里只放"选了平台构建之后才需要填"的东西。
    *
    * 「构建上下文路径」「Dockerfile 路径」只在自带 Dockerfile 时出现：
    * 自定义脚本模式下 cd 到哪、在哪个目录 build 都由脚本自己定，平台无从也无需知道。
    */
-  const fullForm = (
+  const platformFields = (
     <>
       <Divider orientation="left" plain style={{ marginTop: 0 }}>
-        基本信息
-      </Divider>
-      <Row gutter={16}>
-        <Col span={12}>
-          <Form.Item name="name" label="项目名称" rules={[{ required: true, message: '请输入项目名称' }]}>
-            <Input placeholder="如 用户中心前端" />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item
-            name="key"
-            label="项目标识"
-            rules={[
-              { required: true, message: '请输入项目标识' },
-              { pattern: /^[a-z0-9-]+$/, message: '仅允许小写字母、数字与中划线' },
-            ]}
-            extra="全局唯一，用于镜像名称与部署服务名"
-          >
-            <Input placeholder="如 user-web" disabled={!!editTarget} addonBefore={<CodeOutlined />} />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item name="type" label="项目类型" rules={[{ required: true }]} extra="新建脚本时按它给默认脚本">
-            <Select
-              options={[
-                { label: '前端', value: 'frontend' },
-                { label: '后端', value: 'backend' },
-              ]}
-            />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item name="team" label="所属团队" rules={[{ required: true }]}>
-            <Select showSearch options={TEAMS.map((t) => ({ label: t, value: t }))} />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item name="owner" label="负责人" rules={[{ required: true }]}>
-            <Select showSearch options={ownerOptions()} />
-          </Form.Item>
-        </Col>
-        <Col span={12}>
-          <Form.Item name="enabled" label="启用状态" valuePropName="checked">
-            <Switch checkedChildren="启用" unCheckedChildren="停用" />
-          </Form.Item>
-        </Col>
-        <Col span={24}>
-          <Form.Item name="description" label="项目描述">
-            <Input.TextArea rows={2} placeholder="简要说明项目用途" maxLength={200} showCount />
-          </Form.Item>
-        </Col>
-      </Row>
-
-      <Divider orientation="left" plain>
         代码仓库与凭据
       </Divider>
       <Row gutter={16}>
@@ -858,21 +722,8 @@ const ProjectList: React.FC = () => {
       </Row>
 
       <Divider orientation="left" plain>
-        构建流程
+        {buildMethodWatch === 'script' ? '构建脚本' : 'Dockerfile'}
       </Divider>
-      <Form.Item
-        name="buildMethod"
-        label="构建方式"
-        rules={[{ required: true }]}
-        extra="自带 Dockerfile：编译与打包写在你仓库的 Dockerfile 里；自定义脚本：整个构建流程由下面的脚本定义"
-      >
-        <Segmented
-          options={[
-            { label: '自带 Dockerfile', value: 'dockerfile' },
-            { label: '自定义脚本', value: 'script' },
-          ]}
-        />
-      </Form.Item>
 
       {buildMethodWatch === 'script' ? (
         <Form.Item
@@ -939,6 +790,95 @@ const ProjectList: React.FC = () => {
       <Form.Item name="buildParams" noStyle>
         <KVFields name="buildParams" addText="添加参数" />
       </Form.Item>
+    </>
+  );
+
+  /**
+   * 项目表单（新建 / 编辑共用一张）。**一页到底**，关键字段都跟一句说明。
+   *
+   * 版式顺序：基本信息 → 构建方式 → （按构建方式展开的字段）。
+   * 「构建方式」放在基本信息**之后**：先让用户把"这是哪个项目"填清楚，再决定它怎么构建；
+   * 反过来先选构建方式，会让人在还没想好项目归属时就被一个技术选项拦住。
+   *
+   * 为什么合并成一张：以前是两个入口两套表单，用户得先在门外选一次，进去之后
+   * 构建方式还是**禁用**的 —— 选错了只能退出来重进。现在门外不选、门里选。
+   */
+  const projectForm = (
+    <>
+      <Divider orientation="left" plain style={{ marginTop: 0 }}>
+        基本信息
+      </Divider>
+      <Row gutter={16}>
+        <Col span={12}>
+          <Form.Item name="name" label="项目名称" rules={[{ required: true, message: '请输入项目名称' }]}>
+            <Input placeholder="如 用户中心前端" />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item
+            name="key"
+            label="项目标识"
+            rules={[
+              { required: true, message: '请输入项目标识' },
+              { pattern: /^[a-z0-9-]+$/, message: '仅允许小写字母、数字与中划线' },
+            ]}
+            extra="全局唯一，用于镜像名称与部署服务名"
+          >
+            <Input placeholder="如 user-web" disabled={!!editTarget} addonBefore={<CodeOutlined />} />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item name="type" label="项目类型" rules={[{ required: true }]} extra="新建脚本时按它给默认脚本">
+            <Select
+              options={[
+                { label: '前端', value: 'frontend' },
+                { label: '后端', value: 'backend' },
+              ]}
+            />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item name="team" label="所属团队" rules={[{ required: true }]}>
+            <Select showSearch options={TEAMS.map((t) => ({ label: t, value: t }))} />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item name="owner" label="负责人" rules={[{ required: true }]}>
+            <Select showSearch options={ownerOptions()} />
+          </Form.Item>
+        </Col>
+        <Col span={12}>
+          <Form.Item name="enabled" label="启用状态" valuePropName="checked">
+            <Switch checkedChildren="启用" unCheckedChildren="停用" />
+          </Form.Item>
+        </Col>
+        <Col span={24}>
+          <Form.Item name="description" label="项目描述">
+            <Input.TextArea rows={2} placeholder="简要说明项目用途" maxLength={200} showCount />
+          </Form.Item>
+        </Col>
+      </Row>
+
+      <Divider orientation="left" plain>
+        构建方式
+      </Divider>
+      <Form.Item
+        name="buildMethod"
+        label="构建方式"
+        rules={[{ required: true }]}
+        // 三选一的差异必须在这里说清：选错一次，下面要填的整组字段都会跟着错。
+        extra="Jenkins Job：代码怎么拉、怎么构建、镜像推到哪都由该 Job 定义，平台只触发并读日志；自带 Dockerfile：编译与打包写在你仓库的 Dockerfile 里；自定义脚本：整个构建流程由下方的脚本定义"
+      >
+        <Segmented
+          options={[
+            { label: 'Jenkins Job', value: 'jenkins' },
+            { label: '自带 Dockerfile', value: 'dockerfile' },
+            { label: '自定义脚本', value: 'script' },
+          ]}
+        />
+      </Form.Item>
+
+      {isJenkinsForm ? jenkinsFields : platformFields}
     </>
   );
 
@@ -1033,9 +973,8 @@ const ProjectList: React.FC = () => {
     }
   };
 
-  const openCreate = (mode: 'full' | 'jenkins' = 'full') => {
+  const openCreate = () => {
     setEditTarget(null);
-    setFormMode(mode);
     form.resetFields();
     setTestRes(null);
     form.setFieldsValue({
@@ -1043,7 +982,9 @@ const ProjectList: React.FC = () => {
       type: DEFAULT_TYPE,
       team: DEFAULT_TEAM,
       owner: getSession()?.name ?? '',
-      buildMethod: mode === 'jenkins' ? 'jenkins' : 'dockerfile',
+      // 默认 Jenkins Job：公司既有资产是 Jenkins，多数项目挂过去就能构建，
+      // 不必在平台上再配一套仓库 / 构建上下文 / 构建脚本。
+      buildMethod: 'jenkins',
       registry: projects[0]?.registry ?? '',
       // 默认 Tag 规则与后端 buildscript.DefaultTagPattern 同值：v1、v2、v3…
       // 每构建一次自动递增一个版本号，而且一眼看得出哪个更新。
@@ -1064,10 +1005,8 @@ const ProjectList: React.FC = () => {
 
   const openEdit = (p: Project) => {
     setEditTarget(p);
-    // 按项目**当前**的构建方式选表单形态，与新建入口同一口径：
-    // Jenkins 项目只展示「基本信息 + Jenkins 绑定」，不摆仓库 / 构建上下文 / 镜像规则。
-    // 编辑对象是平台构建的项目时，照旧给完整表单（那些字段对它是真的有效）。
-    setFormMode(p.buildMethod === 'jenkins' ? 'jenkins' : 'full');
+    // 构建方式由 form.setFieldsValue(p) 一并带进来（buildMethod 是项目字段），
+    // 渲染哪组字段会自动跟着变 —— 也就是说**编辑时也能换构建方式**了。
     setTestRes(null);
     form.setFieldsValue(p);
     setDrawerOpen(true);
@@ -1081,10 +1020,10 @@ const ProjectList: React.FC = () => {
         (p) => p.key,
       ),
     };
-    // Jenkins 精简表单里没有「仓库地址」与「构建参数」——它们由 Job 自己定义。
+    // 选 Jenkins 时不渲染「仓库地址」与「构建参数」——它们由 Job 自己定义。
     // 后端对多数字段是"没传就沿用原值"，但这两项是**直接覆盖**（见 UpdateProject 的
     // git_url / build_params），不显式带回原值，一次编辑就会把它们抹掉。
-    if (editTarget && formMode === 'jenkins') {
+    if (editTarget && values.buildMethod === 'jenkins') {
       body.gitUrl = editTarget.gitUrl;
       body.buildParams = editTarget.buildParams;
     }
@@ -1392,28 +1331,12 @@ const ProjectList: React.FC = () => {
               </Button>
             </Tooltip>
             <Tooltip title={canWrite ? '' : '需要 project:write 权限'}>
-              <Space.Compact>
-                <Button type="primary" icon={<PlusOutlined />} disabled={!canWrite} onClick={() => openCreate('full')}>
-                  新建项目
-                </Button>
-                {/* 第二个入口：只把项目**绑定**到一个 Jenkins Job，仓库地址、构建参数、
-                    镜像地址全由 Job 自己管。做成菜单而不是并排第二个主按钮——
-                    多数项目仍是平台构建，两个主按钮会让人每次都要先分辨该点哪个。 */}
-                <Dropdown
-                  disabled={!canWrite}
-                  trigger={['click']}
-                  menu={{
-                    items: [
-                      { key: 'full', icon: <AppstoreOutlined />, label: '新建项目（Dockerfile / 自定义脚本）' },
-                      { type: 'divider' },
-                      { key: 'jenkins', icon: <ThunderboltOutlined />, label: '新建 Jenkins Job 项目' },
-                    ],
-                    onClick: ({ key }) => openCreate(key === 'jenkins' ? 'jenkins' : 'full'),
-                  }}
-                >
-                  <Button type="primary" icon={<DownOutlined />} disabled={!canWrite} />
-                </Dropdown>
-              </Space.Compact>
+              {/* 只有一个入口：构建方式在表单里选（默认 Jenkins Job）。
+                  以前分成「新建项目（Dockerfile / 自定义脚本）」与「新建 Jenkins Job 项目」
+                  两个菜单项，而那一次选择在表单里是锁死的，选错只能退出来重进。 */}
+              <Button type="primary" icon={<PlusOutlined />} disabled={!canWrite} onClick={() => openCreate()}>
+                新建项目
+              </Button>
             </Tooltip>
           </Space>
         }
@@ -1729,13 +1652,7 @@ const ProjectList: React.FC = () => {
         // 880 而不是 720：一页式表单把「标签在左」的列也放进来了，
         // 720 下控件只剩两百来像素，脚本编辑器和长仓库地址都看不全。
         width={880}
-        title={
-          editTarget
-            ? `编辑项目 · ${editTarget.name}`
-            : isJenkinsCreate
-              ? '新建 Jenkins Job 项目'
-              : '新建项目'
-        }
+        title={editTarget ? `编辑项目 · ${editTarget.name}` : '新建项目'}
         onClose={() => setDrawerOpen(false)}
         extra={
           <Space>
@@ -1749,17 +1666,15 @@ const ProjectList: React.FC = () => {
       >
         <Form
           form={form}
-          // 平台构建的表单用「标签在左」的横向布局：一页到底、每行控件旁紧跟一句说明。
-          // Jenkins 精简表单保持原来的纵向布局 —— 它的版式是用户认可过的，不顺手改。
-          layout={isJenkinsForm ? 'vertical' : 'horizontal'}
-          labelCol={isJenkinsForm ? undefined : { flex: `${FORM_LABEL_WIDTH}px` }}
-          wrapperCol={isJenkinsForm ? undefined : { flex: '1' }}
+          // 「标签在左」的横向布局：一页到底、每行控件旁紧跟一句说明。
+          // 合并成一张表单后版式必须统一（以前 Jenkins 那套是纵向的），
+          // 否则同一个抽屉在切换构建方式时会整体跳一下。
+          layout="horizontal"
+          labelCol={{ flex: `${FORM_LABEL_WIDTH}px` }}
+          wrapperCol={{ flex: '1' }}
           requiredMark="optional"
         >
-          {/* Jenkins 形态（新建 Jenkins Job 项目 / 编辑一个 Jenkins 项目）只渲染
-              「绑定关系」需要的字段：仓库地址、构建参数、镜像规则全在 Jenkins Job 里，
-              平台上再问一遍就是重复录入，还容易两边各说各话。 */}
-          {isJenkinsForm ? jenkinsOnlyForm : fullForm}
+          {projectForm}
         </Form>
       </Drawer>
 

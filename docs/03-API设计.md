@@ -267,7 +267,8 @@ GET /projects?page=1&pageSize=10&keyword=user&type=frontend&enabled=1&sortBy=upd
 > - `POST /projects/{key}/validate` 对这类项目**跳过仓库连通性检查**，
 >   结论里会写明「仓库由 Jenkins Job 管理，未检查仓库连通性」，而不是报一个不存在的失败。
 >
-> 前端入口：**项目管理 › 新建项目 ▾ › 新建 Jenkins Job 项目**（只填基本信息 + 构建方式 + Jenkins Job）。
+> 前端入口：**项目管理 › 新建项目** —— 只有一个入口，构建方式在表单里选（**默认 Jenkins Job**）；
+> 选它时只渲染「基本信息 + 构建方式 + Jenkins Job」这一组字段。
 
 > **自定义脚本形态（`buildMethod=script`）**
 >
