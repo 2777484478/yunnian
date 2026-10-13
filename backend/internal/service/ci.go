@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -510,7 +511,7 @@ func (s *CIService) CreateProject(ctx context.Context, in ProjectInput, c Caller
 
 		Registry:      registry,
 		ImageName:     imageName,
-		TagPattern:    stringOr(in.TagPattern, buildscript.DefaultTagPattern),
+		TagPattern:    stringOr(in.TagPattern, defaultTagPattern(buildMethod)),
 		BuildParams:   params,
 		TimeoutSec:    1800,
 		OwnerID:       ownerID,
@@ -2783,7 +2784,15 @@ func decodeParamsMap(raw model.JSONText) map[string]string {
 	return out
 }
 
-// renderTag 渲染 tag 模板。支持 {buildNo} / {branch} / {commitId} / {timestamp} / {date}。
+// reBuildNo 匹配 {buildNo} 与带内联偏移的 {buildNo+N} / {buildNo-N}。
+//
+// 内联偏移是为了支持"版本号不从 1 起"的约定：脚本项目的默认规则
+// `2.2.0.{buildNo+999}` 让第 1 次构建就产出 2.2.0.1000，之后每构建一次 +1。
+// 没有这个能力时用户只能拿到从 1 开始的序号，与已有流水线的版本号对不上。
+var reBuildNo = regexp.MustCompile(`\{buildNo([+-]\d+)?\}`)
+
+// renderTag 渲染 tag 模板。支持 {buildNo}（可带内联偏移，如 {buildNo+999}）/
+// {branch} / {commitId} / {timestamp} / {date}。
 //
 // {buildNo} 是**项目级构建序号**（每构建一次 +1，与 build_record.build_no 同源），
 // 默认规则 `v{buildNo}` 就是靠它每次自动递增一个版本号。
@@ -2798,8 +2807,23 @@ func renderTag(pattern, branch, commitID string, buildNo int64, at time.Time) st
 	if strings.TrimSpace(pattern) == "" {
 		pattern = buildscript.DefaultTagPattern
 	}
+	// 先把 {buildNo} / {buildNo±N} 换成真实数字。
+	// 放在其它占位符之前，是因为这一步会**改变字符串长度**（替换掉的可能不止一个字符）。
+	pattern = reBuildNo.ReplaceAllStringFunc(pattern, func(m string) string {
+		n := buildNo
+		// m 形如 {buildNo} / {buildNo+999} / {buildNo-1}。
+		// 去掉前缀 {buildNo 与尾部 } 后，"+999" 这种能被 ParseInt 直接吃下（带符号）。
+		// {buildNo} 本身解析为空串 → 报错 → 退回不加偏移，正是我们想要的。
+		if off, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(m, "{buildNo"), "}"), 10, 64); err == nil {
+			n = buildNo + off
+		}
+		if n < 0 {
+			// 负序号不是合法 tag 片段；夹到 0，比产出一个带 '-' 的怪 tag 好排查。
+			n = 0
+		}
+		return sanitizeTagPart(strconv.FormatInt(n, 10))
+	})
 	rep := strings.NewReplacer(
-		"{buildNo}", sanitizeTagPart(strconv.FormatInt(buildNo, 10)),
 		"{branch}", sanitizeTagPart(branch),
 		"{commitId}", sanitizeTagPart(shortCommit(commitID)),
 		"{timestamp}", at.Format("20060102150405"),
@@ -2815,6 +2839,18 @@ func renderTag(pattern, branch, commitID string, buildNo int64, at time.Time) st
 		out = out[:128]
 	}
 	return out
+}
+
+// defaultTagPattern 按构建方式给默认 Tag 规则。
+//
+// 自定义脚本项目用 `2.2.0.{buildNo+999}`（第 1 次构建就是 2.2.0.1000，之后 +1）——
+// 脚本项目多是从已有流水线接管过来的，"内部版本号连续递增"是它们既有的约定；
+// dockerfile / jenkins 沿用 `v{buildNo}`。
+func defaultTagPattern(method string) string {
+	if strings.EqualFold(strings.TrimSpace(method), "script") {
+		return buildscript.DefaultScriptTagPattern
+	}
+	return buildscript.DefaultTagPattern
 }
 
 // sanitizeTagPart 清洗成合法的 Docker tag 片段。

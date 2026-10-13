@@ -48,3 +48,15 @@ func DefaultScript(projectType string) string {
 //
 // 想留语义化前缀就写 `v1.0.{buildNo}`；多分支各自递增用 `{branch}-{buildNo}`。
 const DefaultTagPattern = "v{buildNo}"
+
+// DefaultScriptTagPattern 「自定义脚本」项目的默认 Tag 规则。
+//
+// 与 dockerfile / jenkins 用 `v{buildNo}`（第 1 次就是 v1）不同，脚本项目多半是
+// 自建流水线接管过来的，沿用"内部版本号连续递增"的约定，例如 2.2.0.1000、2.2.0.1001…
+// 而 `{buildNo}` 是**从 1 开始的构建序号**，所以这里用内联偏移 `{buildNo+999}` 表达
+// 「第 1 次构建 = 1000，之后每构建一次 +1」。
+//
+// ⚠️ 序号是"第几次构建"、不是"第几次成功"：失败也会占掉一个号（见 renderTag 的说明），
+// 所以 tag 序列里可能出现空洞（1000、1001、1003）。这是刻意的 —— 换成"只数成功次数"
+// 会让同一 tag 被下一个成功构建覆盖，版本号不再唯一。
+const DefaultScriptTagPattern = "2.2.0.{buildNo+999}"
