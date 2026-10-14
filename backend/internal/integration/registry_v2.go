@@ -25,19 +25,20 @@ var ErrTagNotFound = errors.New("镜像 tag 在仓库中不存在")
 
 // 本文件实现 Docker Registry v2（OCI Distribution）客户端，用来从镜像仓库**读回**元数据。
 //
-// 为什么不用 Harbor 的 /api/v2.0（Core 管理接口）：
-// 实测某内网 Harbor 只对外暴露了 registry 组件（:5000），
-// /api/v2.0/systeminfo 在 :5000 / :443 / :80 上**全是 nginx 的 404 页** ——
-// 按 Core API 写的客户端会原样 404，表现为"接上了但什么都读不到"。
-// 而 /v2/ 这套是 OCI 规范，Harbor 的 registry 组件、原生 Docker Registry、
-// Nexus 都实现，换仓库不用改代码。
-// （若将来某套 Harbor 真的开了 Core，要拿"推送时间"之类的字段再补一个 Core 客户端，
-// 别在这里塞分支。）
+// 为什么不靠 Harbor 的 Core 管理接口拿这些：
+// 本文件只需要 OCI 规范里的东西（manifest / digest / 层大小），
+// /v2/ 这套 Harbor 的 registry 组件、原生 Docker Registry、Nexus 都实现，换仓库不用改代码。
+//
+// ⚠️ 早期本文件头曾断言"实测某内网 Harbor 只对外暴露了 registry 组件，
+// /api/v2.0/systeminfo 全是 nginx 404" —— **那个结论是错的**。
+// 2026-10-14 复测清楚了：那台 Harbor 是 **v1.1.2**，/api/v2.0/* 404 是因为版本太老，
+// 它的 Core 接口在 **/api/**（`/api/systeminfo` 返回 200）。Core 客户端见 harbor_core.go，
+// 已按 v1/v2 自动识别。所以"404"≠"这个端口上没有管理接口"，别再据此下结论。
 //
 // 刻意不提供的能力（做不到就是做不到，不编）：
-//   - **"最新 tag"**：tags/list **不保证任何顺序**（实测 Harbor 返回的是乱序），
-//     只有 Core 的 artifacts 接口带 sort=-push_time 才判得出。所以不提供 LatestTag。
-//   - **推送时间**：同上，registry v2 拿不到，Resolve 返回的 PushedAt 恒为零值。
+//   - **"最新 tag"**：tags/list **不保证任何顺序**（实测 v1.1.2 返回的是乱序），
+//     只有 Core 接口才可能带上时间语义。所以不提供 LatestTag。
+//   - **推送时间**：registry v2 拿不到，Resolve 返回的 PushedAt 恒为零值。
 
 // RegistryV2 通过 /v2/ 接口读镜像元数据。
 type RegistryV2 struct {

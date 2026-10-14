@@ -203,11 +203,15 @@ type HarborConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	BaseURL  string `yaml:"baseUrl"`
 	Registry string `yaml:"registry"` // 用于拼装完整镜像地址的对外地址
-	// CoreAPIURL 是 Harbor 的 **Core 管理接口**（/api/v2.0/）地址，与上面的 BaseURL 不是一回事：
+	// CoreAPIURL 是 Harbor 的 **Core 管理接口**地址，与上面的 BaseURL 是两条通道：
 	//   BaseURL   说 registry 组件（如 https://host:5000），走 /v2/，拿 manifest/digest；
-	//   CoreAPIURL 说 Core（如 https://host），走 /api/v2.0/，拿 tag 的**推送时间与推送人**。
-	// 实测目标 Harbor 只对外暴露了 registry 组件（/api/v2.0/* 在 :5000/:443/:80 上全是 404），
-	// 所以这个地址通常是另一个端口/网关，必须单独配、单独探活。
+	//   CoreAPIURL 说 Core，拿 tag 列表（v2 还带推送时间）。
+	//
+	// **留空则按 BaseURL 探** —— 两者常常就是同一个入口：Harbor v2 在一个端口上同时提供
+	// /v2/ 与 /api/v2.0/；实测那台 Harbor **v1.1.2** 的 /v2/ 与 /api/ 也都在 :5000。
+	// 所以这个字段是给"registry 走独立端口/镜像站"的部署留的**覆盖项**，不是必填。
+	// 接口路径由 Harbor 版本决定（v1 是 /api/，v2 是 /api/v2.0/），平台自动识别，
+	// 这里只填**入口地址**，不要带 /api 或 /api/v2.0 后缀。
 	CoreAPIURL string   `yaml:"coreApiUrl"`
 	Username   string   `yaml:"username"`
 	Password   string   `yaml:"password"`

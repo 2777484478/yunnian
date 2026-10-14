@@ -13,9 +13,9 @@ import (
 // 「系统管理 › 第三方集成」，不是日常运维动作。响应里带凭据元信息（有没有配、上次识别的账号），
 // 所以读也要 user:manage —— 与 Jenkins 的口径一致。
 //
-// ⚠️ Harbor 有**两条互不相通的通道**（registry 组件走 /v2/、Core 走 /api/v2.0/），
-// 测试连接必须分别出结论：把它们合成一句"连接失败"，最常见的那个错
-// （Core 地址填成了 registry 端口 → 404）就没法定位了。
+// ⚠️ Harbor 有**两条互不相通的通道**（registry 组件走 /v2/、Core 走 /api/ 或 /api/v2.0/，
+// 具体哪条路径由 Harbor 版本决定，平台自动识别），测试连接必须分别出结论：
+// 把它们合成一句"连接失败"，最常见的那个错（地址根本不是一个 Harbor 入口）就没法定位了。
 
 // getHarborSettings GET /system/integrations/harbor
 func (h *handler) getHarborSettings(c *gin.Context) {

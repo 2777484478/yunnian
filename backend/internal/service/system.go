@@ -184,30 +184,33 @@ func (s *SystemService) Integrations(ctx context.Context) ([]IntegrationStatusDT
 		out = append(out, item)
 	}
 
-	// Harbor 的两条通道分别探，**都通才算"已连通"**（配置了哪条就探哪条）：
-	// 只探 registry 的话，"Core 地址填成 registry 端口"这种最常见的错会显示成绿的。
+	// Harbor 的两条通道分别探，**都通才算"已连通"**：
+	// 只探 registry 的话，Core 地址指错（比如指向一个真的 registry-only 端口）会显示成绿的。
+	// Core 地址留空时按 registry 地址探 —— 两者常常就是同一个入口（见 NewHarborCore）。
 	add("harbor", "镜像仓库 Harbor", hbCfg.Enabled, func(ctx context.Context) error {
 		base, core := strings.TrimSpace(hbCfg.BaseURL), strings.TrimSpace(hbCfg.CoreAPIURL)
 		if base == "" && core == "" {
-			return fmt.Errorf("未填写地址：registry 组件（读 digest）与 Core API（读 tag 推送时间）至少要填一个")
+			return fmt.Errorf("未填写地址：registry 组件（读 digest）与 Core API（读 tag 列表）至少要填一个")
 		}
 		if base != "" {
 			if err := integration.NewHarborRegistry(hbCfg).Ping(ctx); err != nil {
 				return fmt.Errorf("registry 组件（%s）：%w", base, err)
 			}
 		}
-		if core != "" {
-			client := integration.NewHarborCore(hbCfg)
-			if client == nil {
-				return fmt.Errorf("Core API 地址无法解析：%s", core)
-			}
-			probe, err := client.Ping(ctx)
-			if err != nil {
-				return fmt.Errorf("Core API（%s）：%w", core, err)
-			}
-			if !probe.OK {
-				return fmt.Errorf("Core API（%s）：%s", core, probe.Message)
-			}
+		addr := core
+		if addr == "" {
+			addr = base
+		}
+		client := integration.NewHarborCore(hbCfg)
+		if client == nil {
+			return fmt.Errorf("Core API 地址无法解析：%s", addr)
+		}
+		probe, err := client.Ping(ctx)
+		if err != nil {
+			return fmt.Errorf("Core API（%s）：%w", client.Base(), err)
+		}
+		if !probe.OK {
+			return fmt.Errorf("Core API（%s）：%s", client.Base(), probe.Message)
 		}
 		return nil
 	},
@@ -2641,8 +2644,9 @@ func parseTimeParam(v string) (time.Time, error) {
 // --------------------------------------------------------------------------- Harbor 接入
 //
 // 与 Jenkins 同一套形状（配置读 / 配置写 / 连通性测试），差别只在**两条通道**：
-// registry 组件（/v2/，读 digest）与 Core 管理接口（/api/v2.0/，读 tag 的推送时间）。
-// 它们可能不在同一个地址上，所以测试连接**分别出结论**，不合成一句"连接失败"。
+// registry 组件（/v2/，读 digest）与 Core 管理接口（/api/ 或 /api/v2.0/，读 tag 列表）。
+// 它们通常在同一个入口上，但**不一定**，所以测试连接分别出结论；
+// Core 地址留空时按 registry 地址探（见 integration.NewHarborCore）。
 
 // HarborSettingsDTO 对外视图：口令只回"配没配"，绝不回明文。
 type HarborSettingsDTO struct {
@@ -2702,8 +2706,16 @@ type HarborTestResult struct {
 	CoreOK          bool   `json:"coreOk"`
 	CoreMessage     string `json:"coreMessage"`
 	CoreVersion     string `json:"coreVersion"`
+	// CoreAPIVersion 探测到的 Core 接口版本："v1" / "v2"。两者的路径与能力都不同，
+	// 界面要按它说明"能不能拿到推送时间"。
+	CoreAPIVersion string `json:"coreApiVersion"`
+	// CoreNoPushTime 这台 Harbor 给不出 tag 推送时间（v1 就是）。
+	// **必须传到界面上**：否则用户会以为"最新 tag"是按推送时间排的。
+	CoreNoPushTime bool `json:"coreNoPushTime"`
 	// CoreProjects 当前凭据可见的项目数（Core 通道通时才有意义）。
 	CoreProjects int `json:"coreProjects"`
+	// CoreRepos 可见的镜像仓库数 —— 只有 v1 匿名探测给得出（走 /api/search）。
+	CoreRepos int `json:"coreRepos"`
 }
 
 // HarborSettings 读取当前 Harbor 连接配置（不含口令明文）。
@@ -2737,9 +2749,9 @@ func (s *SystemService) UpdateHarborSettings(ctx context.Context, in HarborSetti
 	if err != nil {
 		return nil, err
 	}
-	// Core 地址与 registry 地址填成同一个是**最常见的错**（实测那台 Harbor 的 /api/v2.0
-	// 在 registry 端口上全是 404）。不在这里硬拒 —— 有的部署确实同端口 ——
-	// 但要提示，让用户去点"测试连接"看 Core 那条的结论。
+	// Core 地址与 registry 地址填成同一个**不是错**：两者常常就在同一个入口上
+	// （实测那台 Harbor v1.1.2：/v2/ 与 /api/ 都在 :5000；Harbor v2 也是一个入口同时提供
+	// /v2/ 与 /api/v2.0/）。所以既不拦也不提示，只把它当"显式覆盖 registry 地址"。
 	replacePwd := strings.TrimSpace(in.Password) != ""
 	if err := store.SaveHarborConfig(ctx, s.deps.DB, s.deps.Sealer, store.HarborSaveInput{
 		Enabled: in.Enabled, BaseURL: base, CoreURL: core, Registry: registry,
@@ -2835,10 +2847,19 @@ func (s *SystemService) TestHarborConnection(ctx context.Context, in TestHarborI
 	res := &HarborTestResult{UsedSavedValues: usingSaved}
 	base, core := strings.TrimSpace(cfg.BaseURL), strings.TrimSpace(cfg.CoreAPIURL)
 	if base == "" && core == "" {
-		res.Message = "两个地址都没填：registry 组件地址（读 digest）与 Core API 地址（读 tag 推送时间）" +
-			"至少要填一个"
+		res.Message = "两个地址都没填：registry 组件地址（读 digest）与 Core API 地址（读 tag 列表）至少要填一个"
 		return res, nil
 	}
+	// Core 地址留空 ⇒ **按 registry 地址探**，不是"跳过 Core 通道"。
+	// 依据（实测）：那台 Harbor 是 v1.1.2，Core(/api/) 与 registry(/v2/) 就在同一个 :5000 上；
+	// Harbor v2 的常规部署也是一个入口同时提供 /v2/ 与 /api/v2.0/。
+	// 所以第二个地址只是给"registry 走独立端口/镜像站"的部署留的覆盖项。
+	// 不这么回退的话，用户会看到一句"未填写 Core API 地址"，以为还得再找一个地址。
+	coreProbeAddr := core
+	if coreProbeAddr == "" {
+		coreProbeAddr = base
+	}
+	cfg.CoreAPIURL = coreProbeAddr
 	// 测试的语义就是"假设已启用"：未启用的配置也要能测通，
 	// 否则用户必须"先保存再测试"，而保存意味着把一份没验过的配置写进了库。
 	cfg.Enabled = true
@@ -2857,7 +2878,7 @@ func (s *SystemService) TestHarborConnection(ctx context.Context, in TestHarborI
 		res.RegistryMessage = "未填写 registry 组件地址"
 	}
 
-	if core != "" {
+	if coreProbeAddr != "" {
 		client := integration.NewHarborCore(cfg)
 		if client == nil {
 			res.CoreMessage = "Core API 地址无法解析"
@@ -2866,11 +2887,18 @@ func (s *SystemService) TestHarborConnection(ctx context.Context, in TestHarborI
 		} else {
 			res.CoreOK = probe.OK
 			res.CoreMessage = probe.Message
+			if core == "" && base != "" {
+				// 说明白"这不是你没填，是平台按同一个地址探的"。
+				res.CoreMessage += fmt.Sprintf("（未单独填 Core 地址，按 registry 地址 %s 探测）", base)
+			}
 			res.CoreVersion = probe.Version
+			res.CoreAPIVersion = probe.APIVersion
+			res.CoreNoPushTime = probe.NoPushTime
 			res.CoreProjects = probe.ProjectsVisible
+			res.CoreRepos = probe.ReposVisible
 		}
 	} else {
-		res.CoreMessage = "未填写 Core API 地址（无法读取 tag 的推送时间与推送人）"
+		res.CoreMessage = "未填写 Core API 地址"
 	}
 
 	res.Latency = int(time.Since(start).Milliseconds())
@@ -2879,14 +2907,19 @@ func (s *SystemService) TestHarborConnection(ctx context.Context, in TestHarborI
 	switch {
 	case res.RegistryOK && res.CoreOK:
 		res.OK = true
-		res.Message = fmt.Sprintf("两条通道都通（耗时 %dms）：registry 读 digest，Core 读 tag 推送时间", res.Latency)
+		if res.CoreNoPushTime {
+			// v1 的能力边界必须说出来：不然后面做"最新 tag"时会被一个
+			// 按构建时间排的列表误导（用户以为那是推送时间）。
+			// ⚠️ 这段是**原样渲染**到页面上的，不要用 `**加粗**` 这类 Markdown 标记。
+			res.Message = fmt.Sprintf("两条通道都通（耗时 %dms）：registry 读 digest，Core 读 tag 列表。"+
+				"⚠️ 这台是 Harbor %s 的 v1 接口，不提供推送时间 —— \"最新\"只能按镜像构建时间或 tag 名排",
+				res.Latency, res.CoreVersion)
+		} else {
+			res.Message = fmt.Sprintf("两条通道都通（耗时 %dms）：registry 读 digest，Core 读 tag 的推送时间", res.Latency)
+		}
 	case base == "":
 		res.OK = res.CoreOK
 		res.Message = fmt.Sprintf("只有 Core 通道（%s）：镜像存在性校验将没有 registry 可读", ternary(res.CoreOK, "已连通", "不通"))
-	case core == "":
-		res.OK = res.RegistryOK
-		res.Message = fmt.Sprintf("只有 registry 通道（%s）：读不到 tag 的推送时间，\"最新 tag\"只能按 tag 名排序",
-			ternary(res.RegistryOK, "已连通", "不通"))
 	default:
 		res.Message = "至少有一条通道不通，见下面两条各自的结论"
 	}
@@ -2973,11 +3006,18 @@ func ternary(ok bool, a, b string) string {
 // 这个集成有两条互不相通的通道，只写一个地址会让人以为两件事都通了。
 func harborDetail(cfg config.HarborConfig) string {
 	parts := []string{}
-	if b := strings.TrimSpace(cfg.BaseURL); b != "" {
-		parts = append(parts, "registry="+b)
+	base := strings.TrimSpace(cfg.BaseURL)
+	core := strings.TrimSpace(cfg.CoreAPIURL)
+	if base != "" {
+		parts = append(parts, "registry="+base)
 	}
-	if c := strings.TrimSpace(cfg.CoreAPIURL); c != "" {
-		parts = append(parts, "Core="+c)
+	switch {
+	case core != "":
+		parts = append(parts, "Core="+core)
+	case base != "":
+		// 没单独填 Core 时按 registry 地址探，这里必须写出来——
+		// 否则"状态页通着、配置里只有一行地址"看起来像少配了什么。
+		parts = append(parts, "Core="+base+"（同 registry 地址）")
 	}
 	if len(parts) == 0 {
 		return "已连通"

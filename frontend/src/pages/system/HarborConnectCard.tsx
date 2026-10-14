@@ -24,14 +24,18 @@ const { Text, Paragraph } = Typography;
 /**
  * Harbor 接入配置卡片（「系统管理 › 第三方集成」）。
  *
- * ⚠️ 两个地址必须分开填，这不是重复：
+ * 两条通道，读的东西不同：
  *
- *   registry 组件地址  走 /v2/（OCI Distribution），读 manifest/digest —— 部署时判"这个 tag 在不在"
- *   Core API 地址      走 /api/v2.0/，读 tag 的**推送时间与推送人** —— 判"哪个是最新推的"
+ *   registry 组件地址  走 /v2/（OCI Distribution），读 manifest/digest —— 判"这个 tag 在不在"
+ *   Core API 地址      读 tag 列表（v2 还带推送时间）—— 判"有哪些 tag、哪个最新"
  *
- * 实测目标 Harbor 只对外暴露了 registry 组件（:5000），Core 接口在别的入口上，
- * 所以两个地址填成同一个是最常见的错 —— 点「测试连接」会分别给出结论，
- * Core 那条会明确说是 404（地址不是 Core 接口）还是 401（账号密码不对）。
+ * ⚠️ **两者通常就在同一个入口上**，所以 Core 地址留空即可（平台按 registry 地址探）：
+ * Harbor v2 在一个端口同时提供 /v2/ 与 /api/v2.0/；实测那台 Harbor **v1.1.2**
+ * 的 /v2/ 与 /api/ 也都在 :5000。这个字段只是给"registry 走独立端口/镜像站"的部署留的覆盖项。
+ *
+ * 接口路径按 Harbor 版本自动识别（v1 → /api/，v2 → /api/v2.0/），
+ * 所以**只填入口地址**，别带 /api 或 /api/v2.0 后缀。
+ * v1 拿不到 tag 推送时间（只能给镜像构建时间），测试连接会把这条边界明说出来。
  *
  * 口令：与 Jenkins 同一口径 —— 只回"配没配"，留空保存＝不修改。
  */
@@ -163,8 +167,9 @@ const HarborConnectCard: React.FC<{ canWrite: boolean; onChanged?: () => void }>
       }
     >
       <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
-        Harbor 有<b>两条通道</b>，平台要读的东西不同，所以有两个地址、分别探活。
-        缺了 Core 通道读不到 tag 的推送时间与推送人；缺了 registry 通道无法判断镜像是否真的存在。
+        Harbor 有<b>两条通道</b>：registry 读镜像是否存在（digest），Core 读 tag 列表。
+        两者<b>通常就在同一个入口上</b> —— <b>Core 地址留空即按上面的 registry 地址探测</b>
+        （实测那台 Harbor v1.1.2 的 /v2/ 与 /api/ 都在 :5000）；只有 registry 走独立端口/镜像站时才需要分开填。
       </Paragraph>
 
       <Row gutter={16}>
@@ -178,13 +183,19 @@ const HarborConnectCard: React.FC<{ canWrite: boolean; onChanged?: () => void }>
           />
         </Col>
         <Col xs={24} md={12}>
-          <div style={{ fontSize: 12, color: '#5c6470', marginBottom: 4 }}>Core API 地址（走 /api/v2.0/）</div>
+          <div style={{ fontSize: 12, color: '#5c6470', marginBottom: 4 }}>
+            Core API 地址{' '}
+            {form.coreApiUrl ? null : <Tag>留空＝用上面的地址</Tag>}
+          </div>
           <Input
             value={form.coreApiUrl}
             onChange={(e) => patch({ coreApiUrl: e.target.value })}
-            placeholder="https://harbor.example.com"
+            placeholder="留空即可（多数部署与 registry 同端口）"
             disabled={!canWrite}
           />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            只填入口地址，不要带 /api 或 /api/v2.0 —— 路径按 Harbor 版本自动识别
+          </Text>
         </Col>
         <Col xs={24} md={12}>
           <div style={{ fontSize: 12, color: '#5c6470', marginBottom: 4 }}>镜像地址里的仓库部分</div>
@@ -270,12 +281,18 @@ const HarborConnectCard: React.FC<{ canWrite: boolean; onChanged?: () => void }>
             }
           />
           {channelAlert(result.registryOk, result.registryMessage, 'registry 通道', !form.baseUrl)}
-          {channelAlert(
-            result.coreOk,
-            result.coreVersion ? `${result.coreMessage}（Harbor ${result.coreVersion}，可见 ${result.coreProjects} 个项目）` : result.coreMessage,
-            'Core 通道',
-            !form.coreApiUrl,
-          )}
+          {/* 结论直接透传后端那句话：它已经把版本、可见数量**以及能力边界**
+              （v1 没有推送时间）写在一起了，前端再拼一遍只会拼重或拼错。 */}
+          {channelAlert(result.coreOk, result.coreMessage, 'Core 通道', !form.baseUrl && !form.coreApiUrl)}
+          {result.coreOk && result.coreNoPushTime ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginTop: 8 }}
+              message="这台 Harbor 是 v1 接口，没有 tag 推送时间"
+              description="下拉里的“最新标签”只能按镜像构建时间或标签名排序 —— 界面上会标明用的是哪一种，不会把它写成“推送时间”。"
+            />
+          ) : null}
         </>
       ) : null}
 
