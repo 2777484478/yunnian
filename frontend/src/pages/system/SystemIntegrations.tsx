@@ -37,6 +37,7 @@ import { PageHeader, SectionCard, StatCard } from '@/components/ui';
 import { systemApi } from '@/api';
 import GitLabConnectCard from '@/pages/system/GitLabConnectCard';
 import JenkinsConnectCard from '@/pages/system/JenkinsConnectCard';
+import HarborConnectCard from '@/pages/system/HarborConnectCard';
 import { hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
 import { fmt } from '@/utils/format';
@@ -303,7 +304,7 @@ const SystemIntegrations: React.FC = () => {
         icon={<LinkOutlined />}
         style={{ marginBottom: 16 }}
         message="凭证统一由平台托管"
-        description="GitLab 访问令牌、Jenkins API Token 均加密存储于平台数据库（AES-256-GCM），页面只显示掩码、不回显明文，修改后立即生效无需重启。Harbor 与 K8s 的凭据目前仍来自 configs/config.yaml——这两者的接入实现尚未落地，暂不提供在线配置。"
+        description="GitLab 访问令牌、Jenkins API Token、Harbor 账号口令均加密存储于平台数据库（AES-256-GCM），页面只显示掩码、不回显明文，修改后立即生效无需重启。K8s 集群凭据在「系统管理 › 集群接入」里单独维护（导入 kubeconfig 时逐集群探测）。"
       />
 
       {/* GitLab 接入配置。放在集成状态卡片之后、平台运行参数之前：
@@ -323,6 +324,18 @@ const SystemIntegrations: React.FC = () => {
         canWrite={canWrite}
         onChanged={() => {
           // 同上：启用/停用会在 jenkins ⇄ local 之间切换实际实现。
+          integrationsApi.refresh();
+        }}
+      />
+
+      {/* Harbor 接入配置。与上面两张卡并排同层。
+          它有**两条通道**（registry 组件 /v2/ 读 digest、Core /api/v2.0/ 读 tag 推送时间），
+          所以卡片上是两个地址、测试连接分别出结论 —— 合成一个地址会出现
+          "接上了但某一类信息永远读不到"。 */}
+      <HarborConnectCard
+        canWrite={canWrite}
+        onChanged={() => {
+          // 启用/停用会在 harbor-registry-v2 ⇄ local 之间切换实际实现。
           integrationsApi.refresh();
         }}
       />

@@ -200,13 +200,19 @@ type WebhookConfig struct {
 
 // HarborConfig 镜像仓库。
 type HarborConfig struct {
-	Enabled  bool     `yaml:"enabled"`
-	BaseURL  string   `yaml:"baseUrl"`
-	Registry string   `yaml:"registry"` // 用于拼装完整镜像地址的对外地址
-	Username string   `yaml:"username"`
-	Password string   `yaml:"password"`
-	Insecure bool     `yaml:"insecure"` // 自签证书时跳过校验
-	Timeout  Duration `yaml:"timeout"`
+	Enabled  bool   `yaml:"enabled"`
+	BaseURL  string `yaml:"baseUrl"`
+	Registry string `yaml:"registry"` // 用于拼装完整镜像地址的对外地址
+	// CoreAPIURL 是 Harbor 的 **Core 管理接口**（/api/v2.0/）地址，与上面的 BaseURL 不是一回事：
+	//   BaseURL   说 registry 组件（如 https://host:5000），走 /v2/，拿 manifest/digest；
+	//   CoreAPIURL 说 Core（如 https://host），走 /api/v2.0/，拿 tag 的**推送时间与推送人**。
+	// 实测目标 Harbor 只对外暴露了 registry 组件（/api/v2.0/* 在 :5000/:443/:80 上全是 404），
+	// 所以这个地址通常是另一个端口/网关，必须单独配、单独探活。
+	CoreAPIURL string   `yaml:"coreApiUrl"`
+	Username   string   `yaml:"username"`
+	Password   string   `yaml:"password"`
+	Insecure   bool     `yaml:"insecure"` // 自签证书时跳过校验
+	Timeout    Duration `yaml:"timeout"`
 }
 
 // GitLabConfig 代码托管。

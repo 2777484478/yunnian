@@ -149,6 +149,15 @@ func (s *SystemService) Integrations(ctx context.Context) ([]IntegrationStatusDT
 		s.log("system").Warn("读取 Jenkins 配置失败，状态展示回退到配置文件", "err", err)
 	}
 
+	// Harbor 也从库里读：它原先**没有界面配置**、只读 config.yaml，
+	// 于是"界面上改了什么"与"这个卡片显示什么"必然对不上。
+	hbCfg := ic.Harbor
+	if cur, err := store.LoadHarborConfig(ctx, s.deps.DB, s.deps.Sealer, ic.Harbor); err == nil {
+		hbCfg = cur.Cfg
+	} else {
+		s.log("system").Warn("读取 Harbor 配置失败，状态展示回退到配置文件", "err", err)
+	}
+
 	add := func(key, name string, enabled bool, ping func(context.Context) error, detail, disabledDetail string) {
 		item := IntegrationStatusDTO{Key: key, Name: name, Enabled: enabled}
 		switch key {
@@ -175,8 +184,34 @@ func (s *SystemService) Integrations(ctx context.Context) ([]IntegrationStatusDT
 		out = append(out, item)
 	}
 
-	add("harbor", "镜像仓库 Harbor", ic.Harbor.Enabled, s.deps.Up.Registry.Ping,
-		fmt.Sprintf("已连通：%s", ic.Harbor.BaseURL),
+	// Harbor 的两条通道分别探，**都通才算"已连通"**（配置了哪条就探哪条）：
+	// 只探 registry 的话，"Core 地址填成 registry 端口"这种最常见的错会显示成绿的。
+	add("harbor", "镜像仓库 Harbor", hbCfg.Enabled, func(ctx context.Context) error {
+		base, core := strings.TrimSpace(hbCfg.BaseURL), strings.TrimSpace(hbCfg.CoreAPIURL)
+		if base == "" && core == "" {
+			return fmt.Errorf("未填写地址：registry 组件（读 digest）与 Core API（读 tag 推送时间）至少要填一个")
+		}
+		if base != "" {
+			if err := integration.NewHarborRegistry(hbCfg).Ping(ctx); err != nil {
+				return fmt.Errorf("registry 组件（%s）：%w", base, err)
+			}
+		}
+		if core != "" {
+			client := integration.NewHarborCore(hbCfg)
+			if client == nil {
+				return fmt.Errorf("Core API 地址无法解析：%s", core)
+			}
+			probe, err := client.Ping(ctx)
+			if err != nil {
+				return fmt.Errorf("Core API（%s）：%w", core, err)
+			}
+			if !probe.OK {
+				return fmt.Errorf("Core API（%s）：%s", core, probe.Message)
+			}
+		}
+		return nil
+	},
+		harborDetail(hbCfg),
 		"未启用真实实现，当前使用内置本地实现")
 	add("gitlab", "代码托管 GitLab", glCfg.Enabled, s.deps.Up.Repository.Ping,
 		fmt.Sprintf("已连通：%s", glCfg.BaseURL),
@@ -2601,6 +2636,353 @@ func parseTimeParam(v string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("无法解析时间 %q", v)
+}
+
+// --------------------------------------------------------------------------- Harbor 接入
+//
+// 与 Jenkins 同一套形状（配置读 / 配置写 / 连通性测试），差别只在**两条通道**：
+// registry 组件（/v2/，读 digest）与 Core 管理接口（/api/v2.0/，读 tag 的推送时间）。
+// 它们可能不在同一个地址上，所以测试连接**分别出结论**，不合成一句"连接失败"。
+
+// HarborSettingsDTO 对外视图：口令只回"配没配"，绝不回明文。
+type HarborSettingsDTO struct {
+	Enabled    bool   `json:"enabled"`
+	BaseURL    string `json:"baseUrl"`
+	CoreAPIURL string `json:"coreApiUrl"`
+	Registry   string `json:"registry"`
+	Username   string `json:"username"`
+	// HasPassword 只回布尔 —— 与 kubeconfig 同一口径：明文没有读出口。
+	HasPassword bool `json:"hasPassword"`
+	Insecure    bool `json:"insecure"`
+	Timeout     int  `json:"timeout"`
+	// Impl 当前实际干活的实现（harbor-registry-v2 / local）。
+	Impl string `json:"impl"`
+	// Source 这份值来自 db 还是 config.yaml —— 让用户知道自己在改哪一份。
+	Source string `json:"source"`
+	// Identity 上次连通性测试识别到的账号。
+	Identity  string `json:"identity"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// HarborSettingsInput 保存入参。
+type HarborSettingsInput struct {
+	Enabled    bool   `json:"enabled"`
+	BaseURL    string `json:"baseUrl"`
+	CoreAPIURL string `json:"coreApiUrl"`
+	Registry   string `json:"registry"`
+	Username   string `json:"username"`
+	// Password 空 = 不修改；要清空必须显式 clearPassword（前端只看得到掩码）。
+	Password      string `json:"password"`
+	ClearPassword bool   `json:"clearPassword"`
+	Insecure      bool   `json:"insecure"`
+	Timeout       int    `json:"timeout"`
+}
+
+// TestHarborInput 测试入参。全空 = 测库里已保存的那份。
+type TestHarborInput struct {
+	BaseURL    string `json:"baseUrl"`
+	CoreAPIURL string `json:"coreApiUrl"`
+	Registry   string `json:"registry"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	Insecure   *bool  `json:"insecure"`
+	Timeout    int    `json:"timeout"`
+}
+
+// HarborTestResult 两条通道各自的结论 + 一句总述。
+type HarborTestResult struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+	Latency int    `json:"latency"`
+	// UsedSavedValues 说明本次测的是库里那份，还是表单里还没保存的值。
+	UsedSavedValues bool `json:"usedSavedValues"`
+
+	RegistryOK      bool   `json:"registryOk"`
+	RegistryMessage string `json:"registryMessage"`
+	CoreOK          bool   `json:"coreOk"`
+	CoreMessage     string `json:"coreMessage"`
+	CoreVersion     string `json:"coreVersion"`
+	// CoreProjects 当前凭据可见的项目数（Core 通道通时才有意义）。
+	CoreProjects int `json:"coreProjects"`
+}
+
+// HarborSettings 读取当前 Harbor 连接配置（不含口令明文）。
+func (s *SystemService) HarborSettings(ctx context.Context) (*HarborSettingsDTO, error) {
+	cur, err := store.LoadHarborConfig(ctx, s.deps.DB, s.deps.Sealer, s.deps.Cfg.Integration.Harbor)
+	if err != nil {
+		return nil, errs.Internalf(err, "读取 Harbor 配置失败")
+	}
+	return harborSettingsDTO(cur, s.deps.Up.Registry.Name()), nil
+}
+
+// UpdateHarborSettings 保存 Harbor 连接配置。
+func (s *SystemService) UpdateHarborSettings(ctx context.Context, in HarborSettingsInput, c Caller) (*HarborSettingsDTO, error) {
+	base, err := normalizeHarborURL(in.BaseURL, "registry 组件地址", "https://es-repo.example.com:5000")
+	if err != nil {
+		return nil, err
+	}
+	core, err := normalizeHarborURL(in.CoreAPIURL, "Core API 地址", "https://harbor.example.com")
+	if err != nil {
+		return nil, err
+	}
+	// 启用前至少要有一个地址：否则开关是"开了但什么都不会发生"，界面上却显示已接入。
+	if in.Enabled && base == "" {
+		return nil, errs.Invalid("启用 Harbor 接入前请先填写 registry 组件地址 —— " +
+			"部署时的镜像存在性校验走的是这条通道（/v2/）")
+	}
+	if in.ClearPassword && strings.TrimSpace(in.Password) != "" {
+		return nil, errs.Invalid("不能同时提交新密码与清除密码，请二选一")
+	}
+	registry, err := normalizeHarborRegistry(in.Registry)
+	if err != nil {
+		return nil, err
+	}
+	// Core 地址与 registry 地址填成同一个是**最常见的错**（实测那台 Harbor 的 /api/v2.0
+	// 在 registry 端口上全是 404）。不在这里硬拒 —— 有的部署确实同端口 ——
+	// 但要提示，让用户去点"测试连接"看 Core 那条的结论。
+	replacePwd := strings.TrimSpace(in.Password) != ""
+	if err := store.SaveHarborConfig(ctx, s.deps.DB, s.deps.Sealer, store.HarborSaveInput{
+		Enabled: in.Enabled, BaseURL: base, CoreURL: core, Registry: registry,
+		Username: in.Username, Insecure: in.Insecure, Timeout: in.Timeout,
+		Password: in.Password, ClearPassword: in.ClearPassword,
+		// 传入配置文件里的口令：首次保存且未填密码时它会被搬进加密存储，
+		// 让"留空=不修改"在首次保存时也字面成立。
+		FallbackPassword: s.deps.Cfg.Integration.Harbor.Password,
+		UserID:           c.UserID(),
+	}); err != nil {
+		return nil, errs.Internalf(err, "保存 Harbor 配置失败")
+	}
+
+	// 审计只记"改了哪几项"，绝不记口令本身。
+	changes := []string{}
+	if in.Enabled {
+		changes = append(changes, "启用接入")
+	} else {
+		changes = append(changes, "停用接入")
+	}
+	if base != "" {
+		changes = append(changes, "registry 地址="+base)
+	}
+	if core != "" {
+		changes = append(changes, "Core 地址="+core)
+	}
+	if u := strings.TrimSpace(in.Username); u != "" {
+		changes = append(changes, "账号="+u)
+	}
+	switch {
+	case replacePwd:
+		changes = append(changes, "更新密码")
+	case in.ClearPassword:
+		changes = append(changes, "清除密码")
+	}
+	s.audit(ctx, c, auditInput{
+		Module: "系统", Action: "integration:harbor-update", TargetType: "integration",
+		TargetName: "harbor", Detail: "更新 Harbor 接入配置（" + strings.Join(changes, "，") + "）",
+	})
+
+	return s.HarborSettings(ctx)
+}
+
+// TestHarborConnection 分别探测两条通道。
+//
+// `ok=false` 是**正常响应**（HTTP 200）：表示"请求发出去了但没通"，
+// 与"接口本身出错"是两回事 —— 前端必须读 ok 与两条通道各自的 message。
+func (s *SystemService) TestHarborConnection(ctx context.Context, in TestHarborInput, c Caller) (*HarborTestResult, error) {
+	cur, err := store.LoadHarborConfig(ctx, s.deps.DB, s.deps.Sealer, s.deps.Cfg.Integration.Harbor)
+	if err != nil {
+		return nil, errs.Internalf(err, "读取 Harbor 配置失败")
+	}
+	cfg := cur.Cfg
+	usingSaved := true
+
+	if v := strings.TrimSpace(in.BaseURL); v != "" {
+		u, err := normalizeHarborURL(v, "registry 组件地址", "https://es-repo.example.com:5000")
+		if err != nil {
+			return nil, err
+		}
+		cfg.BaseURL, usingSaved = u, false
+	}
+	if v := strings.TrimSpace(in.CoreAPIURL); v != "" {
+		u, err := normalizeHarborURL(v, "Core API 地址", "https://harbor.example.com")
+		if err != nil {
+			return nil, err
+		}
+		cfg.CoreAPIURL, usingSaved = u, false
+	}
+	if v := strings.TrimSpace(in.Registry); v != "" {
+		r, err := normalizeHarborRegistry(v)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Registry, usingSaved = r, false
+	}
+	if v := strings.TrimSpace(in.Username); v != "" {
+		cfg.Username, usingSaved = v, false
+	}
+	if v := strings.TrimSpace(in.Password); v != "" {
+		cfg.Password, usingSaved = v, false
+	}
+	if in.Insecure != nil {
+		cfg.Insecure, usingSaved = *in.Insecure, false
+	}
+	if in.Timeout > 0 {
+		cfg.Timeout, usingSaved = config.Duration(time.Duration(in.Timeout)*time.Second), false
+	}
+	if cfg.Timeout.D() <= 0 {
+		cfg.Timeout = config.Duration(15 * time.Second)
+	}
+
+	res := &HarborTestResult{UsedSavedValues: usingSaved}
+	base, core := strings.TrimSpace(cfg.BaseURL), strings.TrimSpace(cfg.CoreAPIURL)
+	if base == "" && core == "" {
+		res.Message = "两个地址都没填：registry 组件地址（读 digest）与 Core API 地址（读 tag 推送时间）" +
+			"至少要填一个"
+		return res, nil
+	}
+	// 测试的语义就是"假设已启用"：未启用的配置也要能测通，
+	// 否则用户必须"先保存再测试"，而保存意味着把一份没验过的配置写进了库。
+	cfg.Enabled = true
+
+	start := time.Now()
+
+	if base != "" {
+		client := integration.NewHarborRegistry(cfg)
+		if perr := client.Ping(ctx); perr != nil {
+			res.RegistryMessage = perr.Error()
+		} else {
+			res.RegistryOK = true
+			res.RegistryMessage = fmt.Sprintf("%s 连通（/v2/ 可读）", base)
+		}
+	} else {
+		res.RegistryMessage = "未填写 registry 组件地址"
+	}
+
+	if core != "" {
+		client := integration.NewHarborCore(cfg)
+		if client == nil {
+			res.CoreMessage = "Core API 地址无法解析"
+		} else if probe, perr := client.Ping(ctx); perr != nil {
+			res.CoreMessage = perr.Error()
+		} else {
+			res.CoreOK = probe.OK
+			res.CoreMessage = probe.Message
+			res.CoreVersion = probe.Version
+			res.CoreProjects = probe.ProjectsVisible
+		}
+	} else {
+		res.CoreMessage = "未填写 Core API 地址（无法读取 tag 的推送时间与推送人）"
+	}
+
+	res.Latency = int(time.Since(start).Milliseconds())
+
+	// 总述：**填了的通道全通**才算通；没填的通道不算失败，但要说明它没被验证。
+	switch {
+	case res.RegistryOK && res.CoreOK:
+		res.OK = true
+		res.Message = fmt.Sprintf("两条通道都通（耗时 %dms）：registry 读 digest，Core 读 tag 推送时间", res.Latency)
+	case base == "":
+		res.OK = res.CoreOK
+		res.Message = fmt.Sprintf("只有 Core 通道（%s）：镜像存在性校验将没有 registry 可读", ternary(res.CoreOK, "已连通", "不通"))
+	case core == "":
+		res.OK = res.RegistryOK
+		res.Message = fmt.Sprintf("只有 registry 通道（%s）：读不到 tag 的推送时间，\"最新 tag\"只能按 tag 名排序",
+			ternary(res.RegistryOK, "已连通", "不通"))
+	default:
+		res.Message = "至少有一条通道不通，见下面两条各自的结论"
+	}
+
+	if usingSaved {
+		who := strings.TrimSpace(cfg.Username)
+		if err := store.SaveHarborProbeResult(ctx, s.deps.DB, who); err != nil {
+			s.log("system").Warn("记录 Harbor 探测结果失败", "err", err)
+		}
+	}
+
+	s.audit(ctx, c, auditInput{
+		Module: "系统", Action: "integration:harbor-test", TargetType: "integration",
+		TargetName: "harbor",
+		Detail: fmt.Sprintf("测试 Harbor 连通性：registry=%v，Core=%v（%s）",
+			res.RegistryOK, res.CoreOK, res.Message),
+	})
+	return res, nil
+}
+
+// harborSettingsDTO 组装对外视图。口令在这里被"降级"成布尔，保证明文不出 service 层。
+func harborSettingsDTO(cur *store.HarborSettings, impl string) *HarborSettingsDTO {
+	source := "config"
+	if cur.FromDB {
+		source = "db"
+	}
+	dto := &HarborSettingsDTO{
+		Enabled:     cur.Cfg.Enabled,
+		BaseURL:     cur.Cfg.BaseURL,
+		CoreAPIURL:  cur.Cfg.CoreAPIURL,
+		Registry:    cur.Cfg.Registry,
+		Username:    cur.Cfg.Username,
+		HasPassword: cur.Cfg.Password != "",
+		Insecure:    cur.Cfg.Insecure,
+		Timeout:     int(cur.Cfg.Timeout.D().Seconds()),
+		Impl:        impl,
+		Source:      source,
+		Identity:    cur.Identity,
+	}
+	if !cur.UpdatedAt.IsZero() {
+		dto.UpdatedAt = cur.UpdatedAt.Format(time.RFC3339)
+	}
+	return dto
+}
+
+// normalizeHarborURL 规范化一个 http(s) 地址。
+//
+// 报错时说清"要填什么"，而不是只说"格式不对"—— 用户看到的地址栏提示词就是这里给的例子。
+func normalizeHarborURL(v, what, example string) (string, error) {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+		return "", errs.Invalid(fmt.Sprintf("%s 必须以 http:// 或 https:// 开头，例如 %s", what, example))
+	}
+	return strings.TrimRight(s, "/"), nil
+}
+
+// normalizeHarborRegistry 规范化"镜像地址里出现的仓库部分"（如 es-repo.example.com:5000）。
+//
+// 这一段**不能带 scheme**：它要原样拼进完整镜像引用（`<registry>/<imageName>:<tag>`），
+// 带上 `https://` 会拼出一个 Kubernetes 认不出的镜像地址。
+func normalizeHarborRegistry(v string) (string, error) {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return "", nil
+	}
+	if strings.Contains(s, "://") {
+		return "", errs.Invalid("镜像地址里的仓库部分不要带 http(s):// 前缀：" +
+			"它会被原样拼进镜像引用，例如 es-repo.example.com:5000")
+	}
+	return strings.TrimRight(s, "/"), nil
+}
+
+func ternary(ok bool, a, b string) string {
+	if ok {
+		return a
+	}
+	return b
+}
+
+// harborDetail 说清"连通的到底是哪条通道"，而不是只报一个地址 ——
+// 这个集成有两条互不相通的通道，只写一个地址会让人以为两件事都通了。
+func harborDetail(cfg config.HarborConfig) string {
+	parts := []string{}
+	if b := strings.TrimSpace(cfg.BaseURL); b != "" {
+		parts = append(parts, "registry="+b)
+	}
+	if c := strings.TrimSpace(cfg.CoreAPIURL); c != "" {
+		parts = append(parts, "Core="+c)
+	}
+	if len(parts) == 0 {
+		return "已连通"
+	}
+	return "已连通：" + strings.Join(parts, "，")
 }
 
 // csvField 做 CSV 转义（含逗号/引号/换行时用双引号包裹）。

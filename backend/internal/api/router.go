@@ -287,6 +287,11 @@ func (h *handler) registerSystem(g *gin.RouterGroup) {
 	s.GET("/integrations/jenkins", middleware.RequirePerm("user:manage"), h.getJenkinsSettings)
 	s.PUT("/integrations/jenkins", middleware.RequirePerm("user:manage"), h.updateJenkinsSettings)
 	s.POST("/integrations/jenkins/test", middleware.RequirePerm("user:manage"), h.testJenkinsConnection)
+	// Harbor 接入：与 Jenkins 同一套权限（配置 + 凭据，属「第三方集成」页维护）。
+	// 两条通道（registry /v2/ 与 Core /api/v2.0/）在测试接口里分别出结论。
+	s.GET("/integrations/harbor", middleware.RequirePerm("user:manage"), h.getHarborSettings)
+	s.PUT("/integrations/harbor", middleware.RequirePerm("user:manage"), h.updateHarborSettings)
+	s.POST("/integrations/harbor/test", middleware.RequirePerm("user:manage"), h.testHarborConnection)
 	s.GET("/integrations/jenkins/jobs", middleware.RequirePerm("build:read"), h.listJenkinsJobs)
 	s.GET("/integrations/jenkins/params", middleware.RequirePerm("build:read"), h.jenkinsJobParams)
 	s.GET("/integrations/jenkins/param-values", middleware.RequirePerm("build:read"), h.jenkinsParamValues)
