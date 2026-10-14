@@ -2,20 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   App as AntApp,
-  AutoComplete,
   Badge,
   Button,
   Col,
   Divider,
-  Drawer,
-  Form,
   Input,
-  InputNumber,
   Row,
   Segmented,
-  Select,
   Space,
-  Switch,
   Table,
   Tag,
   Tooltip,
@@ -25,7 +19,6 @@ import type { ColumnsType } from 'antd/es/table';
 import {
   AppstoreOutlined,
   CloudServerOutlined,
-  EditOutlined,
   ExportOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -38,59 +31,22 @@ import { PageHeader, SectionCard, StatCard } from '@/components/ui';
 import { UsageBar } from '@/components/charts';
 import { EnvStatusBadge, MethodTag } from '@/components/StatusTag';
 import { DisabledTip } from '@/components/DisabledTip';
-import { KVFields } from '@/components/KVFields';
-import { clusterApi, environmentApi, userApi } from '@/api';
-import type { EnvProjectCandidate, EnvResources } from '@/api/cd';
-import {
-  OWN_CLUSTER_BADGE,
-  OWN_CLUSTER_HINT,
-  clusterBadgeOf,
-  clusterKeyOf,
-  isOwnCluster,
-} from '@/config/topology';
+import { EnvironmentActions } from '@/components/EnvironmentActions';
+import { EnvironmentEditDrawer } from '@/components/EnvironmentEditDrawer';
+import { environmentApi } from '@/api';
+import type { EnvResources } from '@/api/cd';
+import { OWN_CLUSTER_BADGE, OWN_CLUSTER_HINT, isOwnCluster } from '@/config/topology';
 import { hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
 import { envResStatusOf, envUsageOf, useEnvResources } from '@/hooks/useEnvResources';
 import { isServiceAbnormal, liveWordOf } from '@/utils/live';
-import type { Environment, EnvService, EnvVar } from '@/types';
+import type { Environment, EnvService } from '@/types';
 
 const { Text } = Typography;
 
-/**
- * 新建/编辑抽屉的表单值。与后端 `EnvironmentInput` 逐字段对齐
- * （`EnvironmentList` 是环境的**唯一写入入口**，字段名对不上就会静默丢弃）。
- *
- * 「新建」只渲染建环境真正必需的字段；带 * 的几项依赖"环境已经存在"，
- * 仅在编辑时出现 —— 最典型的是 `projectKeys`：纳管项目要往 `service_instances`
- * 里建行，而那个表的外键指向环境，环境还没建出来就无从谈起。
- */
-interface EnvFormValues {
-  name: string;
-  key?: string;
-  cluster: string;
-  clusterVersion?: string;
-  namespace: string;
-  deployMethod: Environment['deployMethod'];
-  // —— 新建/编辑都有 ——
-  owner?: string;
-  needApproval?: boolean;
-  approvers?: string[];
-  ownKubeconfig?: boolean;
-  kubeconfig?: string;
-  stageLabel?: string;
-  stageOrder?: number;
-  description?: string;
-  // —— 仅编辑（* 环境存在之后才谈得上的配置）——
-  registry?: string;
-  ingressDomain?: string;
-  enabled?: boolean;
-  projectKeys?: string[];
-  vars?: EnvVar[];
-}
-
 const EnvironmentList: React.FC = () => {
   const navigate = useNavigate();
-  const { message, modal } = AntApp.useApp();
+  const { message } = AntApp.useApp();
   const canWrite = hasPerm('env:write');
 
   const [view, setView] = useState<'card' | 'table'>('card');
@@ -109,31 +65,10 @@ const EnvironmentList: React.FC = () => {
   const envApi = useApi(() => environmentApi.list({ keyword, pageSize: 100 }), [keyword]);
   const envs = useMemo(() => envApi.data?.list ?? [], [envApi.data]);
 
-  // 集群候选来自「系统管理 › 集群接入」里**已接入的集群** —— 不再写死三套常量
-  // （原先那套与 topology.ts 的 CLUSTER_META 重复且会各自漂移），也不从环境列表反推
-  // （反推会把"某个环境手输错的集群名"当成合法候选，一路复制下去）。
-  // 集群接口还没实现时列表为空，AutoComplete 退化为自由输入，环境照样能维护。
-  const clustersApi = useApi(() => clusterApi.list(), []);
-  const clusterOptions = useMemo(() => {
-    const fromPlatform = (clustersApi.data ?? []).map((c) => ({
-      label: `${c.name} · ${clusterKeyOf(c.key)}${
-        c.status === 'connected' ? '' : `（${clusterBadgeOf(c.status)}）`
-      }`,
-      value: clusterKeyOf(c.key),
-    }));
-    // 存量环境里的集群标识可能不在集群表里（集群实体化之前手输的值），
-    // 这些也要列出来，否则编辑环境时连"当前所属集群"都看不到。
-    //
-    // 但后缀不能一律写"未接入平台"：集群接口挂掉时所有人都对不上，
-    // 那不是"没接入"，是"没读到"。两种情况的后缀分开写。
-    const suffix = clustersApi.error ? '（集群列表读取失败）' : '（未接入平台）';
-    const known = new Set(fromPlatform.map((o) => o.value));
-    const legacy = Array.from(new Set(envs.map((e) => clusterKeyOf(e.cluster)).filter(Boolean)))
-      .filter((c) => !known.has(c))
-      .sort()
-      .map((c) => ({ label: `${c}${suffix}`, value: c }));
-    return [...fromPlatform, ...legacy];
-  }, [clustersApi.data, clustersApi.error, envs]);
+  // 集群候选、用户候选、变量回填都在 `EnvironmentEditDrawer` 里 —— 不再各自算一份。
+  // 本页只负责把"现有环境用过的集群标识"递过去，供抽屉补存量候选
+  // （历史手输的值不在集群表里，不列出来编辑时连当前所属集群都看不到）。
+  const clusterValuesInUse = useMemo(() => envs.map((e) => e.cluster).filter(Boolean), [envs]);
 
   // 卡片上要显示"该项目下有几个服务 / 几个待关注"，环境接口本身不带这个聚合值。
   // 环境数量是个位数，每个环境打一次 /services 比让后端为列表页加一个聚合字段更划算，
@@ -152,6 +87,16 @@ const EnvironmentList: React.FC = () => {
   const servicesOf = (envKey: string): EnvService[] => allServices.filter((s) => s.envKey === envKey);
 
   /**
+   * 删除确认弹窗用的实例数：**读不到就给 `null`**（不预判），不拿 0 充数。
+   *
+   * 后端 `DeleteEnvironment` 在环境内仍有服务实例时直接 40901 拒绝，所以这个数只用来
+   * "把能不能删提前讲清楚"（锁住确认按钮）；判错了代价是用户点下去才吃一个 409，
+   * 或者明明能删却被拦住。服务列表没加载完/失败时只能退回确定性文案。
+   */
+  const svcCountOf = (envKey: string): number | null =>
+    servicesApi.error || servicesApi.loading ? null : servicesOf(envKey).length;
+
+  /**
    * 卡片 / 表格上的 CPU、内存与「资源状态」**一律读集群实时值**。
    *
    * 原先用的是环境快照（`environment.cpu_usage / mem_usage`）：它由「同步集群」写入，
@@ -166,33 +111,6 @@ const EnvironmentList: React.FC = () => {
   const liveResOf = (envKey: string): EnvResources | null => envRes.map?.get(envKey) ?? null;
   const usageOf = (envKey: string): EnvResources | null => envUsageOf(envRes.map, envKey);
   const resStatusOf = (envKey: string): Environment['status'] => envResStatusOf(envRes.map, envKey);
-
-  // 平台用户（owner / 审批人选择器）。后端把 owner、approvers 都按**用户名**解析成 ID，
-  // 所以这里必须提交 username，不能提交展示名。
-  //
-  // 走 `/users/options`（权限 `env:write`）而不是 `/users`（要 `user:manage`）：
-  // 后者会让只有 `env:write` 的 ops 拿到 40300、候选恒为空 —— 抽屉能打开却一个人都选不到。
-  const usersApi = useApi(() => userApi.options(), []);
-  const userOptions = useMemo(
-    () => (usersApi.data ?? []).map((u) => ({ label: `${u.name}（${u.username}）`, value: u.username })),
-    [usersApi.data],
-  );
-  /**
-   * 展示名 → 用户名。**只给编辑表单的「负责人」预填用**。
-   *
-   * `EnvironmentDTO.owner` 回的是**展示名**（卡片上"负责人 运维示例"直接用它），
-   * 而选择器的 `value` 是**用户名** —— 两个标识对不上，预填过去的下拉里根本没有这一项，
-   * 于是 AntD 只能把原值当标签渲染（用户看到"运维示例"而不是"运维示例（ops）"，
-   * 打开下拉也不会被选中）。审批人走的是后端专门回的 `approverUsernames`，
-   * 负责人没有对应字段，所以在这里换一次。
-   * 换不到就原样保留（值本身可能就是用户名，或者用户列表还没回来）—— 后端
-   * `resolveOwner` 按 `name = ? OR username = ?` 查，两种写法都能存。
-   */
-  const usernameByName = useMemo(() => {
-    const m = new Map<string, string>();
-    (usersApi.data ?? []).forEach((u) => m.set(u.name, u.username));
-    return m;
-  }, [usersApi.data]);
 
   const refreshAll = () => {
     envApi.refresh();
@@ -283,166 +201,23 @@ const EnvironmentList: React.FC = () => {
   };
 
   // ------------------------------------------------------------------ 抽屉
+  // 表单、集群/用户候选、变量回填、提交口径全在 `EnvironmentEditDrawer` 里；
+  // 本页只管"开给谁" —— 这里只 set，不做任何 setFieldsValue（漏填的后果不是空的，
+  // 是"看着正常、一保存就把某字段清掉"）。
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Environment | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [form] = Form.useForm<EnvFormValues>();
-  // 「独立 kubeconfig」开关：打开后才渲染凭据输入框。
-  // 用 useWatch 取值而不是拿 shouldUpdate 包一层，避免整块 Row 在每次击键时重渲染。
-  const ownKube = Form.useWatch('ownKubeconfig', form) as boolean | undefined;
-
-  // 编辑时要回填环境变量（它不在环境对象上，得单独取 /environments/{key}/vars）
-  const varsApi = useApi(() => environmentApi.vars(editTarget!.key), [editTarget?.key], {
-    enabled: !!editTarget,
-  });
-
-  // 编辑时的项目候选（新建时还没有 key，无法调候选接口）
-  const candApi = useApi(() => environmentApi.projectCandidates(editTarget!.key), [editTarget?.key], {
-    enabled: !!editTarget,
-  });
-  const candidates: EnvProjectCandidate[] = useMemo(() => candApi.data ?? [], [candApi.data]);
 
   const openCreate = () => {
     setEditTarget(null);
-    form.resetFields();
-    form.setFieldsValue({
-      deployMethod: 'k8s',
-      enabled: true,
-      needApproval: false,
-      approvers: [],
-      projectKeys: [],
-      ownKubeconfig: false,
-      vars: [{ key: 'TZ', value: 'Asia/Shanghai' }],
-    });
     setDrawerOpen(true);
   };
 
   const openEdit = (env: Environment) => {
     setEditTarget(env);
-    form.setFieldsValue({
-      name: env.name,
-      key: env.key,
-      cluster: env.cluster,
-      clusterVersion: env.clusterVersion,
-      namespace: env.namespace,
-      deployMethod: env.deployMethod,
-      registry: env.registry,
-      ingressDomain: env.ingressDomain,
-      // 负责人：DTO 回的是**展示名**，而选择器的 value 是用户名 → 换一次再预填，
-      // 否则这个值在下拉的选项里不存在（见 `usernameByName`）。
-      owner: usernameByName.get(env.owner) ?? env.owner,
-      needApproval: env.needApproval,
-      // 审批人用**用户名**预填（`approverUsernames` 与 `approvers` 一一对应，是后端
-      // 专门为这个表单回的）。以前只回展示名、这里只能留空让人重选 ——
-      // 于是"打开编辑不重选"就等于把审批人清空，needApproval 时更会被下面的必填规则
-      // 拦住、逼用户每次重新点一遍。
-      approvers: env.approverUsernames ?? [],
-      projectKeys: env.projectKeys,
-      enabled: env.enabled,
-      description: env.description,
-      stageLabel: env.stageLabel,
-      stageOrder: env.stageOrder,
-      // 凭据只回「有没有配」：开关反映现状，但**不回填内容**（明文没有读出口）。
-      // 用户不重新粘贴 ⇒ 提交时 kubeconfig 为空 ⇒ 后端按「不修改凭据」处理。
-      ownKubeconfig: env.clusterSource === 'own' || !!env.hasKubeconfig,
-      kubeconfig: '',
-      vars: [],
-    });
     setDrawerOpen(true);
   };
 
   // 变量取回后补进表单（不能放在 openEdit 里——那边拿不到异步结果）
-  useEffect(() => {
-    if (!drawerOpen || !editTarget || !varsApi.data) return;
-    form.setFieldsValue({ vars: varsApi.data });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [varsApi.data, drawerOpen, editTarget]);
-
-  const submit = async () => {
-    const v = await form.validateFields();
-    setSaving(true);
-    try {
-      const body = {
-        key: v.key,
-        name: v.name,
-        cluster: v.cluster,
-        clusterVersion: v.clusterVersion,
-        namespace: v.namespace,
-        deployMethod: v.deployMethod,
-        registry: v.registry,
-        ingressDomain: v.ingressDomain,
-        owner: v.owner,
-        needApproval: v.needApproval,
-        // 审批人不按 needApproval 清空：关掉审批不该顺手把已配的人删掉
-        // （再打开时又得重新点一遍）。优先用表单里的值，拿不到时退回编辑目标上的现值
-        // —— needApproval=false 时那个 Form.Item 压根不渲染，
-        // "没渲染"不等于"用户清空了"。
-        approvers: v.approvers ?? editTarget?.approverUsernames ?? [],
-        projectKeys: v.projectKeys ?? [],
-        enabled: v.enabled,
-        description: v.description,
-        stageLabel: v.stageLabel,
-        stageOrder: v.stageOrder,
-        // 集群凭据来源必须**显式**回传：后端只在收到 'own' / 'platform' 时才动凭据，
-        // 空串表示"没提这件事"（留给其他调用方）。漏传的后果是开关点了没反应。
-        clusterSource: v.ownKubeconfig ? ('own' as const) : ('platform' as const),
-        // 只在勾了自带且**真的粘了内容**时才回传；留空 = 保持原有凭据不变
-        ...(v.ownKubeconfig && v.kubeconfig ? { kubeconfig: v.kubeconfig } : {}),
-      };
-
-      const saved = editTarget
-        ? await environmentApi.update(editTarget.key, body)
-        : await environmentApi.create(body);
-
-      // 环境变量走独立接口（覆盖式）。它在环境创建之后才能存——因为路径里有 key。
-      // 变量保存失败不回滚环境本身：环境已经建出来了，变量让用户重存一次比丢环境好。
-      const key = saved?.key || v.key;
-      if (key && v.vars) {
-        try {
-          await environmentApi.saveVars(key, v.vars.filter((x) => x?.key));
-        } catch (e) {
-          message.warning(`环境已保存，但环境变量未写入：${(e as Error).message}`);
-        }
-      }
-
-      message.success(editTarget ? `环境「${v.name}」已保存` : `环境「${v.name}」已创建`);
-      setDrawerOpen(false);
-      refreshAll();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const removeEnv = (env: Environment) => {
-    // 后端是硬约束而非建议：DELETE /environments/:key 在环境内仍有服务实例时直接 40901 拒绝。
-    // 本页已加载了各环境的服务（servicesApi），据此做前端预检——有实例时直接锁住"确认删除"，
-    // 把"能不能删"提前讲清楚，而不是让用户点下去才吃一个 409。
-    // 服务列表未成功加载时不预判（退回确定性文案），避免用不完整数据误锁。
-    const known = !servicesApi.error && !servicesApi.loading;
-    const svcCount = servicesOf(env.key).length;
-    const blocked = known && svcCount > 0;
-    return modal.confirm({
-      title: `确认删除环境「${env.name}」？`,
-      content: (
-        <div style={{ fontSize: 13, lineHeight: 1.9 }}>
-          删除后该环境下的部署与回滚记录会保留，但环境配置不可恢复。
-          <div style={{ color: '#ff4d4f', marginTop: 6 }}>
-            {blocked
-              ? `该环境下还有 ${svcCount} 个服务实例，须先下线全部服务再删除环境。`
-              : '该环境下若仍有服务实例将无法删除，须先下线全部服务。'}
-          </div>
-        </div>
-      ),
-      okText: '确认删除',
-      okButtonProps: { danger: true, disabled: blocked },
-      onOk: async () => {
-        await environmentApi.remove(env.key);
-        message.success(`环境「${env.name}」已删除`);
-        refreshAll();
-      },
-    });
-  };
-
   // ------------------------------------------------------------------ 表格列
   const columns: ColumnsType<Environment> = [
     {
@@ -562,35 +337,13 @@ const EnvironmentList: React.FC = () => {
       fixed: 'right',
       width: 190,
       render: (_, r) => (
-        <Space size={2}>
-          <Button type="link" size="small" style={{ paddingInline: 4 }} onClick={() => navigate(`/cd/environments/${r.key}`)}>
-            进入
-          </Button>
-          <DisabledTip title={canWrite ? undefined : '当前账号没有 env:write 权限'}>
-            <Button
-              type="link"
-              size="small"
-              icon={<EditOutlined />}
-              style={{ paddingInline: 4 }}
-              disabled={!canWrite}
-              onClick={() => openEdit(r)}
-            >
-              编辑
-            </Button>
-          </DisabledTip>
-          <DisabledTip title={canWrite ? undefined : '当前账号没有 env:write 权限'}>
-            <Button
-              type="link"
-              size="small"
-              danger
-              style={{ paddingInline: 4 }}
-              disabled={!canWrite}
-              onClick={() => removeEnv(r)}
-            >
-              删除
-            </Button>
-          </DisabledTip>
-        </Space>
+        <EnvironmentActions
+          env={r}
+          svcCount={svcCountOf(r.key)}
+          withEnter
+          onEdit={openEdit}
+          onRemoved={refreshAll}
+        />
       ),
     },
   ];
@@ -822,10 +575,13 @@ const EnvironmentList: React.FC = () => {
                     )}
                   </div>
 
-                  {/* 「编辑」原先只存在于**表格视图**的操作列，而本页默认落在**卡片视图**上
-                      —— 于是"去编辑里把项目纳管进来"这句话在默认视图里无处可点（用户 2026-09-29 反馈
-                      "哪里有编辑？我没看到啊"）。点卡片只会进详情页，而详情页没有环境级编辑入口，
-                      所以必须把入口补在卡片上。按钮要 stopPropagation，否则会连带触发卡片自身的"进入"。 */}
+                  {/* 环境级动作**必须两个视图一致**。
+                      这块原先只补了「编辑」：它原本只长在表格视图的操作列里，而本页默认落在
+                      卡片视图上，于是"去编辑里把项目纳管进来"在默认视图里无处可点
+                      （用户 2026-09-29 反馈"哪里有编辑？我没看到啊"）。
+                      补编辑时漏了删除，于是同一个毛病换到删除上继续犯。
+                      现在两个视图共用 `EnvironmentActions`，加动作只需改那一处。
+                      卡片整卡就是"进入"，所以这里 `withEnter` 不传。 */}
                   <div className="yn-env-card__foot">
                     <span style={{ display: 'flex', gap: 12, minWidth: 0, overflow: 'hidden' }}>
                       <span style={{ whiteSpace: 'nowrap' }}>
@@ -833,21 +589,13 @@ const EnvironmentList: React.FC = () => {
                       </span>
                       <span style={{ whiteSpace: 'nowrap' }}>负责人 {env.owner || '—'}</span>
                     </span>
-                    <DisabledTip title={canWrite ? undefined : '当前账号没有 env:write 权限'}>
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<EditOutlined />}
-                        style={{ paddingInline: 4, fontSize: 12, height: 20 }}
-                        disabled={!canWrite}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openEdit(env);
-                        }}
-                      >
-                        编辑
-                      </Button>
-                    </DisabledTip>
+                    <EnvironmentActions
+                      env={env}
+                      svcCount={svcCountOf(env.key)}
+                      compact
+                      onEdit={openEdit}
+                      onRemoved={refreshAll}
+                    />
                   </div>
                 </div>
               </Col>
@@ -868,221 +616,16 @@ const EnvironmentList: React.FC = () => {
         </SectionCard>
       )}
 
-      {/* -------------------------------------------------- 新建 / 编辑环境 */}
-      <Drawer
+      {/* -------------------------------------------------- 新建 / 编辑环境
+          表单本体在 `EnvironmentEditDrawer`（列表页与详情页共用一份）：
+          字段口径只留一处，避免"两个入口、字段漂移、静默丢字段"。 */}
+      <EnvironmentEditDrawer
         open={drawerOpen}
-        width={720}
-        title={editTarget ? `编辑环境 · ${editTarget.name}` : '新建环境'}
+        target={editTarget}
+        clusterValuesInUse={clusterValuesInUse}
         onClose={() => setDrawerOpen(false)}
-        extra={
-          <Space>
-            <Button onClick={() => setDrawerOpen(false)}>取消</Button>
-            <Button type="primary" loading={saving} onClick={submit}>
-              保存
-            </Button>
-          </Space>
-        }
-        destroyOnClose
-      >
-        <Form form={form} layout="vertical" requiredMark="optional">
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item name="name" label="环境名称" rules={[{ required: true, message: '请输入环境名称' }]}>
-                <Input placeholder="如：华东压测区" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                name="key"
-                label="环境标识"
-                rules={[
-                  { required: true, message: '请输入环境标识' },
-                  // 与后端 isValidKey **逐字一致**：必须以小写字母开头。
-                  // 这里松一格（放行数字开头）的后果是"填得进去、提交必被 40000 拒"。
-                  { pattern: /^[a-z][a-z0-9-]*$/, message: '小写字母开头，仅含小写字母、数字与中划线' },
-                ]}
-                tooltip="全局唯一，如 test / staging / prod。创建后不可修改。"
-              >
-                <Input placeholder="perf-sh" disabled={!!editTarget} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                name="cluster"
-                label="所属集群"
-                rules={[{ required: true, message: '请选择或输入集群' }]}
-                extra={
-                  clusterOptions.length
-                    ? '来自「系统管理 › 集群接入」的已接入集群'
-                    : '平台还没有接入任何集群：去「系统管理 › 集群接入」导入 kubeconfig 后即可选'
-                }
-              >
-                <AutoComplete
-                  options={clusterOptions}
-                  placeholder="选择已接入集群，或输入新标识"
-                  filterOption={(input, option) => String(option?.value ?? '').includes(input)}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="namespace" label="Namespace" rules={[{ required: true, message: '请输入 Namespace' }]}>
-                <Input placeholder="如：yunnian-perf-sh" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="deployMethod" label="部署方式" rules={[{ required: true }]}>
-                <Select
-                  options={[
-                    { label: 'K8s Deployment', value: 'k8s' },
-                    { label: 'Helm', value: 'helm' },
-                    { label: 'Docker Compose', value: 'compose' },
-                    { label: '自定义脚本', value: 'script' },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              <Form.Item name="needApproval" label="部署审批" valuePropName="checked">
-                <Switch checkedChildren="需要" unCheckedChildren="免审批" />
-              </Form.Item>
-            </Col>
-            <Col span={6}>
-              {/* 环境与集群「两者都允许」（用户 2026-09-29 定）：既可以引用平台已接入
-                  集群的凭据，也可以自带一份（临时集群、别人托管的集群）。
-                  自带时凭据按 current-context 最小化后单独加密，挂在
-                  environment.kubeconfig_credential_id 上。 */}
-              <Form.Item
-                name="ownKubeconfig"
-                label="独立 kubeconfig"
-                valuePropName="checked"
-                tooltip="打开后该环境使用自己那份 kubeconfig，而不是引用上面所选集群在平台登记的凭据"
-              >
-                <Switch checkedChildren="自带" unCheckedChildren="引用集群" />
-              </Form.Item>
-            </Col>
-            {editTarget ? (
-              <Col span={6}>
-                <Form.Item name="enabled" label="启用状态" valuePropName="checked">
-                  <Switch checkedChildren="启用" unCheckedChildren="停用" />
-                </Form.Item>
-              </Col>
-            ) : null}
-
-            {/* 审批人：只有开了「部署审批」才出现，但它是**必需**的 ——
-                后端对 needApproval=true 且审批人为空的环境直接拒单
-                （"需要审批的环境至少要指定一名审批人"）。缺了它，上面那个开关就是个死开关。 */}
-            <Col span={24}>
-              <Form.Item noStyle shouldUpdate={(p, c) => p.needApproval !== c.needApproval}>
-                {({ getFieldValue }) =>
-                  getFieldValue('needApproval') ? (
-                    <Form.Item
-                      name="approvers"
-                      label="审批人"
-                      rules={[{ required: true, message: '需要审批的环境至少指定一名审批人' }]}
-                      tooltip="提交部署后由这些账号审批。审批人请用平台账号（用户名）。"
-                    >
-                      <Select mode="multiple" optionFilterProp="label" options={userOptions} placeholder="选择审批人" />
-                    </Form.Item>
-                  ) : null
-                }
-              </Form.Item>
-            </Col>
-
-            {ownKube ? (
-              <Col span={24}>
-                {editTarget?.hasKubeconfig ? (
-                  <Alert
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: 12 }}
-                    message="该环境已配置自带 kubeconfig（内容不会回显）。留空保存＝沿用原凭据；重新粘贴＝换一份。"
-                  />
-                ) : null}
-                <Form.Item
-                  name="kubeconfig"
-                  label="该环境的 kubeconfig"
-                  rules={editTarget ? [] : [{ required: true, message: '请粘贴或上传 kubeconfig 内容' }]}
-                  extra="按 current-context 最小化后加密存储（AES-256-GCM）；保存后界面不再回显内容"
-                >
-                  <Input.TextArea
-                    rows={4}
-                    className="yn-mono"
-                    style={{ fontSize: 12 }}
-                    placeholder={'apiVersion: v1\nkind: Config\n...'}
-                  />
-                </Form.Item>
-              </Col>
-            ) : null}
-
-            <Col span={12}>
-              {/* 阶段由环境自带：自定义环境（如「华东压测区」）也能排进链路，
-                  而不是因为 key 匹配不上默认映射被扔到最后 */}
-              <Form.Item name="stageLabel" label="发布阶段" tooltip="拓扑链路里显示的阶段名，如「性能压测」">
-                <Input placeholder="如：性能压测" maxLength={16} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="stageOrder" label="链路序号" tooltip="越小越靠左（越接近研发）。留空则排在其他环境之后">
-                <InputNumber min={1} max={99} style={{ width: '100%' }} placeholder="如：3" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="owner" label="负责人" tooltip="用于环境责任归属，可留空">
-                <Select allowClear showSearch optionFilterProp="label" options={userOptions} placeholder="选择负责人" />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="description" label="环境描述">
-                <Input placeholder="说明该环境的用途与发布规范" maxLength={200} />
-              </Form.Item>
-            </Col>
-
-            {/* —— 以下仅编辑时出现：都是"环境已经存在"才谈得上的配置 ——
-                projectKeys 尤其不能省：纳管项目才会往 service_instances 里建行，
-                而 POST /deployments 认的就是服务实例。新建时环境还没有 key，
-                候选接口都调不通，所以那时显示它只会是个灰框。 */}
-            {editTarget ? (
-              <>
-                <Col span={12}>
-                  <Form.Item name="registry" label="镜像仓库地址" tooltip="留空则使用平台默认仓库">
-                    <Input placeholder="harbor.yunnian.internal" />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item name="ingressDomain" label="入口域名">
-                    <Input placeholder="*.test.yunnian.cn" />
-                  </Form.Item>
-                </Col>
-                <Col span={24}>
-                  <Form.Item
-                    name="projectKeys"
-                    label="纳管项目"
-                    tooltip="选中的项目会接入该环境（同时建出服务实例）。只有纳管之后，项目才能在这个环境里发布。"
-                  >
-                    <Select
-                      mode="multiple"
-                      optionFilterProp="label"
-                      placeholder="选择项目"
-                      loading={candApi.loading}
-                      options={candidates.map((c) => ({ label: `${c.name}（${c.key}）`, value: c.key }))}
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={24}>
-                  {/* 外层 Form.Item 不带 name：KVFields 内部已是 Form.List name="vars"，
-                      同名套两层会让两个 field 争抢同一个数据路径。 */}
-                  <Form.Item
-                    label="环境变量 / 配置参数"
-                    tooltip="对所有部署到本环境的服务生效。密文项在列表页不会回显明文。"
-                  >
-                    <KVFields name="vars" addText="添加环境变量" keyPlaceholder="如 DB_HOST" />
-                  </Form.Item>
-                </Col>
-              </>
-            ) : null}
-          </Row>
-        </Form>
-      </Drawer>
+        onSaved={refreshAll}
+      />
     </div>
   );
 };

@@ -51,6 +51,10 @@ import { KVFields } from '@/components/KVFields';
 // antd 的 Tooltip 对 disabled 子元素不生效（disabled 的 button 不派发鼠标事件），
 // 所有"灰着的按钮"的说明一律经 DisabledTip 下发。
 import { DisabledTip } from '@/components/DisabledTip';
+// 环境级动作（编辑 / 删除）与环境表单：与列表页**共用同一份实现**。
+// 本页原先两样都没有 —— 从卡片"进入"之后反而什么都改不了。
+import { EnvironmentActions } from '@/components/EnvironmentActions';
+import { EnvironmentEditDrawer } from '@/components/EnvironmentEditDrawer';
 import {
   DeployStatusTag,
   EnvStatusBadge,
@@ -191,9 +195,17 @@ const EnvironmentDetail: React.FC = () => {
   // 不门控就会落到 403 空壳页。
   const canAskAI = hasPerm('ai:query');
 
+  // 环境级编辑抽屉。表单本体在 `EnvironmentEditDrawer`（与列表页共用），
+  // 本页只负责开/关 —— 页面里所有能改环境的地方都走它，不再各写一份字段。
+  const [envEditOpen, setEnvEditOpen] = useState(false);
+
   // ------------------------------------------------------------------ 取数
   const envApi = useApi(() => environmentApi.get(key), [key], { enabled: !!key });
   const env = envApi.data;
+
+  // 编辑抽屉的"存量集群标识"候选：本页只有这一个环境，把它的当前值带上，
+  // 否则编辑时那个值不在候选里（集群实体化之前手输的标识不在集群表内）。
+  const clusterValuesInUse = useMemo(() => (env?.cluster ? [env.cluster] : []), [env?.cluster]);
 
   // /environments/{key}/services 本身就带着该环境的全部服务，不需要再逐个拉 Pod。
   // Pod 明细在抽屉里按需取（/services/{id}/pods），避免列表页 N×M 次请求。
@@ -1064,6 +1076,16 @@ const EnvironmentDetail: React.FC = () => {
                 部署新服务
               </Button>
             </DisabledTip>
+            {/* 环境级动作：与列表页共用同一个组件（权限门控、实例数预检、二次确认
+                都只有一份）。用常规按钮而不是文字链接 —— 这一排已经有
+                「纳管项目 / 同步集群 / 部署历史」，两个裸的"编辑 / 删除"会分不清在编辑什么。 */}
+            <EnvironmentActions
+              env={env}
+              svcCount={servicesApi.error || servicesApi.loading ? null : services.length}
+              variant="button"
+              onEdit={() => setEnvEditOpen(true)}
+              onRemoved={() => navigate('/cd/environments')}
+            />
           </Space>
         }
       />
@@ -2186,6 +2208,15 @@ const EnvironmentDetail: React.FC = () => {
           </div>
         ) : null}
       </Modal>
+
+      {/* 环境级编辑：与列表页同一份表单与同一套提交口径 */}
+      <EnvironmentEditDrawer
+        open={envEditOpen}
+        target={env}
+        clusterValuesInUse={clusterValuesInUse}
+        onClose={() => setEnvEditOpen(false)}
+        onSaved={refreshAll}
+      />
     </div>
   );
 };
