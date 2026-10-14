@@ -156,6 +156,36 @@ func (p *Pool) CancelState(id uint64) (state string, ok bool) {
 	return state, true
 }
 
+// Size 当前并发上限。
+func (p *Pool) Size() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.size
+}
+
+// SetSize 调整并发上限（运行期可变，供「运行参数」页在线修改）。
+//
+//	调大 → **立刻**把等待队列里的任务拉起来跑，不必等某个任务结束才补位；
+//	调小 → **不打断已经在跑的**，只是不再补位，直到 running 降到新的上限以下。
+//
+// 这两条都是刻意的：用户改的是"以后最多同时跑几个"，不是"现在把正在跑的掐掉几个"。
+// 掐掉正在跑的部署意味着一次进行到一半的滚动更新被中止 —— 那是完全没有预期的副作用。
+//
+// size < 1 仍按 1 处理（与 NewPool 同一口径）：0 会让池彻底不再调度，
+// 表现为"提交成功但永远停在排队中"，比报错更难查。
+func (p *Pool) SetSize(size int) {
+	if size < 1 {
+		size = 1
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.size == size {
+		return
+	}
+	p.size = size
+	p.dispatchLocked()
+}
+
 // Running 统计执行中任务数。
 func (p *Pool) Running() int {
 	p.mu.Lock()

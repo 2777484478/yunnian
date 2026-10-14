@@ -127,7 +127,7 @@ export interface BatchRunnerProps {
   kind: 'ci' | 'cd';
   batchNo: string;
   tasks: BatchTaskDef[];
-  /** 并发上限（CD 排队发布固定 1） */
+  /** 并发上限（CD 由「运行参数」里的部署并发决定，见 BatchDeployWizard） */
   concurrency?: number;
   /** 目标环境名（CD 展示用） */
   envLabel?: string;
@@ -628,7 +628,9 @@ export const BatchRunner: React.FC<BatchRunnerProps> = ({
             <Text type="secondary" style={{ fontSize: 12 }}>
               {kind === 'ci'
                 ? `并发 ${concurrency} 个任务 · 由平台后端实际执行`
-                : `串行发布 · 逐服务滚动更新`}
+                : concurrency > 1
+                  ? `并发 ${concurrency} 个服务 · 逐服务滚动更新`
+                  : `串行发布 · 逐服务滚动更新`}
             </Text>
           </Space>
 

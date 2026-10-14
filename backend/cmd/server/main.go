@@ -190,6 +190,26 @@ func run() error {
 		StartedAt: startedAt,
 	})
 
+	// ------------------------------------------------------------------ 运行参数（并发上限）
+	//
+	// 两步，缺一不可：
+	//   Ensure → 把 runner.buildConcurrency / runner.deployConcurrency 补进 system_config。
+	//            通用参数编辑器**只显示库里已有的键**，不补的话用户在界面上根本看不到这个旋钮
+	//            （2026-10-14：用户问"批量发布为什么只排队发一个，我想自己设置"）。
+	//   Apply  → 按库里的值（逐键回退 config.yaml）调整任务池大小。
+	//            之后每次在界面上保存都会再 Apply 一次，所以改完不必重启。
+	if err := store.EnsureRuntimeSettings(ctx, db, cfg.Runner); err != nil {
+		log.Warn("初始化运行参数失败（沿用 config.yaml 的并发上限）", "err", err)
+	}
+	if rt, err := svc.System.RuntimeSettings(ctx); err != nil {
+		log.Warn("读取运行参数失败（沿用 config.yaml 的并发上限）", "err", err)
+	} else {
+		if err := svc.System.ApplyRuntimeSettings(ctx); err != nil {
+			log.Warn("应用运行参数到任务池失败（沿用 config.yaml 的并发上限）", "err", err)
+		}
+		log.Info("任务并发上限", "build", rt.BuildConcurrency, "deploy", rt.DeployConcurrency, "source", rt.Source)
+	}
+
 	// ------------------------------------------------------------------ HTTP
 	router := api.NewRouter(api.Deps{
 		Cfg:      cfg,

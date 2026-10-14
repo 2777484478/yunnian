@@ -100,6 +100,9 @@ const CONFIG_GROUP_LABEL: Record<string, string> = {
   // 但建议用上面的专用卡片：那里有格式校验与连通性测试，
   // 而令牌不在这些键里——它加密存在 secret_credential，不会出现在本表中。
   integration: '下游集成',
+  // 并发上限（构建 / 部署）。单独成组，因为它是"用着用着才发现要调"的那类旋钮 ——
+  // 用户遇到"批量发布怎么只排队发一个"时，得能一眼找到它（见下方该组的说明）。
+  runner: '运行参数（并发上限）',
 };
 
 /** 按 valueType 渲染合适的编辑器；值统一以字符串存取（后端契约） */
@@ -209,7 +212,7 @@ const SystemIntegrations: React.FC = () => {
       );
       notification.success({
         message: '平台参数已更新',
-        description: `本次提交 ${dirtyKeys.length} 项：${dirtyKeys.join('、')}。部分参数需要重启相关组件后才生效。`,
+        description: `本次提交 ${dirtyKeys.length} 项：${dirtyKeys.join('、')}。并发上限类参数（runner.*）已立即生效；其余个别参数需重启相关组件后才生效。`,
       });
       setDraft({});
       configApi.refresh();
@@ -485,6 +488,25 @@ const SystemIntegrations: React.FC = () => {
                 </span>
               </span>
             </Divider>
+            {/* 这一组必须额外说明两件事，否则用户改完还会怀疑"到底生效没有"：
+                ① 保存后立即生效、不需要重启（与页面底部那句"部分参数需重启"不同）；
+                ② 并发不是越大越快 —— 构建吃机器、部署抢集群资源，还会打乱依赖顺序。 */}
+            {group === 'runner' ? (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="并发上限保存后立即生效，不需要重启服务"
+                description={
+                  <span style={{ fontSize: 12 }}>
+                    超出并发数的任务会显示「排队中」，前面的任务结束后自动补位。
+                    <b>部署并发 1 = 逐服务串行发布</b>（默认）：同一环境一次只更新一个服务，
+                    避免滚动更新互相抢占资源、也避免上游服务还没就绪下游就跟着发。
+                    调大即同时发布多个不同服务（同一个服务始终不允许并发）。
+                  </span>
+                }
+              />
+            ) : null}
             <Descriptions
               column={{ xs: 1, sm: 2, xl: 3 }}
               size="small"

@@ -13,8 +13,32 @@ import type {
 // （对应后端 handler_system.go）
 // ---------------------------------------------------------------------------
 
+/**
+ * 运行参数（并发上限）的**生效值**。
+ *
+ * 单独一个接口而不是复用 `/system/config`：那个要 user:manage（它列的是平台全部参数），
+ * 而用它的地方是**批量发布页** —— 发版的人只需要知道"一次能提交几个"。
+ * 写仍然走 `/system/config`（平台参数编辑器），不在这里另开写入口。
+ */
+export interface RuntimeSettings {
+  buildConcurrency: number;
+  deployConcurrency: number;
+  /** 这份值来自哪：db（界面上改过）/ config（config.yaml）。 */
+  source: 'db' | 'config';
+  /** 允许填的最大值，界面据此限制输入。 */
+  maxConcurrency: number;
+  runningBuilds: number;
+  queuedBuilds: number;
+  runningDeploys: number;
+  queuedDeploys: number;
+  updatedAt: string;
+}
+
 export const systemApi = {
   stats: () => http.get<SystemStats>('/system/stats'),
+
+  /** 当前生效的运行参数（并发上限）与在跑/排队实况 */
+  runtime: () => http.get<RuntimeSettings>('/system/runtime'),
 
   /** 各下游集成（Harbor/GitLab/K8s）的实现方式与就绪状态 */
   integrations: async (): Promise<IntegrationStatus[]> =>

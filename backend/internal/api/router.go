@@ -310,6 +310,12 @@ func (h *handler) registerSystem(g *gin.RouterGroup) {
 
 	s.GET("/config", middleware.RequirePerm("user:manage"), h.listConfig)
 	s.PUT("/config", middleware.RequirePerm("user:manage"), h.updateConfig)
+
+	// 运行参数（并发上限）的生效值。读只要 deploy:read 或 user:manage：
+	// 批量发布页要拿它决定一次提交几个，而发版的人不一定有 user:manage。
+	// 写仍然走 /system/config（user:manage），不在这里另开一个写接口 ——
+	// 同一个值两个写入口，迟早出现"从哪个页面改的"说不清。
+	s.GET("/runtime", middleware.RequirePerm("deploy:read", "user:manage"), h.getRuntimeSettings)
 }
 
 func (h *handler) registerClusters(g *gin.RouterGroup) {

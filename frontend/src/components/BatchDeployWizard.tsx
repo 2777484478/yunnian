@@ -31,8 +31,9 @@ import { BatchRunner } from './BatchRunner';
 import type { BatchResult, BatchTaskDef, BatchTaskHandle, BatchTaskOutcome } from './BatchRunner';
 import { ProjectTypeTag, ServiceStatusTag } from './StatusTag';
 import { DisabledTip } from '@/components/DisabledTip';
-import { ApiError, deployApi, environmentApi, imageApi } from '@/api';
-import { canDeployOn } from '@/auth';
+import { ApiError, deployApi, environmentApi, imageApi, systemApi } from '@/api';
+import { canDeployOn, hasPerm } from '@/auth';
+import { useApi } from '@/hooks/useApi';
 import { humanSize } from '@/utils/format';
 import { liveFallbackText, liveReplicaTotal, liveState, liveStatusWord } from '@/utils/live';
 import type { DeployStatus, Environment, EnvService, ImageRecord, ServiceLive } from '@/types';
@@ -422,6 +423,19 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   const batchNoLabel = batchNo ? `本次批次（界面标识）${batchNo}` : '';
 
   // ------------------------------------------------------------------ 发布
+
+  /**
+   * 部署并发上限（生效值，来自「系统管理 › 平台参数 › 运行参数」）。
+   *
+   * ⚠️ 这里**不能写死 1**：后端部署池的大小就是按这个值设的，
+   * 前端若固定 1 个 1 个提交，用户把并发调成 5 也照样一个个发 ——
+   * 表面上是"界面慢"，实际是前端把后端的并发能力压掉了。
+   *
+   * 读不到（没权限 / 请求失败）时退回 1：串行是安全侧，
+   * 而"以为在并发、其实后端在排队"只是慢，不会出错。
+   */
+  const runtimeApi = useApi(() => systemApi.runtime(), []);
+  const deployConcurrency = Math.max(1, runtimeApi.data?.deployConcurrency ?? 1);
 
   /** 本批次的公共提交参数 */
   const startPayloadRef = useRef<{
@@ -1126,7 +1140,7 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
             kind="cd"
             batchNo={batchNoLabel}
             tasks={tasks}
-            concurrency={1}
+            concurrency={deployConcurrency}
             envLabel={env?.name ?? envKey}
             startTask={startTask}
             fetchOutcome={fetchOutcome}
@@ -1162,7 +1176,12 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
         <div className="yn-batch__actions-left">
           {step === 0 ? (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              提示：发布按服务串行排队执行，同一环境不会并发更新，避免滚动发布互相抢占资源
+              {deployConcurrency > 1
+                ? `提示：最多 ${deployConcurrency} 个服务同时发布（同一服务不允许并发），再多的排队等待`
+                : '提示：发布按服务串行排队执行，同一环境不会并发更新，避免滚动发布互相抢占资源'}
+              {hasPerm('user:manage')
+                ? '。并发数可在「系统管理 › 第三方集成 › 平台参数 → 运行参数」调整，保存后立即生效'
+                : ''}
             </Text>
           ) : null}
           {step === 1 && !loading ? (

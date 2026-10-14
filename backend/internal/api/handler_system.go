@@ -103,6 +103,22 @@ func (h *handler) listConfig(c *gin.Context) {
 	httpx.OK(c, gin.H{"list": list})
 }
 
+// getRuntimeSettings GET /system/runtime
+//
+// 并发上限的**生效值** + 当前在跑/排队实况。
+//
+// 为什么单独开一个接口，而不是复用 GET /system/config：那个要 user:manage
+// （它列的是平台全部参数），而批量发布页只需要知道"一次能提交几个"，
+// 用它的角色是发版的人（deploy:read）——为一个数字把整份参数表开放给他们不值当。
+func (h *handler) getRuntimeSettings(c *gin.Context) {
+	dto, err := h.svc.System.RuntimeSettings(c.Request.Context())
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, dto)
+}
+
 // updateConfig PUT /system/config
 func (h *handler) updateConfig(c *gin.Context) {
 	var in service.UpdateConfigInput

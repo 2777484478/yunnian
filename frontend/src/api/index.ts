@@ -55,6 +55,7 @@ export { auditApi } from './audit';
 export type { AuditQuery, AuditExportResult } from './audit';
 
 export { systemApi, notifyApi, modelApi, gitlabApi } from './system';
+export type { RuntimeSettings } from './system';
 export type {
   ModelQuery,
   ModelTestResult,

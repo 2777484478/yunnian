@@ -159,3 +159,100 @@ func TestPositionReturnsZeroForRunningTask(t *testing.T) {
 		t.Errorf("排队中的任务 Position 应为 1，实际 %d", got)
 	}
 }
+
+// --------------------------------------------------------------------------- 运行期调整并发上限
+
+// TestSetSizeUpStartsWaitingTasksImmediately 调大并发**立刻**补位。
+//
+// 语义来自「运行参数」页：用户把部署并发从 1 调成 3，期望是"现在排队的那两个马上跑"，
+// 而不是"等当前这个跑完再说"——后者会让用户以为没生效，然后再点一次保存。
+func TestSetSizeUpStartsWaitingTasksImmediately(t *testing.T) {
+	p := NewPool("deploy", 1, 10)
+
+	t1, r1 := blockTask(t)
+	defer r1()
+	if _, err := p.Submit(1, t1); err != nil {
+		t.Fatalf("提交第 1 个任务失败: %v", err)
+	}
+	waitRunning(t, p, 1)
+
+	t2, r2 := blockTask(t)
+	defer r2()
+	if pos, err := p.Submit(2, t2); err != nil || pos != 1 {
+		t.Fatalf("第 2 个任务应在排队（前面 1 个），实际 pos=%d err=%v", pos, err)
+	}
+	t3, r3 := blockTask(t)
+	defer r3()
+	if _, err := p.Submit(3, t3); err != nil {
+		t.Fatalf("提交第 3 个任务失败: %v", err)
+	}
+	if p.Running() != 1 || p.Queued() != 2 {
+		t.Fatalf("调大之前应为 1 跑 2 等，实际 %d 跑 %d 等", p.Running(), p.Queued())
+	}
+
+	p.SetSize(3)
+
+	// 两个排队的都该被立刻拉起来
+	waitRunning(t, p, 3)
+	if p.Queued() != 0 {
+		t.Errorf("调大后不该还有人排队，实际 %d", p.Queued())
+	}
+	if p.Size() != 3 {
+		t.Errorf("Size 应为 3，实际 %d", p.Size())
+	}
+}
+
+// TestSetSizeDownDoesNotInterruptRunning 调小并发**不打断已经在跑的**。
+//
+// 掐掉正在跑的部署 = 一次进行到一半的滚动更新被中止，那是完全没预期的副作用。
+// 正确行为是"不再补位"：等在跑的结束，直到 running 降到新上限以下。
+func TestSetSizeDownDoesNotInterruptRunning(t *testing.T) {
+	p := NewPool("deploy", 3, 10)
+
+	var releases []func()
+	for i := uint64(1); i <= 3; i++ {
+		task, rel := blockTask(t)
+		releases = append(releases, rel)
+		if _, err := p.Submit(i, task); err != nil {
+			t.Fatalf("提交任务 %d 失败: %v", i, err)
+		}
+	}
+	defer func() {
+		for _, r := range releases {
+			r()
+		}
+	}()
+	waitRunning(t, p, 3)
+
+	p.SetSize(1)
+
+	if p.Running() != 3 {
+		t.Fatalf("调小不该打断在跑的，实际 running=%d", p.Running())
+	}
+	// 新任务不能再被拉起来（槽位已"超员"）
+	t4, r4 := blockTask(t)
+	defer r4()
+	if pos, err := p.Submit(4, t4); err != nil || pos != 1 {
+		t.Fatalf("调小后新任务应排队，实际 pos=%d err=%v", pos, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if p.Running() != 3 {
+		t.Errorf("调小后不该再补位，实际 running=%d", p.Running())
+	}
+}
+
+// TestSetSizeIgnoresNonPositive 0 / 负数按 1 处理。
+//
+// 0 会让 dispatchLocked 永远不成立 —— 任务池从此不再调度，
+// 表现为"提交成功但一直停在排队中"，比直接报错更难查。
+func TestSetSizeIgnoresNonPositive(t *testing.T) {
+	p := NewPool("deploy", 2, 10)
+	p.SetSize(0)
+	if p.Size() != 1 {
+		t.Fatalf("0 应按 1 处理，实际 %d", p.Size())
+	}
+	p.SetSize(-5)
+	if p.Size() != 1 {
+		t.Fatalf("负数应按 1 处理，实际 %d", p.Size())
+	}
+}

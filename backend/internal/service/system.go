@@ -1038,6 +1038,11 @@ func (s *SystemService) UpdateConfig(ctx context.Context, in UpdateConfigInput, 
 			if err := validateConfigValue(item.ValueType, item.Value); err != nil {
 				return errs.Invalidf("配置项 %s：%s", item.Key, err.Error())
 			}
+			// 运行参数（并发上限）还要过范围校验：通用校验只看"是不是数字"，
+			// 而 0 会让任务池彻底不再调度、上千会把构建机与集群打满。
+			if err := checkRuntimeValue(item.Key, item.Value); err != nil {
+				return errs.Invalidf("配置项 %s：%s", item.Key, err.Error())
+			}
 			if cur.ConfigValue == item.Value {
 				continue
 			}
@@ -1056,6 +1061,20 @@ func (s *SystemService) UpdateConfig(ctx context.Context, in UpdateConfigInput, 
 		Module: "系统", Action: "config:update", TargetType: "system_config",
 		Detail: fmt.Sprintf("更新系统配置 %d 项", len(in.Items)),
 	})
+
+	// 改了运行参数就**立刻**应用到任务池：并发上限是"用着用着才发现要调"的旋钮，
+	// 需要重启才生效等于它不存在（用户 2026-10-14 的原话：我想自己设置，任意发几个不排队）。
+	// 失败只告警不报错：值已经落库、重启后照样生效，没必要让整次保存回滚。
+	for _, item := range in.Items {
+		if !store.IsRuntimeKey(item.Key) {
+			continue
+		}
+		if err := s.ApplyRuntimeSettings(ctx); err != nil {
+			s.log("system").Warn("运行参数已保存，但应用到任务池失败（重启后生效）", "err", err)
+		}
+		break
+	}
+
 	return s.ListConfig(ctx, "")
 }
 
