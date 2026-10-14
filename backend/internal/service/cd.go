@@ -105,10 +105,27 @@ type DeploymentQuery struct {
 
 // CreateDeploymentInput 创建部署单入参。
 type CreateDeploymentInput struct {
-	EnvKey         string `json:"envKey" binding:"required"`
-	ProjectKey     string `json:"projectKey" binding:"required"`
-	ImageRecordID  string `json:"imageRecordId"`
-	Tag            string `json:"tag"`
+	EnvKey     string `json:"envKey" binding:"required"`
+	ProjectKey string `json:"projectKey" binding:"required"`
+	// ImageSource 镜像来源，**二选一**：
+	//
+	//	platform（默认）用 ImageRecordID / Tag 从 image_record 里找（平台自己构建过的）
+	//	registry        用 RegistryTag 去镜像仓库取（仓库里实际存在的，含别人推的）
+	//
+	// 两个来源**都要保留、只能选一个**（用户 2026-10-14 明确要求）。都选、都不选都由
+	// CreateDeployment 拒绝 —— 让"发的是哪一份"永远只有一个答案。
+	ImageSource   string `json:"imageSource" binding:"omitempty,oneof=platform registry"`
+	ImageRecordID string `json:"imageRecordId"`
+	Tag           string `json:"tag"`
+	// RegistryTag 仓库里的标签名（ImageSource=registry 时必填）。
+	RegistryTag string `json:"registryTag" binding:"omitempty,max=191"`
+	// ImageOverride 只给**平台内部**复用（重新部署 / 重试）用：把上一单实际用的镜像
+	// 原样再来一次。刻意 `json:"-"` —— 它是不受项目校验约束的完整镜像串，
+	// 不能让请求体传得进来。内部路径拿到的值都出自本平台的部署记录，是可信的。
+	//
+	// 为什么必须有它：仓库标签来源的部署 `image_record_id = 0`，若只靠 ImageRecordID
+	// 传下去，重试会退化成"取该项目最新镜像"= **静默换版本**（实测这是原有行为）。
+	ImageOverride  string `json:"-"`
 	Replicas       *int   `json:"replicas"`
 	Strategy       string `json:"strategy" binding:"omitempty,oneof=RollingUpdate Recreate"`
 	Remark         string `json:"remark" binding:"omitempty,max=512"`
@@ -1304,7 +1321,7 @@ func (s *CDService) RedeployService(ctx context.Context, id uint64, c Caller) (*
 	if svc.CurrentImage == "" {
 		return nil, errs.StateConflict("该服务还没有部署过任何镜像，请先选择版本部署")
 	}
-	// 找当前镜像对应的镜像记录，拿不到就只按镜像地址部署。
+	// 找当前镜像对应的镜像记录，拿不到就按镜像地址原样部署。
 	var img model.ImageRecord
 	_ = s.db(ctx).Where("image = ?", svc.CurrentImage).Order("pushed_at desc").First(&img).Error
 
@@ -1316,6 +1333,10 @@ func (s *CDService) RedeployService(ctx context.Context, id uint64, c Caller) (*
 	}
 	if img.ID != 0 {
 		in.ImageRecordID = httpx.IDString(img.ID)
+	} else {
+		// 当前镜像没有平台构建记录（从仓库标签发的）。**必须原样指定它**：
+		// 什么都不传会落到"该项目最新镜像"，那就是"重新部署"把版本换掉了。
+		in.ImageOverride = svc.CurrentImage
 	}
 	return s.CreateDeployment(ctx, in, c)
 }
@@ -1463,6 +1484,15 @@ func (s *CDService) CreateDeployment(ctx context.Context, in CreateDeploymentInp
 		}
 	}
 
+	// 镜像来源**二选一**：都选、都不选都要在这里拦住。
+	//
+	// 以前"两个都不给"会静默落到"该项目最新镜像"——那是把"用户没选"翻译成
+	// "我替你挑了一个"，发出去的版本和界面上显示的可能完全不是一回事。
+	// 所以宁可拒。
+	if err := checkImageSource(in); err != nil {
+		return nil, err
+	}
+
 	img, err := s.resolveDeployImage(ctx, proj, in)
 	if err != nil {
 		return nil, err
@@ -1471,8 +1501,13 @@ func (s *CDService) CreateDeployment(ctx context.Context, in CreateDeploymentInp
 	// 发单前镜像预检：仓库里没有这个 tag，这次发布**必然失败**。
 	// 与其建单后跑到"拉取镜像"再等一轮超时，不如在发单这一步就如实拒绝 ——
 	// 这就是"能勾选 == 后端受理"那条口径：受理不了，就别让它发得出来。
-	if err := s.preflightImage(ctx, img.Image); err != nil {
-		return nil, err
+	//
+	// 仓库标签来源的镜像**刚刚才从仓库连摘要一起读回来**（resolveRegistryImage），
+	// 不必再问一遍同样的接口。
+	if strings.TrimSpace(in.RegistryTag) == "" {
+		if err := s.preflightImage(ctx, img.Image); err != nil {
+			return nil, err
+		}
 	}
 
 	var active int64
@@ -1511,6 +1546,7 @@ func (s *CDService) CreateDeployment(ctx context.Context, in CreateDeploymentInp
 		ServiceID:    svc.ID,
 		ImageRecID:   img.ID,
 		Image:        img.Image,
+		ImageDigest:  img.Digest,
 		Replicas:     replicas,
 		Strategy:     strategy,
 		Remark:       in.Remark,
@@ -2094,6 +2130,11 @@ func (s *CDService) RetryDeployment(ctx context.Context, id uint64, c Caller) (*
 	}
 	if rec.ImageRecID != 0 {
 		in.ImageRecordID = httpx.IDString(rec.ImageRecID)
+	} else {
+		// 这一单是**从仓库标签发的**（没有镜像记录）。此时**不能什么都不传** ——
+		// 那会落到 resolveDeployImage 的"取该项目最新镜像"，也就是重试时
+		// **悄悄把版本换成了另一个**，而界面上还写着"重试 DPxxxx"。
+		in.ImageOverride = rec.Image
 	}
 	dto, err := s.CreateDeployment(ctx, in, c)
 	if err != nil {
@@ -2548,7 +2589,61 @@ func (s *CDService) projectByKey(ctx context.Context, key string) (*model.Projec
 // 优先级：显式 imageRecordId > tag 匹配 > 该项目最新推送的镜像。
 // 显式指定优先是刻意的——回滚与"部署指定历史版本"都依赖它，
 // 若被"最新版"覆盖，回滚就永远回不到旧版本。
+// checkImageSource 校验「平台构建 / 仓库标签」二选一。
+//
+// 单独一个函数是为了让这条约束**只写一遍**：它同时约束 HTTP 入口与内部复用路径，
+// 散在 CreateDeployment 里改一处漏一处，最后又会变成"某个入口能发两个"。
+//
+// ImageOverride 是平台内部复用（重新部署 / 重试），不参与这个判断 ——
+// 它本来就是"照上一单原样再来一次"，不是一次新的选择。
+func checkImageSource(in CreateDeploymentInput) error {
+	if strings.TrimSpace(in.ImageOverride) != "" {
+		return nil
+	}
+	platformGiven := strings.TrimSpace(in.ImageRecordID) != "" || strings.TrimSpace(in.Tag) != ""
+	registryGiven := strings.TrimSpace(in.RegistryTag) != ""
+
+	switch {
+	case platformGiven && registryGiven:
+		return errs.Invalid("镜像来源只能选一个：要么「平台构建」的镜像记录，要么「仓库」里的标签，不能同时选")
+	// 下面两条放在"两个都没给"之前：用户已经声明了来源却没给值，
+	// 说"请选择要部署的镜像"会显得答非所问（他选了，只是漏填了值）。
+	case strings.EqualFold(strings.TrimSpace(in.ImageSource), "registry") && !registryGiven:
+		return errs.Invalid("镜像来源选了「仓库」，但没有给出标签名")
+	case strings.EqualFold(strings.TrimSpace(in.ImageSource), "platform") && registryGiven:
+		return errs.Invalid("镜像来源选了「平台构建」，但提交的是仓库标签")
+	case !platformGiven && !registryGiven:
+		return errs.Invalid("请选择要部署的镜像：平台构建的镜像记录，或仓库里的标签")
+	}
+	return nil
+}
+
+// imageRecordFromRef 把一串完整镜像引用包成一条**不入库**的 ImageRecord。
+//
+// ID 留 0：它的唯一作用是"把这次要发的镜像串与摘要带下去"。
+// 部署单靠 Image / ImageDigest 两个字段记住事实，不靠外键。
+func imageRecordFromRef(ref, digest string) *model.ImageRecord {
+	registry, repo, tag := splitImageRef(ref)
+	return &model.ImageRecord{
+		Registry: registry, Repo: repo, Tag: tag, Image: ref, Digest: digest,
+	}
+}
+
+// resolveDeployImage 解析出这次要部署的镜像。
 func (s *CDService) resolveDeployImage(ctx context.Context, proj *model.Project, in CreateDeploymentInput) (*model.ImageRecord, error) {
+	// ① 平台内部复用（重新部署 / 重试）：**原样**用那个镜像串。
+	//    不能退回"去库里找记录"——找不到就落进"取最新"，那是静默换版本。
+	if raw := strings.TrimSpace(in.ImageOverride); raw != "" {
+		return imageRecordFromRef(raw, ""), nil
+	}
+
+	// ② 仓库标签来源
+	if strings.TrimSpace(in.RegistryTag) != "" ||
+		strings.EqualFold(strings.TrimSpace(in.ImageSource), "registry") {
+		return s.resolveRegistryImage(ctx, proj, in)
+	}
+
+	// ③ 平台构建来源（原有路径）
 	if raw := strings.TrimSpace(in.ImageRecordID); raw != "" {
 		id, err := httpx.ParseIDString(raw)
 		if err != nil {
@@ -2581,6 +2676,69 @@ func (s *CDService) resolveDeployImage(ctx context.Context, proj *model.Project,
 	return &img, nil
 }
 
+// resolveRegistryImage 按「仓库里的标签」解析镜像。
+//
+// image_record 保留它自己的语义（**平台构建过的记录**），所以别的平台推上来的 tag
+// **不写进去** —— 写进去的话，镜像版本列表里会出现一堆平台从没构建过、
+// 也没有 commit / 构建号可溯源的条目。这里只借 ImageRecord 的形状往下传，
+// ID 留 0，事实记在部署单的 Image / ImageDigest 上。
+//
+// 与 preflightImage 的纪律一致：**只有仓库明确回答 404 才拒绝**。
+// 仓库不可达 / 无权读时放行但记日志 —— 把一次仓库抖动变成"不能发版"，
+// 比放过一个可能不存在的 tag 更糟（后者最多失败一次，还有回滚兜底）。
+func (s *CDService) resolveRegistryImage(ctx context.Context, proj *model.Project, in CreateDeploymentInput) (*model.ImageRecord, error) {
+	tag := strings.TrimSpace(in.RegistryTag)
+	if tag == "" {
+		return nil, errs.Invalid("镜像来源是「仓库」时必须指定标签名")
+	}
+	reg, cfg, err := s.registryClient(ctx)
+	if err != nil {
+		return nil, errs.Internalf(err, "读取 Harbor 配置失败")
+	}
+	if reg == nil || cfg.BaseURL == "" {
+		return nil, errs.StateConflict("还没有可用的镜像仓库配置：请先在「系统管理 › 第三方集成」里接入 Harbor")
+	}
+	core := integration.NewHarborCore(cfg)
+	if core == nil {
+		return nil, errs.StateConflict("还没有可用的镜像仓库配置：请先在「系统管理 › 第三方集成」里接入 Harbor")
+	}
+
+	host := registryTagHost(cfg)
+	repo, _, reason, err := s.harborRepoForProject(ctx, proj, core, host)
+	if err != nil {
+		return nil, err
+	}
+	if repo == "" {
+		// 定位不到仓库就是"发不了"，原因原样给用户（见 harborRepoForProject 的措辞）。
+		return nil, errs.StateConflict(reason)
+	}
+
+	image := strings.Trim(host+"/"+repo, "/") + ":" + tag
+
+	digest := ""
+	if reg.Accepts(host) {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), imageResolveTimeout)
+		defer cancel()
+		info, rerr := reg.Resolve(rctx, repo, tag)
+		switch {
+		case rerr == nil && info != nil:
+			digest = info.Digest
+		case errors.Is(rerr, integration.ErrTagNotFound):
+			return nil, errs.Invalidf("仓库里没有 %s:%s 这个标签，"+
+				"请重新选择（列表可能已过期，别人删过这个标签）", repo, tag)
+		default:
+			// 仓库不可达 / 无权读：放行，但把"没能拿到摘要"如实记下来。
+			s.log("cd.deploy").Warn("读仓库标签的摘要未完成（仓库不可达或无权读取），已放行",
+				"repo", repo, "tag", tag, "err", rerr)
+		}
+	} else {
+		s.log("cd.deploy").Warn("镜像仓库地址不在平台管辖范围内，跳过摘要读取",
+			"registry", host)
+	}
+
+	return imageRecordFromRef(image, digest), nil
+}
+
 // preflightImage 在发单前确认镜像 tag 真的在仓库里。
 //
 // 判定刻意保守 —— **只有仓库明确回答 404 才拒绝**，其余一律放行（只记一条日志）：
@@ -2596,6 +2754,12 @@ func (s *CDService) preflightImage(ctx context.Context, image string) error {
 	if repo == "" || tag == "" {
 		return nil
 	}
+	// ⚠️ 这里用的是装配层的 Registry（启动时按 config.yaml 建好的那份），
+	// 而不是 registryClient(ctx) 的运行期客户端。原因有两条，都刻意：
+	//   - 预检是**尽力而为**的守卫（只拦"仓库明确 404"），为它多读一次库不划算；
+	//   - 用哪份配置对它的结论影响很小：地址换了之后 Accepts() 会直接不认，
+	//     结果是"跳过预检"，**不会**误拦（详见 harborCfg/registryClient 的注释）。
+	// 新增的「仓库标签」那两条路径必须与配置页一致，所以它们用 registryClient。
 	reg := s.deps.Up.Registry
 	if reg == nil || !reg.Accepts(registry) {
 		return nil
@@ -2638,7 +2802,19 @@ func (s *CDService) resolveRollbackTarget(ctx context.Context, svc *model.Servic
 		var img model.ImageRecord
 		if err := s.db(ctx).Where("image = ?", image).First(&img).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errs.NotFoundf("回滚目标镜像 %s 不在镜像记录中", image)
+				// 这一版可能是**从仓库标签发的**（没有镜像记录）。此时**不能**直接报
+				// "不在镜像记录中"——记录从来没存在过，不是丢了。
+				// 改从本服务的部署历史里认这一版：既拿到了事实，又保留了"必须属于本项目
+				// 本服务"的关键校验（这正是这个分支存在的理由）。
+				var past model.DeployRecord
+				perr := s.db(ctx).Where("service_id = ? AND project_key = ? AND image = ? AND status IN ?",
+					svc.ID, svc.ProjectKey, image, []string{"success", "rolled_back"}).
+					Order("created_at desc").First(&past).Error
+				if perr != nil {
+					return nil, errs.NotFoundf("回滚目标镜像 %s 不在本项目 %s 的部署历史中",
+						image, svc.ProjectKey)
+				}
+				return imageRecordFromRef(past.Image, past.ImageDigest), nil
 			}
 			return nil, errs.Internalf(err, "查询镜像失败")
 		}
@@ -2663,6 +2839,12 @@ func (s *CDService) resolveRollbackTarget(ctx context.Context, svc *model.Servic
 			return nil, errs.StateConflict("找不到可回滚的历史版本")
 		}
 		return nil, errs.Internalf(err, "查询历史版本失败")
+	}
+	if prev.ImageRecID == 0 {
+		// 上一版是「仓库标签」来源，本来就没有镜像记录，按它当时用的镜像原样回滚。
+		// 这里如果照旧去查镜像记录，用户看到的会是"记录不存在（可能已被清理）"——
+		// 一个与服务状态无关、也帮不上任何忙的原因。
+		return imageRecordFromRef(prev.Image, prev.ImageDigest), nil
 	}
 	var img model.ImageRecord
 	if err := s.db(ctx).First(&img, prev.ImageRecID).Error; err != nil {

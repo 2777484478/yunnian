@@ -51,6 +51,8 @@ import { KVFields } from '@/components/KVFields';
 // antd 的 Tooltip 对 disabled 子元素不生效（disabled 的 button 不派发鼠标事件），
 // 所有"灰着的按钮"的说明一律经 DisabledTip 下发。
 import { DisabledTip } from '@/components/DisabledTip';
+import ImageSourcePicker from '@/components/ImageSourcePicker';
+import type { ImageChoice } from '@/components/ImageSourcePicker';
 // 环境级动作（编辑 / 删除）与环境表单：与列表页**共用同一份实现**。
 // 本页原先两样都没有 —— 从卡片"进入"之后反而什么都改不了。
 import { EnvironmentActions } from '@/components/EnvironmentActions';
@@ -62,7 +64,7 @@ import {
   MethodTag,
   ServiceStatusTag,
 } from '@/components/StatusTag';
-import { ApiError, deployApi, environmentApi, imageApi, rollbackApi, serviceApi } from '@/api';
+import { ApiError, deployApi, environmentApi, rollbackApi, serviceApi } from '@/api';
 import type { DeployCreated } from '@/api';
 import { envResStatus, envUsage } from '@/hooks/useEnvResources';
 import type { EnvProjectCandidate } from '@/api/cd';
@@ -77,7 +79,6 @@ import type {
   DeployVersion,
   EnvService,
   EnvVar,
-  ImageRecord,
   RollbackRecord,
   ServicePod,
 } from '@/types';
@@ -356,14 +357,10 @@ const EnvironmentDetail: React.FC = () => {
   // 不是完整 DeployRecord —— 这里只需要 id / deployNo / status 三样。
   const [createdDeploy, setCreatedDeploy] = useState<DeployCreated | null>(null);
 
-  // 被选中的项目名（用于按需拉它的镜像列表）
+  // 被选中的项目名。镜像候选由 `ImageSourcePicker` 自己按来源去取
+  // （平台构建组问 /images、仓库组问 /registries/harbor/tags），
+  // 这里不再预先拉一份 —— 那会在每次打开弹窗时白打一次接口。
   const [deployProjectKey, setDeployProjectKey] = useState<string | undefined>();
-  const imagesApi = useApi(
-    () => imageApi.list({ projectKey: deployProjectKey!, pageSize: 50 }),
-    [deployProjectKey],
-    { enabled: !!deployProjectKey },
-  );
-  const images = useMemo(() => imagesApi.data?.list ?? [], [imagesApi.data]);
 
   // 执行中的实时日志：只有拿到部署单 id 后才连
   const deployStream = useLogStream(createdDeploy ? deployApi.stream(createdDeploy.id) : null, {
@@ -403,23 +400,51 @@ const EnvironmentDetail: React.FC = () => {
     setDeployOpen(true);
   };
 
-  const submitDeploy = async () => {
-    const v = await deployForm.validateFields();
-    if (!v.imageRecordId) {
-      message.warning('请选择要部署的镜像版本');
+  /**
+   * 「下一步」：先校验**本步**的字段再前进。
+   *
+   * 只校验本步的字段，而不是整表：`remark` 在第 1 步才展示，若在第 0 步就整表校验，
+   * 受保护环境会对着一个还没露面的输入框报"必须填写变更说明"。
+   *
+   * 也不校验所有字段的名字列表为空的情况 —— 第 0 步的字段此刻是挂载的（只是隐藏），
+   * 所以按名字校验能真的跑起来（见上面那段"必须一直挂载"的说明）。
+   */
+  const goNext = async () => {
+    try {
+      await deployForm.validateFields(
+        deployStep === 0 ? ['projectKey', 'imageChoice', 'replicas', 'strategy'] : ['remark'],
+      );
+    } catch {
+      // 校验失败时 antd 已经把红字挂在对应字段上了，这里不重复弹提示
       return;
     }
+    setDeployStep((s) => s + 1);
+  };
+
+  const submitDeploy = async () => {
+    const v = await deployForm.validateFields();
+    const choice = v.imageChoice as ImageChoice | undefined;
+    if (!choice) {
+      message.warning('请选择要部署的镜像');
+      return;
+    }
+    // 「平台构建」与「仓库标签」二选一：只把选中那条来源发给后端。
+    // 两个都发会被后端拒（checkImageSource），这里绝不"顺手都带上"。
+    const imagePart =
+      choice.source === 'platform'
+        ? { imageSource: 'platform' as const, imageRecordId: choice.imageRecordId }
+        : { imageSource: 'registry' as const, registryTag: choice.registryTag };
     setSubmitting(true);
     try {
       const created = await deployApi.create({
         envKey: key,
         projectKey: v.projectKey,
-        imageRecordId: v.imageRecordId,
+        ...imagePart,
         replicas: v.replicas,
         strategy: v.strategy,
         remark: v.remark,
         // 幂等键：同一次确认只能落一个部署单，重复点击不会重复发布
-        idempotencyKey: `ui-${key}-${v.projectKey}-${v.imageRecordId}-${Date.now()}`,
+        idempotencyKey: `ui-${key}-${v.projectKey}-${choice.source}-${choice.tag}-${Date.now()}`,
       });
       setCreatedDeploy(created);
       setDeployStep(3);
@@ -1638,7 +1663,7 @@ const EnvironmentDetail: React.FC = () => {
               <Button onClick={() => setDeployOpen(false)}>取消</Button>
               {deployStep > 0 ? <Button onClick={() => setDeployStep((s) => s - 1)}>上一步</Button> : null}
               {deployStep < 2 ? (
-                <Button type="primary" onClick={() => setDeployStep((s) => s + 1)}>
+                <Button type="primary" onClick={goNext}>
                   下一步
                 </Button>
               ) : (
@@ -1670,7 +1695,14 @@ const EnvironmentDetail: React.FC = () => {
         ) : null}
 
         <Form form={deployForm} layout="vertical" requiredMark="optional">
-          {deployStep === 0 ? (
+          {/* ⚠️ 各步骤的字段**必须一直挂载**，只切换显示 —— 不能条件卸载。
+              rc-field-form 的 `validateFields()` 只收集**当前已挂载**字段的值：
+              走到第 3 步时第 1 步的 Form.Item 一卸载，`validateFields()` 就返回空对象，
+              于是 projectKey / replicas / 镜像选择全都传不出去，点「确认部署」只会弹一句
+              "请选择要部署的镜像"（这个缺陷从初始提交就存在，2026-10-14 实机验证时抓到）。
+              同样的原因，`getFieldValue()`（走 store）还能读到值 —— 两个 API 的差异
+              正是这个 bug 藏了这么久的原因。 */}
+          <div style={{ display: deployStep === 0 ? undefined : 'none' }}>
             <Row gutter={16}>
               <Col span={12}>
                 <Form.Item name="projectKey" label="选择项目" rules={[{ required: true, message: '请选择项目' }]}>
@@ -1681,29 +1713,22 @@ const EnvironmentDetail: React.FC = () => {
                     options={env.projectKeys.map((k) => ({ label: k, value: k }))}
                     onChange={(v) => {
                       setDeployProjectKey(v);
-                      // 换项目必须清掉上一个项目的镜像选择，否则会把 A 项目的镜像 id 配到 B 项目
-                      deployForm.setFieldsValue({ imageRecordId: undefined });
+                      // 换项目必须清掉上一个项目的镜像选择，否则会把 A 项目的镜像发到 B 项目上
+                      // （选择器内部也会清一次，这里显式清是为了不依赖它的实现顺序）
+                      deployForm.setFieldsValue({ imageChoice: undefined });
                     }}
                   />
                 </Form.Item>
               </Col>
-              <Col span={12}>
+              {/* 镜像来源（平台构建 / 仓库标签，二选一）。
+                  单独占一行：它自带分组切换与说明，塞在半栏里读不清。 */}
+              <Col span={24}>
                 <Form.Item
-                  name="imageRecordId"
-                  label="选择镜像版本"
-                  rules={[{ required: true, message: '请选择镜像版本' }]}
-                  tooltip="列表来自该项目的镜像仓库记录；无产物说明该项目还没构建过"
+                  name="imageChoice"
+                  label="选择镜像"
+                  rules={[{ required: true, message: '请选择要部署的镜像' }]}
                 >
-                  <Select
-                    placeholder={deployProjectKey ? '选择镜像版本' : '请先选择项目'}
-                    disabled={!deployProjectKey}
-                    loading={imagesApi.loading}
-                    options={images.map((i: ImageRecord, idx) => ({
-                      label: `${i.tag}${idx === 0 ? '（最新）' : ''}`,
-                      value: i.id,
-                    }))}
-                    notFoundContent={imagesApi.loading ? '加载中…' : '该项目暂无镜像产物，请先构建'}
-                  />
+                  <ImageSourcePicker projectKey={deployProjectKey} />
                 </Form.Item>
               </Col>
               <Col span={8}>
@@ -1722,9 +1747,9 @@ const EnvironmentDetail: React.FC = () => {
                 </Form.Item>
               </Col>
             </Row>
-          ) : null}
+          </div>
 
-          {deployStep === 1 ? (
+          <div style={{ display: deployStep === 1 ? undefined : 'none' }}>
             <Form.Item
               name="remark"
               label="部署说明"
@@ -1732,12 +1757,12 @@ const EnvironmentDetail: React.FC = () => {
             >
               <Input.TextArea rows={3} placeholder="如：修复订单超时问题，关联需求 REQ-2026-0912" maxLength={200} showCount />
             </Form.Item>
-          ) : null}
+          </div>
 
           {deployStep === 2 ? (
             <Form.Item noStyle shouldUpdate>
               {({ getFieldValue }) => {
-                const img = images.find((i) => i.id === getFieldValue('imageRecordId'));
+                const picked = getFieldValue('imageChoice') as ImageChoice | undefined;
                 return (
                   <Descriptions column={2} bordered size="small" labelStyle={{ width: 110, background: '#fafbfc' }}>
                     <Descriptions.Item label="目标环境" span={2}>
@@ -1746,8 +1771,15 @@ const EnvironmentDetail: React.FC = () => {
                     <Descriptions.Item label="项目" span={2}>
                       {getFieldValue('projectKey') ?? '—'}
                     </Descriptions.Item>
-                    <Descriptions.Item label="镜像版本" span={2}>
-                      <span className="yn-mono">{img?.image ?? '—'}</span>
+                    <Descriptions.Item label="镜像" span={2}>
+                      <span className="yn-mono">{picked?.image ?? '—'}</span>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="来源" span={2}>
+                      {picked?.source === 'registry'
+                        ? '镜像仓库标签（仓库里实际存在的版本）'
+                        : picked
+                          ? '平台构建'
+                          : '—'}
                     </Descriptions.Item>
                     <Descriptions.Item label="副本数">{getFieldValue('replicas') ?? '—'}</Descriptions.Item>
                     <Descriptions.Item label="更新策略">{getFieldValue('strategy') ?? '—'}</Descriptions.Item>

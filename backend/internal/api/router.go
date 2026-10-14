@@ -71,6 +71,7 @@ func NewRouter(d Deps) *gin.Engine {
 	h.registerProjects(g)
 	h.registerBuilds(g)
 	h.registerImages(g)
+	h.registerRegistries(g)
 	h.registerEnvironments(g)
 	h.registerServices(g)
 	h.registerDeployments(g)
@@ -162,6 +163,16 @@ func (h *handler) registerImages(g *gin.RouterGroup) {
 	i.GET("/:id", middleware.RequirePerm("image:read"), h.getImage)
 	i.GET("/:id/used-by", middleware.RequirePerm("image:read"), h.imageUsedBy)
 	i.DELETE("/:id", middleware.RequirePerm("image:delete"), h.deleteImage)
+}
+
+// registerRegistries 镜像仓库（Harbor）的只读接口。
+//
+// 权限刻意是 **image:read 或 deploy:read 二者之一**（RequirePerm 是"任一满足"）：
+// 用它的地方是**部署向导**里的「仓库 tag」选择器，而发版的人不一定有 image:read
+// （镜像版本页是另一套权限）。只给 image:read 会让"能发版却选不了版本"。
+func (h *handler) registerRegistries(g *gin.RouterGroup) {
+	r := g.Group("/registries/harbor")
+	r.GET("/tags", middleware.RequirePerm("image:read", "deploy:read"), h.listRegistryTags)
 }
 
 func (h *handler) registerEnvironments(g *gin.RouterGroup) {

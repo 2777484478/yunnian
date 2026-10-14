@@ -58,6 +58,8 @@ import { ApiError, clusterApi, deployApi, environmentApi, imageApi, projectApi, 
 import type { DeployCreated } from '@/api';
 import { canDeployOn, canRollbackOn, hasPerm } from '@/auth';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
+import ImageSourcePicker from '@/components/ImageSourcePicker';
+import type { ImageChoice } from '@/components/ImageSourcePicker';
 import { useApi } from '@/hooks/useApi';
 import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
 import { useLogStream } from '@/hooks/useLogStream';
@@ -705,7 +707,7 @@ const Topology: React.FC = () => {
     const n = nodeOf(envKey);
     if (type === 'deploy') {
       deployForm.setFieldsValue({
-        imageRecordId: undefined,
+        imageChoice: undefined,
         replicas: prefilledReplicas(n),
         note: '',
       });
@@ -737,21 +739,27 @@ const Topology: React.FC = () => {
     // 查不到直接 `NotFoundf("该环境尚未纳管此项目：请先在环境详情里关联该项目")`，
     // **全链路没有任何"部署时自动建实例"的分支**（旧注释这么写过，是假的，已改）。
     // 所以"没纳管也能发"不成立：菜单那一侧必须同样置灰，见 renderNode 的 gate()。
-    const img = images.find((i) => i.id === v.imageRecordId);
-    if (!img) {
-      message.warning('请选择要部署的镜像版本');
+    const choice = v.imageChoice as ImageChoice | undefined;
+    if (!choice) {
+      message.warning('请选择要部署的镜像');
       return;
     }
+    // 「平台构建」与「仓库标签」二选一：只把选中那条来源发出去。
+    // 两个都发会被后端 checkImageSource 拒掉。
+    const imagePart =
+      choice.source === 'platform'
+        ? { imageSource: 'platform' as const, imageRecordId: choice.imageRecordId }
+        : { imageSource: 'registry' as const, registryTag: choice.registryTag };
     let created: DeployCreated;
     try {
       created = await deployApi.create({
         envKey: actionEnv.key,
         projectKey,
-        imageRecordId: img.id,
+        ...imagePart,
         replicas: Number(v.replicas),
         strategy: 'RollingUpdate',
         remark: v.note,
-        idempotencyKey: `topo-${actionEnv.key}-${projectKey}-${img.id}-${Date.now()}`,
+        idempotencyKey: `topo-${actionEnv.key}-${projectKey}-${choice.source}-${choice.tag}-${Date.now()}`,
       });
     } catch (e) {
       // 建单这一步最可能被拒：该环境尚未纳管此项目 / 已有进行中部署单 / 仓库里没有这个镜像。
@@ -764,10 +772,10 @@ const Topology: React.FC = () => {
       envKey: actionEnv.key,
       url: deployApi.stream(created.id),
       title: `部署 ${projectKey} → ${actionEnv.name}`,
-      tag: img.tag,
-      image: img.image,
+      tag: choice.tag,
+      image: choice.image,
       replicas: Number(v.replicas),
-      doneText: `${project?.name ?? projectKey} 已发布到${actionEnv.name}（${img.tag}）`,
+      doneText: `${project?.name ?? projectKey} 已发布到${actionEnv.name}（${choice.tag}）`,
     });
   };
 
@@ -1450,22 +1458,11 @@ const Topology: React.FC = () => {
       >
         <Form form={deployForm} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item
-            name="imageRecordId"
-            label="镜像版本"
-            rules={[{ required: true, message: '请选择要部署的镜像版本' }]}
-            extra="来自该项目的平台镜像记录，按推送时间倒序（最多 20 条）"
+            name="imageChoice"
+            label="选择镜像"
+            rules={[{ required: true, message: '请选择要部署的镜像' }]}
           >
-            <Select
-              showSearch
-              optionFilterProp="label"
-              placeholder={imagesApi.loading ? '加载镜像列表…' : '选择镜像 tag'}
-              loading={imagesApi.loading}
-              notFoundContent={imagesApi.loading ? '加载中…' : '该项目暂无镜像产物，请先构建'}
-              options={images.slice(0, 20).map((i) => ({
-                value: i.id,
-                label: `${i.tag}  ·  ${i.branch}  ·  ${(i.pushedAt || '').slice(5, 16)}`,
-              }))}
-            />
+            <ImageSourcePicker projectKey={projectKey} />
           </Form.Item>
           <Form.Item
             name="replicas"

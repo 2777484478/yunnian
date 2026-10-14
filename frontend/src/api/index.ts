@@ -29,6 +29,8 @@ export { authApi, userApi, roleApi } from './auth';
 export type { UserQuery } from './auth';
 
 export { projectApi, buildApi, imageApi } from './ci';
+export { registryApi } from './registry';
+export type { RegistryTag, RegistryTags } from './registry';
 export type {
   ProjectQuery,
   BuildQuery,

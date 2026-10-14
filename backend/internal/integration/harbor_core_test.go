@@ -63,23 +63,25 @@ func newV1Stub(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// v1TagEntry 造一条 tags?detail=1 的记录。history 里刻意放两层：
-// 底层是 2020 年的基础镜像层，最后一层才是这版镜像的构建时间 ——
-// 取错层次会把所有镜像的时间都算成基础镜像的构建时间。
+// v1TagEntry 造一条 tags?detail=1 的记录。
+//
+// history 刻意放两层，且**顺序与真实一致**：第一个是这版镜像的 config 层（构建时间），
+// 后面是 2020 年的基础镜像层。取错层次（取最后一个）会把所有 tag 的时间都算成
+// 基础镜像的 —— 实测就是这样栽的（aio-mcp-server 35 个 tag 全成了 2026-06-27）。
 func v1TagEntry(name, created string) map[string]any {
 	base, _ := json.Marshal(map[string]string{"created": "2020-01-01T00:00:00Z"})
-	var last map[string]any
+	var head map[string]any
 	if created == "" {
-		last = map[string]any{}
+		head = map[string]any{}
 	} else {
 		top, _ := json.Marshal(map[string]string{"created": created})
-		last = map[string]any{"v1Compatibility": string(top)}
+		head = map[string]any{"v1Compatibility": string(top)}
 	}
 	return map[string]any{
 		"tag": name,
 		"manifest": map[string]any{
 			"schemaVersion": 1,
-			"history":       []any{map[string]any{"v1Compatibility": string(base)}, last},
+			"history":       []any{head, map[string]any{"v1Compatibility": string(base)}},
 		},
 	}
 }
@@ -283,11 +285,12 @@ func TestHarborTime_AcceptsRFC3339AndUnixSeconds(t *testing.T) {
 }
 
 func TestBuiltAtFromV1Manifest_HandlesSchemaV2Shape(t *testing.T) {
-	// schemaVersion=2 的 history 是直接一个 created 字段，不在 v1Compatibility 里。
-	raw := json.RawMessage(`{"schemaVersion":2,"history":[{"created":"2025-01-01T00:00:00Z"},{"created":"2026-10-14T05:00:00Z"}]}`)
+	// schemaVersion=2 的 history 是直接一个 created 字段，不在 v1Compatibility 里；
+	// 同样**顶层在最前**。
+	raw := json.RawMessage(`{"schemaVersion":2,"history":[{"created":"2026-10-14T05:00:00Z"},{"created":"2025-01-01T00:00:00Z"}]}`)
 	ts, ok := builtAtFromV1Manifest(raw)
 	if !ok || !ts.Equal(time.Date(2026, 10, 14, 5, 0, 0, 0, time.UTC)) {
-		t.Errorf("应取最后一层的 created，实际 %s / %v", ts, ok)
+		t.Errorf("应取**第一层**的 created，实际 %s / %v", ts, ok)
 	}
 	if _, ok := builtAtFromV1Manifest(json.RawMessage(`{"schemaVersion":1}`)); ok {
 		t.Error("没有 history 时不该返回时间")
@@ -295,16 +298,43 @@ func TestBuiltAtFromV1Manifest_HandlesSchemaV2Shape(t *testing.T) {
 	if _, ok := builtAtFromV1Manifest(json.RawMessage(`不是 JSON`)); ok {
 		t.Error("非 JSON 不该返回时间")
 	}
-	// 最后一层没有 created、更早的层有 —— **不许向前兜底**：
+	// 第一层没有 created、后面几层有 —— **不许向后兜底**：
 	// 那会把基础镜像的构建时间（下面这条是 2020 年）当成这版镜像的时间。
-	raw = json.RawMessage(`{"schemaVersion":1,"history":[{"v1Compatibility":"{\"created\":\"2020-01-01T00:00:00Z\"}"},{}]}`)
+	raw = json.RawMessage(`{"schemaVersion":1,"history":[{},{"v1Compatibility":"{\"created\":\"2020-01-01T00:00:00Z\"}"}]}`)
 	if ts, ok := builtAtFromV1Manifest(raw); ok {
-		t.Errorf("最后一层没有时间时不该拿更早的层顶替，实际 %s", ts)
+		t.Errorf("第一层没有时间时不该拿更底下的层顶替，实际 %s", ts)
 	}
 	// Docker 对某些镜像会写 0001-01-01，那是垃圾值，宁可给空。
 	raw = json.RawMessage(`{"schemaVersion":2,"history":[{"created":"0001-01-01T00:00:00Z"}]}`)
 	if ts, ok := builtAtFromV1Manifest(raw); ok {
 		t.Errorf("早于纪元的时间应判为无效，实际 %s", ts)
+	}
+}
+
+// 反向锚点：**同一仓库的多个 tag 必须给出各自不同的构建时间**。
+//
+// 这是唯一能拆穿"取错了层"的检查 —— 取成基础镜像层时，所有 tag 会给出同一个时间，
+// 而那个结果看上去完全正常（有值、格式对、还是个合理的过去时间）。
+// 实测 2026-10-14 就是靠真实仓库里"35 个 tag 全是 2026-06-27"才发现取反了的。
+func TestBuiltAtFromV1Manifest_DiffersPerTag(t *testing.T) {
+	seen := map[string]bool{}
+	for i, want := range []string{
+		"2026-08-19T07:43:59Z", "2026-08-21T08:42:48Z", "2026-10-13T07:30:26Z",
+	} {
+		entry := v1TagEntry("t", want)
+		man, _ := json.Marshal(entry["manifest"])
+		ts, ok := builtAtFromV1Manifest(man)
+		if !ok {
+			t.Fatalf("第 %d 条取不到时间", i)
+		}
+		got := ts.UTC().Format(time.RFC3339)
+		if got != want {
+			t.Errorf("第 %d 条时间应为 %s，实际 %s", i, want, got)
+		}
+		if seen[got] {
+			t.Errorf("两条不同的 tag 给出了同一个时间 %s —— 十有八九是取错层了", got)
+		}
+		seen[got] = true
 	}
 }
 

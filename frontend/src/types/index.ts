@@ -386,6 +386,13 @@ export interface DeployRecord {
   projectName: string;
   service: string;
   image: string;
+  /**
+   * 这次部署实际用的那份镜像的摘要（sha256:…）。
+   *
+   * 从「仓库标签」发起的部署没有 image_record 可查，这个字段就是"当时发的是哪一份"
+   * 的唯一答案（同一个 tag 被重新推过就指向别的内容了）。仓库读不到时后端留空。
+   */
+  imageDigest?: string;
   replicas: number;
   status: DeployStatus;
   progress: number;

@@ -133,14 +133,14 @@ type BuildDTO struct {
 	// 而不是 0。下发 0 会让界面显示"0 B" —— 那是一句假话，它和"真的读到了 0 字节"
 	// 完全不是一回事。（前端 humanSize(null) 渲染成 `-`。）
 	ImageSize   *uint64 `json:"imageSize"`
-	Status      string `json:"status"`
-	Duration    int64  `json:"duration"`
-	Progress    uint8  `json:"progress"`
-	Stage       string `json:"stage"`
-	Trigger     string `json:"trigger"`
-	TriggerType string `json:"triggerType"`
-	StartedAt   string `json:"startedAt"`
-	FinishedAt  string `json:"finishedAt,omitempty"`
+	Status      string  `json:"status"`
+	Duration    int64   `json:"duration"`
+	Progress    uint8   `json:"progress"`
+	Stage       string  `json:"stage"`
+	Trigger     string  `json:"trigger"`
+	TriggerType string  `json:"triggerType"`
+	StartedAt   string  `json:"startedAt"`
+	FinishedAt  string  `json:"finishedAt,omitempty"`
 	// ErrorCode 机器码（用于筛选/统计），ErrorMessage 是给人看的真因。
 	// 两者都下发：只有机器码解释不了现场，只有文本又没法筛选。
 	ErrorCode    string          `json:"errorCode"`
@@ -156,12 +156,12 @@ type BuildDTO struct {
 
 // ImageDTO 镜像版本。
 type ImageDTO struct {
-	ID           string   `json:"id"`
-	ProjectKey   string   `json:"projectKey"`
-	ProjectName  string   `json:"projectName"`
-	Tag          string   `json:"tag"`
-	Image        string   `json:"image"`
-	Digest       string   `json:"digest"`
+	ID          string `json:"id"`
+	ProjectKey  string `json:"projectKey"`
+	ProjectName string `json:"projectName"`
+	Tag         string `json:"tag"`
+	Image       string `json:"image"`
+	Digest      string `json:"digest"`
 	// Size 可空，理由见 BuildDTO.ImageSize：读不到就是 null，不是 0。
 	Size         *uint64  `json:"size"`
 	Branch       string   `json:"branch"`
@@ -541,14 +541,18 @@ type DeployStepDTO struct {
 
 // DeployDTO 部署记录。
 type DeployDTO struct {
-	ID          string          `json:"id"`
-	DeployNo    string          `json:"deployNo"`
-	EnvKey      string          `json:"envKey"`
-	EnvName     string          `json:"envName"`
-	ProjectKey  string          `json:"projectKey"`
-	ProjectName string          `json:"projectName"`
-	Service     string          `json:"service"`
-	Image       string          `json:"image"`
+	ID          string `json:"id"`
+	DeployNo    string `json:"deployNo"`
+	EnvKey      string `json:"envKey"`
+	EnvName     string `json:"envName"`
+	ProjectKey  string `json:"projectKey"`
+	ProjectName string `json:"projectName"`
+	Service     string `json:"service"`
+	Image       string `json:"image"`
+	// ImageDigest 这次部署实际用的那份镜像的摘要。从「仓库标签」发起的部署没有
+	// image_record 可查，这个字段就是"当时发的是哪一份"的唯一答案（同 tag 被重推过
+	// 就指向别的内容了）。仓库读不到时为空 —— 不拿 tag 或时间凑。
+	ImageDigest string          `json:"imageDigest,omitempty"`
 	Replicas    int             `json:"replicas"`
 	Status      string          `json:"status"`
 	Progress    uint8           `json:"progress"`
@@ -606,6 +610,7 @@ func deployDTO(d *model.DeployRecord, envName, projectName string, steps []Deplo
 		ProjectName:  projectName,
 		Service:      projectName,
 		Image:        d.Image,
+		ImageDigest:  d.ImageDigest,
 		Replicas:     d.Replicas,
 		Status:       d.Status,
 		Progress:     d.Progress,

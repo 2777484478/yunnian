@@ -386,6 +386,78 @@ func harborAccountPhrase(account string) string {
 	return "账号 " + account
 }
 
+// HarborRepoRef 仓库检索结果里的一条。
+type HarborRepoRef struct {
+	// FullName 是「项目/仓库」全名，如 escloud/aioai。
+	FullName string
+	// ProjectName 是 Harbor 的 project（= FullName 的第一段）。
+	ProjectName string
+	// TagCount 仓库里的 tag 数（v1 叫 tags_count、v2 叫 artifact_count，这里抹平）。
+	TagCount int
+}
+
+// SearchRepos 按关键字检索仓库。两个版本的**返回结构不同**，这里抹平成一种：
+//
+//	v1  /api/search?q=        {repository:[{repository_name, project_name, tags_count}]}
+//	v2  /api/v2.0/search?q=   {repository:[{name, project_name, artifact_count}]}
+//
+// 用途只有一个：**在平台还不认识某个项目时，找出它对应哪个仓库**。
+// 所以这里只做检索、不做匹配判断 —— "到底该用哪一个"留给调用方，因为它才知道
+// 上下文（比如"末段必须等于项目标识"），而猜错会去读别人的仓库。
+//
+// q 为空时 v1 会把**全部**仓库倒出来（实测 187 条），调用方要自己节制。
+func (c *HarborCore) SearchRepos(ctx context.Context, keyword string) ([]HarborRepoRef, error) {
+	if _, _, err := c.detect(ctx); err != nil {
+		return nil, err
+	}
+	if c.apiVersion == "" {
+		return nil, fmt.Errorf("%s 上没有 Harbor 管理接口（/api/v2.0/systeminfo 与 /api/systeminfo 都返回 404）：无法检索仓库", c.base)
+	}
+	var out struct {
+		Repository []struct {
+			RepositoryName string `json:"repository_name"` // v1
+			TagsCount      int    `json:"tags_count"`      // v1
+			Name           string `json:"name"`            // v2
+			ArtifactCount  int    `json:"artifact_count"`  // v2
+			ProjectName    string `json:"project_name"`
+		} `json:"repository"`
+	}
+	path := c.apiPath() + "/search?q=" + url.QueryEscape(strings.TrimSpace(keyword))
+	status, err := c.getJSON(ctx, path, &out)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return nil, fmt.Errorf("检索 Harbor 仓库被拒绝（HTTP %d）：检查账号权限", status)
+	case status >= 400:
+		return nil, fmt.Errorf("检索 Harbor 仓库失败：HTTP %d", status)
+	}
+	refs := make([]HarborRepoRef, 0, len(out.Repository))
+	for _, r := range out.Repository {
+		full := strings.TrimSpace(r.RepositoryName)
+		if full == "" {
+			full = strings.TrimSpace(r.Name)
+		}
+		if full == "" {
+			continue
+		}
+		n := r.TagsCount
+		if r.ArtifactCount > 0 {
+			n = r.ArtifactCount
+		}
+		ref := HarborRepoRef{FullName: full, ProjectName: r.ProjectName, TagCount: n}
+		if ref.ProjectName == "" {
+			// 有的版本不回收项目名，就从全名里第一段取。
+			if p, _, err := SplitImageRepo(full); err == nil {
+				ref.ProjectName = p
+			}
+		}
+		refs = append(refs, ref)
+	}
+	return refs, nil
+}
+
 // ListTags 列出某个仓库的 tag。
 //
 // project 与 repo 必须分开给：Harbor 的 project 是路径第一段，repo 是其余部分。
@@ -524,17 +596,24 @@ func (c *HarborCore) listTagsV1(ctx context.Context, project, repo string, page,
 
 // builtAtFromV1Manifest 从 v1 的 manifest 里取**镜像构建时间**。
 //
-// 取 history 的**最后一层**：schemaVersion=1 的 history 从底向上排列，
-// 最后一层是构建时写下的 config 层，它的 created 就是这版镜像的构建时间。
-// （实测：平台推的 `v4`，这里给出与推送同日的 02:27。）
+// 取 history 的**第一个**元素：schemaVersion=1 的 history 与 fsLayers 同序 ——
+// **顶层在最前**，也就是构建时最后写下的那层 config，它的 created 就是这版镜像的构建时间。
 //
-// ⚠️ **只看最后一层，不向前找"第一个有时间的那层"**。
-// 往前找看着更宽容，实际是把基础镜像的构建时间当成这版镜像的 ——
-// 实测那台仓库里基础层是 2020 年的，会给出一个差好几年的时间。
-// 这是最典型的静默错误：有值、格式对、就是错的。宁可返回 false（界面显示"—"）。
+// ⚠️ **这里我一开始取反了（取的是最后一个 = 最底层 = 基础镜像），而且没察觉。**
+// 当时只看"有值、格式对"，没做那个能拆穿它的检查：**同一仓库的多个 tag 会不会给出同一个时间**。
+// 实测（2026-10-14，aio-mcp-server 35 个 tag）：
+//
+//	history[0]  08-19 → 10-13 逐版变化   ← 这才是每版自己的构建时间
+//	history[-1] 恒为 2026-06-27          ← 基础镜像，与这一版无关
+//
+// 所以调用方看到"所有 tag 时间相同"要立刻怀疑取错了层 —— 那正是静默错误的典型特征。
 //
 // 两种编码都要认：schemaVersion=1 把这一层塞在 v1Compatibility 字符串里，
 // schemaVersion=2 是直接一个 created 字段。
+//
+// 另外**只看第一层，不向后找"第一个有时间的那层"**：往后找会把基础镜像的构建时间
+// 当成这版镜像的（实测那台仓库的基础层是 2026-06-27，会给出一个差几个月的时间）。
+// 拿不到就返回 false，界面显示"—"，不编。
 //
 // ⚠️ 它是**构建时间**，不是推送时间 —— 一份很久以前构建的镜像今天被推上来，
 // 这里给的是很久以前。调用方绝不能把它当推送时间显示（见 HarborTimeBuild）。
@@ -551,18 +630,18 @@ func builtAtFromV1Manifest(raw json.RawMessage) (time.Time, bool) {
 	if err := json.Unmarshal(raw, &m); err != nil || len(m.History) == 0 {
 		return time.Time{}, false
 	}
-	last := m.History[len(m.History)-1]
+	head := m.History[0]
 
 	var candidates []string
-	if last.V1Compatibility != "" {
+	if head.V1Compatibility != "" {
 		var inner struct {
 			Created string `json:"created"`
 		}
-		if err := json.Unmarshal([]byte(last.V1Compatibility), &inner); err == nil {
+		if err := json.Unmarshal([]byte(head.V1Compatibility), &inner); err == nil {
 			candidates = append(candidates, inner.Created)
 		}
 	}
-	candidates = append(candidates, last.Created)
+	candidates = append(candidates, head.Created)
 
 	for _, c := range candidates {
 		ts, err := time.Parse(time.RFC3339, c)

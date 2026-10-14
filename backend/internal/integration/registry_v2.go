@@ -130,6 +130,14 @@ func (r *RegistryV2) Accepts(registry string) bool {
 	return false
 }
 
+// NormalizeRegistryHost 把各种写法的"仓库地址"归一成 host[:port] 的小写形式。
+//
+// 导出给 service 层用：它需要在**不构造客户端**的前提下比较"某条 image_record 里的
+// registry 值"与"当前配置的仓库"是不是同一个（例：决定某项目的仓库路径该不该信）。
+// 自己再写一份归一化必然漂移 —— 这里踩过（`https://host:5000` / `host:5000` /
+// `host:5000/proj/repo:tag` 被判成三个不同的仓库）。
+func NormalizeRegistryHost(s string) string { return normalizeRegistryHost(s) }
+
 // normalizeRegistryHost 把各种写法归一成 host[:port] 的小写形式，用于比较。
 //
 // 同一个仓库在不同地方有三种写法：项目配置里是 `https://host:5000`，

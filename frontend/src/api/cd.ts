@@ -243,9 +243,20 @@ export interface DeployQuery {
 export interface CreateDeployInput {
   envKey: string;
   projectKey: string;
+  /**
+   * 镜像来源，**二选一**：
+   *   platform（缺省）用 imageRecordId / tag 取平台自己构建过的镜像记录
+   *   registry        用 registryTag 取镜像仓库里实际存在的标签（含别人推的）
+   *
+   * 后端对"两个都给"和"一个都不给"都会拒 —— 界面上也必须只能选一个
+   * （见 components/ImageSourcePicker）。
+   */
+  imageSource?: 'platform' | 'registry';
   /** 指定镜像记录（优先）或直接给 tag；两者都给时后端以 imageRecordId 为准 */
   imageRecordId?: string;
   tag?: string;
+  /** 仓库里的标签名（imageSource='registry' 时必填）。 */
+  registryTag?: string;
   replicas?: number;
   strategy?: 'RollingUpdate' | 'Recreate';
   remark?: string;

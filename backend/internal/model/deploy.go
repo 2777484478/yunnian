@@ -106,15 +106,23 @@ type ServiceInstance struct {
 // 状态机：pending_approval → queued → progressing → success/failed/canceled；
 // 回滚产生的部署单终态为 rolled_back。
 type DeployRecord struct {
-	ID           uint64     `gorm:"primaryKey;autoIncrement" json:"-"`
-	DeployNo     string     `gorm:"size:32;uniqueIndex:uk_deploy_no" json:"deployNo"`
-	EnvID        uint64     `gorm:"not null;index:idx_deploy_env_time,priority:1" json:"-"`
-	EnvKey       string     `gorm:"size:64" json:"envKey"`
-	ProjectID    uint64     `gorm:"not null;index:idx_deploy_project" json:"-"`
-	ProjectKey   string     `gorm:"size:64" json:"projectKey"`
-	ServiceID    uint64     `gorm:"not null;index:idx_deploy_service,priority:1" json:"-"`
-	ImageRecID   uint64     `gorm:"column:image_record_id;not null" json:"-"`
-	Image        string     `gorm:"size:512" json:"image"`
+	ID         uint64 `gorm:"primaryKey;autoIncrement" json:"-"`
+	DeployNo   string `gorm:"size:32;uniqueIndex:uk_deploy_no" json:"deployNo"`
+	EnvID      uint64 `gorm:"not null;index:idx_deploy_env_time,priority:1" json:"-"`
+	EnvKey     string `gorm:"size:64" json:"envKey"`
+	ProjectID  uint64 `gorm:"not null;index:idx_deploy_project" json:"-"`
+	ProjectKey string `gorm:"size:64" json:"projectKey"`
+	ServiceID  uint64 `gorm:"not null;index:idx_deploy_service,priority:1" json:"-"`
+	ImageRecID uint64 `gorm:"column:image_record_id;not null" json:"-"`
+	Image      string `gorm:"size:512" json:"image"`
+	// ImageDigest 这次部署实际用的镜像摘要（sha256:…）。
+	//
+	// image_record 里那份 digest 是构建成功时回填的；而**从仓库标签部署**时没有记录可查
+	// （别人推的 tag 平台从没构建过），就在发单那一步从仓库读回来。
+	// 少了它，"当时发的到底是哪一份"事后答不上来 —— 同一个 tag 被重新推过就指向别的内容了。
+	//
+	// 仓库读不到时留空，**不拿 tag 或时间去凑**。
+	ImageDigest  string     `gorm:"column:image_digest;size:80" json:"imageDigest"`
 	Replicas     int        `gorm:"not null;default:1" json:"replicas"`
 	Strategy     string     `gorm:"size:24;not null;default:RollingUpdate" json:"strategy"`
 	EnvOverrides JSONText   `gorm:"type:json" json:"-"`
