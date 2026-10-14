@@ -193,8 +193,11 @@ func (s *SystemService) Integrations(ctx context.Context) ([]IntegrationStatusDT
 			return fmt.Errorf("未填写地址：registry 组件（读 digest）与 Core API（读 tag 列表）至少要填一个")
 		}
 		if base != "" {
-			if err := integration.NewHarborRegistry(hbCfg).Ping(ctx); err != nil {
-				return fmt.Errorf("registry 组件（%s）：%w", base, err)
+			reg := integration.NewHarborRegistry(hbCfg)
+			if err := reg.Ping(ctx); err != nil {
+				// 报**实际探测的地址**：用户若把 `/v2` 连在字段里一起填了，
+				// 客户端会把它削掉，回显配置原文会让人以为那个路径真被用上了。
+				return fmt.Errorf("registry 组件（%s）：%w", reg.Base(), err)
 			}
 		}
 		addr := core
@@ -2872,7 +2875,7 @@ func (s *SystemService) TestHarborConnection(ctx context.Context, in TestHarborI
 			res.RegistryMessage = perr.Error()
 		} else {
 			res.RegistryOK = true
-			res.RegistryMessage = fmt.Sprintf("%s 连通（/v2/ 可读）", base)
+			res.RegistryMessage = fmt.Sprintf("%s 连通（/v2/ 可读）", client.Base())
 		}
 	} else {
 		res.RegistryMessage = "未填写 registry 组件地址"
@@ -2888,8 +2891,9 @@ func (s *SystemService) TestHarborConnection(ctx context.Context, in TestHarborI
 			res.CoreOK = probe.OK
 			res.CoreMessage = probe.Message
 			if core == "" && base != "" {
-				// 说明白"这不是你没填，是平台按同一个地址探的"。
-				res.CoreMessage += fmt.Sprintf("（未单独填 Core 地址，按 registry 地址 %s 探测）", base)
+				// 说明白"这不是你没填，是平台按同一个地址探的"，
+				// 且报**实际探测的地址**（可能已削掉误填的 /v2 尾巴）。
+				res.CoreMessage += fmt.Sprintf("（未单独填 Core 地址，按 registry 地址 %s 探测）", client.Base())
 			}
 			res.CoreVersion = probe.Version
 			res.CoreAPIVersion = probe.APIVersion

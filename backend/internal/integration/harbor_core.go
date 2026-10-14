@@ -96,6 +96,39 @@ type HarborCoreProbe struct {
 	Message string
 }
 
+// stripHarborEntrySuffix 把"入口地址"里可能被一起填进来的**路径尾巴**削掉。
+//
+// 为什么必须有这一手：界面上两个字段分别标着「registry 组件地址（走 /v2/）」与
+// 「Core API 地址（走 /api/v2.0/）」，于是**用户很可能把那个后缀当成字段的一部分贴进来**。
+// 而路径是平台自己拼的，拼出来就是 `/api/v2.0/api/v2.0/systeminfo` 或 `/v2/v2/` —— 全 404，
+// 用户看到的是"这地址不是 Harbor 入口 / 地址明明对却连不上"，可问题只出在一个多余的尾巴上。
+//
+// 三个后缀都削，因为**这一个函数同时服务两个字段**（Core 从 BaseURL 回退时会继承 registry 的尾巴）：
+//
+//	/api/v2.0  Core v2 的路径前缀
+//	/api       Core v1 的路径前缀
+//	/v2        registry 的路径前缀
+//
+// 只削**一次**、且只在末尾**整段**匹配时削：
+//
+//	https://harbor.example.com/api/v2.0        → https://harbor.example.com
+//	https://es-repo.example.com:5000/v2        → https://es-repo.example.com:5000
+//	https://gw.example.com/harbor/api          → https://gw.example.com/harbor   （子路径保留）
+//	https://gw.example.com/harbor              → 不动
+//
+// 子路径那一条是关键：网关把 Harbor 挂在 `/harbor` 下时，base 里那段**必须保留**，
+// 无脑按最后一个斜杠切会把 `/harbor` 一起切掉。
+func stripHarborEntrySuffix(raw string) string {
+	s := strings.TrimRight(strings.TrimSpace(raw), "/")
+	// 长的排前面：否则 `/api/v2.0` 会先被 `/api` 匹配掉、只剩一个 `/v2.0`。
+	for _, suf := range []string{"/api/v2.0", "/api", "/v2"} {
+		if len(s) > len(suf) && strings.EqualFold(s[len(s)-len(suf):], suf) {
+			return strings.TrimRight(s[:len(s)-len(suf)], "/")
+		}
+	}
+	return s
+}
+
 // NewHarborCore 由一份配置构造 Core 客户端。
 //
 // 地址优先用 CoreAPIURL；**留空则退回 BaseURL**。这不是偷懒：
@@ -105,10 +138,15 @@ type HarborCoreProbe struct {
 // 所以第二个地址是**可选的覆盖项**（给"registry 走独立端口/镜像站"的部署用），不是必填。
 //
 // 两个都为空时返回 nil —— 调用方据此区分"没配地址"与"配了但连不上"。
+//
+// 另外两个容错（都是**踩过或几乎踩到**的）：
+//   - 填进来的地址若带着 `/api` / `/api/v2.0` / `/v2` 尾巴，先削掉（见 stripHarborEntrySuffix）；
+//   - 版本（v1/v2）不靠用户声明，靠 detect() 探测 —— 所以**填的永远是入口地址**，
+//     用户不必知道自己的 Harbor 是几代，升级 Harbor 也不用改配置。
 func NewHarborCore(cfg config.HarborConfig) *HarborCore {
-	base := strings.TrimRight(strings.TrimSpace(cfg.CoreAPIURL), "/")
+	base := stripHarborEntrySuffix(cfg.CoreAPIURL)
 	if base == "" {
-		base = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+		base = stripHarborEntrySuffix(cfg.BaseURL)
 	}
 	if base == "" {
 		return nil

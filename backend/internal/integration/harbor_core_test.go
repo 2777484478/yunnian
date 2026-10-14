@@ -308,6 +308,67 @@ func TestBuiltAtFromV1Manifest_HandlesSchemaV2Shape(t *testing.T) {
 	}
 }
 
+func TestStripHarborEntrySuffix(t *testing.T) {
+	cases := map[string]string{
+		"https://harbor.example.com/api/v2.0": "https://harbor.example.com",
+		"https://harbor.example.com/api":      "https://harbor.example.com",
+		"https://harbor.example.com/api/":     "https://harbor.example.com",
+		// registry 字段也走同一个归一化：/v2 尾巴要削
+		// （Core 从 BaseURL 回退时会继承它，不削就把 Core 探测一起带坏）。
+		"https://es-repo.example.com:5000/v2":  "https://es-repo.example.com:5000",
+		"https://es-repo.example.com:5000/v2/": "https://es-repo.example.com:5000",
+		"https://es-repo.example.com:5000":     "https://es-repo.example.com:5000",
+		"https://es-repo.example.com:5000/":    "https://es-repo.example.com:5000",
+		// ⚠️ 网关子路径必须保留：无脑切最后一个斜杠会把 /harbor 一起切掉。
+		"https://gw.example.com/harbor/api":      "https://gw.example.com/harbor",
+		"https://gw.example.com/harbor/api/v2.0": "https://gw.example.com/harbor",
+		"https://gw.example.com/harbor/v2":       "https://gw.example.com/harbor",
+		"https://gw.example.com/harbor":          "https://gw.example.com/harbor",
+		// 只是名字里含 api 的路径不该被动。
+		"https://gw.example.com/harbor-api": "https://gw.example.com/harbor-api",
+		"":                                  "",
+	}
+	for in, want := range cases {
+		if got := stripHarborEntrySuffix(in); got != want {
+			t.Errorf("stripHarborEntrySuffix(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+// 用户把界面提示里的"（走 /api/v2.0/）"当真、连后缀一起贴进来时也必须能用 ——
+// 否则现象是"地址明明就是它给的，却报这不是 Harbor 入口"。
+func TestHarborCore_ToleratesPastedAPISuffix(t *testing.T) {
+	v1srv, v2srv := newV1Stub(t), newV2Stub(t)
+
+	c1 := NewHarborCore(config.HarborConfig{CoreAPIURL: v1srv.URL + "/api/v2.0"})
+	if c1.Base() != v1srv.URL {
+		t.Fatalf("应削掉后缀，实际 %q", c1.Base())
+	}
+	if probe, err := c1.Ping(context.Background()); err != nil || probe.APIVersion != "v1" {
+		t.Fatalf("带后缀仍应识别出 v1：err=%v ver=%q", err, probe.APIVersion)
+	}
+
+	// v2 那一侧同理（v1 与 v2 两条路径都要能被识别）。
+	c2 := NewHarborCore(config.HarborConfig{BaseURL: v2srv.URL + "/api"})
+	if c2.Base() != v2srv.URL {
+		t.Fatalf("应削掉后缀，实际 %q", c2.Base())
+	}
+	probe, err := c2.Ping(context.Background())
+	if err != nil || probe.APIVersion != "v2" || probe.NoPushTime {
+		t.Fatalf("带后缀仍应识别出 v2：err=%v ver=%q noPushTime=%v", err, probe.APIVersion, probe.NoPushTime)
+	}
+
+	// Core 地址留空时会**继承 registry 地址**，包括它误填的 `/v2` 尾巴。
+	// 实测踩到：registry 填 `…:5000/v2` 时 registry 通道绿、Core 通道却报"不是 Harbor 入口"。
+	c3 := NewHarborCore(config.HarborConfig{BaseURL: v1srv.URL + "/v2"})
+	if c3.Base() != v1srv.URL {
+		t.Fatalf("回退时也要削掉 /v2，实际 %q", c3.Base())
+	}
+	if probe3, err := c3.Ping(context.Background()); err != nil || probe3.APIVersion != "v1" {
+		t.Fatalf("回退带 /v2 仍应识别出 v1：err=%v ver=%q", err, probe3.APIVersion)
+	}
+}
+
 func tagNames(tags []HarborTag) []string {
 	out := make([]string, 0, len(tags))
 	for _, t := range tags {

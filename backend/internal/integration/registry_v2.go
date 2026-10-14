@@ -92,7 +92,9 @@ func NewHarborRegistry(cfg config.HarborConfig) *RegistryV2 {
 		}
 	}
 	return &RegistryV2{
-		base:        strings.TrimRight(cfg.BaseURL, "/"),
+		// 削掉误填进来的 `/v2` 尾巴（界面字段标着"走 /v2/"，很容易连后缀一起贴），
+		// 逻辑与 Core 客户端共用一份：见 stripHarborEntrySuffix。
+		base:        stripHarborEntrySuffix(cfg.BaseURL),
 		username:    cfg.Username,
 		password:    cfg.Password,
 		client:      &http.Client{Timeout: timeout, Transport: transport},
@@ -102,6 +104,12 @@ func NewHarborRegistry(cfg config.HarborConfig) *RegistryV2 {
 
 // Name 实现名，用于在接口响应里标注数据来源。
 func (r *RegistryV2) Name() string { return "harbor-registry-v2" }
+
+// Base 本客户端实际在问的地址（已去掉误填的 `/v2` 尾巴与尾斜杠）。
+//
+// 状态页与测试结论必须报**实际探测的地址**：用户填了 `…:5000/v2` 时，
+// 若照配置原文回显"…:5000/v2 连通"，看起来像是那个路径被真的用上了。
+func (r *RegistryV2) Base() string { return r.base }
 
 // Accepts 判断一个仓库地址是不是本实现管的那一个。
 //

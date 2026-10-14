@@ -194,7 +194,7 @@ const HarborConnectCard: React.FC<{ canWrite: boolean; onChanged?: () => void }>
             disabled={!canWrite}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            只填入口地址，不要带 /api 或 /api/v2.0 —— 路径按 Harbor 版本自动识别
+            填入口地址即可（v1 走 /api/、v2 走 /api/v2.0/，由平台自动识别；顺带带上那截后缀也会被自动去掉）
           </Text>
         </Col>
         <Col xs={24} md={12}>
@@ -206,7 +206,7 @@ const HarborConnectCard: React.FC<{ canWrite: boolean; onChanged?: () => void }>
             disabled={!canWrite}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            不要带 http(s):// —— 它会被原样拼进镜像引用
+            不要带 http(s):// —— 它会被原样拼进镜像引用（结尾的 /v2 会被自动去掉）
           </Text>
         </Col>
         <Col xs={24} md={12}>
