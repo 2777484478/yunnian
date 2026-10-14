@@ -1326,19 +1326,18 @@ func (s *CDService) DeleteService(ctx context.Context, id uint64, c Caller) erro
 	if err != nil {
 		return err
 	}
-	// 先删集群侧：删不掉就整体失败，避免"平台里没了、集群里还在跑"。
+	// 取消纳管 = 删掉平台下发的变更单（AppRelease）+ 删平台记录，**绝不动集群里的负载**。
 	//
-	// ⚠️ 但「集群里**本来就没有**这个工作负载」是例外，不算失败：下线的目标状态
-	// （该服务不再有实例在跑）**已经达成**。这不是理论情况 —— 项目被删掉后留下的
-	// 「幽灵服务实例」（工作负载从没建出来过）唯一的清理入口就是这里，
-	// 卡住的代价是它在环境的服务列表里永远挂着「集群中不存在」、点下线又失败。
-	if err := s.deps.Up.Cluster.Scale(ctx, workloadRefOf(env, svc.WorkloadName), 0); err != nil {
-		var notFound *integration.WorkloadNotFoundError
-		if !errors.As(err, &notFound) {
-			return upstreamError(err, "缩容到 0 失败，已中止下线操作")
-		}
-		s.log("cd").Info("下线服务：集群里本来就没有该工作负载，跳过缩容、直接清理平台记录",
-			"env", svc.EnvKey, "project", svc.ProjectKey, "workload", svc.WorkloadName)
+	// ⚠️ 原先这里调的是 `Scale(..., 0)`：那是往变更单里写 `spec.replicas = 0`，
+	// operator 会把副本缩到 0 —— **线上真的停服**。一个发布平台不该有这种副作用
+	// （2026-10-14 用户指出："你只是发布平台，只能取消纳管…怎么能直接改集群让服务不可用"）。
+	// 依据 operator 源码，删除变更单时的清理动作只摘掉 Deployment 上的接管标记，
+	// 既不删 Deployment、也不改镜像与副本，所以下面这一步是"只取消纳管"。
+	//
+	// 失败就整体中止（含"多张变更单"那种必须先人工处理的硬约束），
+	// 避免出现"平台里没了、变更单还在、operator 继续按旧声明覆盖"的半截状态。
+	if err := s.deps.Up.Cluster.Release(ctx, workloadRefOf(env, svc.WorkloadName)); err != nil {
+		return upstreamError(err, "解除纳管失败，已中止操作")
 	}
 	if err := s.db(ctx).Delete(&model.ServiceInstance{}, svc.ID).Error; err != nil {
 		return errs.Internalf(err, "删除服务实例失败")
@@ -1346,7 +1345,7 @@ func (s *CDService) DeleteService(ctx context.Context, id uint64, c Caller) erro
 	s.audit(ctx, c, auditInput{
 		Module: "CD", Action: "service:delete", TargetType: "service",
 		TargetID: &svc.ID, TargetName: svc.ProjectKey,
-		Detail: fmt.Sprintf("下线服务 %s/%s", svc.EnvKey, svc.ProjectKey),
+		Detail: fmt.Sprintf("取消纳管 %s/%s（已删除集群里的变更单，未改动运行中的负载）", svc.EnvKey, svc.ProjectKey),
 	})
 	return nil
 }

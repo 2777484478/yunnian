@@ -645,34 +645,34 @@ const EnvironmentDetail: React.FC = () => {
 
   const doOffline = (svc: EnvService) =>
     modal.confirm({
-      title: `确认从${env?.name ?? key}下线 ${svc.projectKey}？`,
+      title: `确认从${env?.name ?? key}取消纳管 ${svc.projectKey}？`,
       content: (
         <div style={{ fontSize: 13 }}>
-          {/* 口径与后端 DeleteService 的实际动作一致：先把集群侧副本缩容到 0，
-              再删掉平台里的服务实例记录（解除本环境对该项目的纳管）；
-              K8s 上的 Deployment / Service 对象并不会被删除。
-              服务实例记录既已删除，本环境对该项目即不再纳管，后续再部署会 404，
-              所以这里不写任何"再部署一次就能恢复"之类的说法。 */}
-          <b>该操作会把副本数缩容到 0，并删除平台内的服务实例记录（解除本环境对该项目的纳管）。</b>
+          {/* 口径与后端 DeleteService 的**实际动作**一致（2026-10-14 改）：
+              只删掉平台下发的变更单（AppRelease）+ 平台里的服务实例记录，
+              **不缩容、不删 Deployment、不改镜像** —— 集群里那个服务照旧在跑。
+              原先这里写"会把副本数缩容到 0…业务将立即不可用"，而那也是当时的真实行为；
+              用户指出一个发布平台不该有这种副作用，前后端一起改成了"只取消纳管"。
+              文案必须跟着行为走：写重了没人敢用，写轻了就是骗人。 */}
+          <b>平台只是发布通道：这一步只解除纳管，不会改动集群里正在运行的服务。</b>
           <br />
-          业务将立即不可用；K8s 中的 Deployment / Service 对象不会被删除，仍保留在命名空间里。
+          具体动作是删除平台下发的变更单（AppRelease）并移除平台里的服务实例记录；
+          Deployment 的镜像与副本数保持不变，**业务不中断**。
           <br />
           <Text type="secondary">
-            建议先确认无流量再执行；下线后平台不再跟踪该服务，需重新纳管才能在 {env?.name ?? key} 部署。
+            取消纳管后平台不再跟踪该服务；想再次接管，重新纳管并部署一次即可（集群里那个负载仍在，会被重新接管）。
           </Text>
         </div>
       ),
-      okText: '确认下线',
+      okText: '确认取消纳管',
       okButtonProps: { danger: true },
       onOk: async () => {
         try {
           await serviceApi.remove(svc.id);
-          message.success(`已下线 ${svc.projectKey}`);
+          message.success(`已取消纳管 ${svc.projectKey}（集群里的服务未受影响）`);
           refreshAll();
         } catch (e) {
-          // 下线第一步就是把副本缩到 0，走的是同一条变更通道 ——
-          // HPA 接管的工作负载会被拒（平台不能声明副本数），理由必须让用户看到。
-          fail(e, `下线 ${svc.projectKey} 失败`);
+          fail(e, `取消纳管 ${svc.projectKey} 失败`);
           throw e;
         }
       },
@@ -904,7 +904,9 @@ const EnvironmentDetail: React.FC = () => {
                   disabled: !canDeploy,
                   label: (
                     <DisabledTip title={deployGuardTip}>
-                      <span>下线 / 删除</span>
+                      {/* 不叫"下线"：它**不会**让服务停下来（那要用户显式改副本数）。
+                          名字与动作对不上，用户就不敢点、或者点完以为业务停了。 */}
+                      <span>取消纳管</span>
                     </DisabledTip>
                   ),
                 },

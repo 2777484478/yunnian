@@ -176,6 +176,12 @@ func (l *LocalCluster) Scale(context.Context, WorkloadRef, int) error {
 	return errors.New(localClusterHint)
 }
 
+// Release 未接入集群时也明确拒绝：这里删的是集群里的变更单，
+// 没接入就无从删起，假装成功会让"取消纳管"看起来做过了。
+func (l *LocalCluster) Release(context.Context, WorkloadRef) error {
+	return errors.New(localClusterHint)
+}
+
 // Restart 明确拒绝，不假装成功。
 func (l *LocalCluster) Restart(context.Context, WorkloadRef) error {
 	return errors.New(localClusterHint)

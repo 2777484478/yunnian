@@ -33,6 +33,9 @@ type stubCluster struct {
 	// evidence / evidenceErr 供诊断测试注入，预检不用。
 	evidence    *integration.FailureEvidence
 	evidenceErr error
+	// 调用计数：用来钉住"取消纳管不缩容"这条纪律（Scale 会真的停服，Release 不会）。
+	scaleCalls   int
+	releaseCalls int
 }
 
 func (c *stubCluster) Describe(context.Context, integration.WorkloadRef) (*integration.WorkloadState, error) {
@@ -43,8 +46,19 @@ func (c *stubCluster) ApplyImage(context.Context, integration.ApplyRequest, func
 	return nil
 }
 
-func (c *stubCluster) Scale(context.Context, integration.WorkloadRef, int) error { return nil }
-func (c *stubCluster) Restart(context.Context, integration.WorkloadRef) error    { return nil }
+func (c *stubCluster) Scale(context.Context, integration.WorkloadRef, int) error {
+	c.scaleCalls++
+	return nil
+}
+
+// Release 解除纳管（删变更单）。**故意与 Scale 分开计数**：
+// `DeleteService` 曾经调 Scale(ref, 0) 把线上副本缩到 0，那是一个发布平台不该有的副作用。
+func (c *stubCluster) Release(context.Context, integration.WorkloadRef) error {
+	c.releaseCalls++
+	return nil
+}
+
+func (c *stubCluster) Restart(context.Context, integration.WorkloadRef) error { return nil }
 func (c *stubCluster) Pods(context.Context, integration.WorkloadRef) ([]integration.PodInfo, error) {
 	return nil, nil
 }

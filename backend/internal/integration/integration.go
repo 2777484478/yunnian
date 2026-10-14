@@ -252,6 +252,12 @@ type Cluster interface {
 	ApplyImage(ctx context.Context, req ApplyRequest, progress func(stage string, pct uint8) error) error
 	// Scale 调整副本数。
 	Scale(ctx context.Context, ref WorkloadRef, replicas int) error
+	// Release 解除平台对工作负载的纳管：**删掉平台下发的变更单（AppRelease）**。
+	//
+	// **不缩容、不删 Deployment、不改镜像与副本** —— 集群里那个服务照旧在跑。
+	// 与 `Scale(ref, 0)` 的区别是本质的：后者把副本声明成 0，是真的停服，
+	// 那是"停止服务"，不是"取消纳管"。平台只是发布通道，取消纳管不该影响运行中的业务。
+	Release(ctx context.Context, ref WorkloadRef) error
 	// Restart 滚动重启（不换镜像）。
 	Restart(ctx context.Context, ref WorkloadRef) error
 	// Pods 列出工作负载下的 Pod。

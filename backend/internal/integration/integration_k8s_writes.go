@@ -1,13 +1,15 @@
-// 本文件是 K8sCluster 的**写路径**：ApplyImage / Scale / Restart。
+// 本文件是 K8sCluster 的**写路径**：ApplyImage / Scale / Release / Restart。
 //
 // 具体"往哪写、为什么这么写"的约束全在 integration_apprelease.go 的文件头，
-// 这里只放三个动作的编排：下发 → 等集群确认 → 校验结果真的落地。
+// 这里只放几个动作的编排：下发 → 等集群确认 → 校验结果真的落地。
 //
-// 三个动作的等待策略刻意不同，因为它们对用户的意义不同：
+// 几个动作的等待策略刻意不同，因为它们对用户的意义不同：
 //
 //	ApplyImage  发布新版本 —— 用户要的是"真的跑起来了"，因此**等到滚动完成**，并回验镜像；
 //	Scale       扩缩容     —— 用户要的是"实例数变成 N"，因此等到集群**接受并观察到**新副本数，
 //	                          不等 Pod 全部就绪（拉起新 Pod 受镜像拉取影响，那不是"失败了"）；
+//	Release     解除纳管   —— 用户要的是"平台别再管它"，因此**只删变更单**、
+//	                          不等任何东西：Deployment 一动都不动（见 Release 的注释）；
 //	Restart     滚动重启   —— 用户要的是"这一轮重新起来"，等价于 kubectl rollout restart，
 //	                          因此确认"滚动确实被触发"（generation 递增且被观察到）即可。
 package integration
@@ -86,7 +88,8 @@ func (k *K8sCluster) ApplyImage(ctx context.Context, req ApplyRequest, progress 
 
 // waitRollout 轮询直到滚动完成、变更单进入终态失败、超时或 ctx 取消。
 //
-// 进度取自 Deployment（真相），失败判定取自 CR（它更早暴露"这次下发根本不会被应用"）。
+// 进度取自 Deployment（真相），**结论由 Deployment 与变更单共同裁决**（见 judgeRollout）：
+// 只看 Deployment 会把"旧版本还就绪着"当成"我们要的那版好了"。
 func (k *K8sCluster) waitRollout(
 	ctx context.Context,
 	dyn dynamic.Interface,
@@ -100,13 +103,19 @@ func (k *K8sCluster) waitRollout(
 	lastStage, lastPct := "", uint8(0)
 	lastMsg := ""
 
+	var crView *appReleaseView
 	for {
 		// 1) 先看变更单：终态失败要立刻中止，不能让用户等到超时。
 		//    （TargetNotFound 之类可自愈的失败不算终态，见 terminalFailure。）
+		//
+		//    这一轮读到的 CR 要留着：判"完成"时得靠它的 observedGeneration 分辨
+		//    "operator 还没处理这次下发"与"处理了、但被别人压回旧版"。
+		crView = nil
 		if view, err := k.getAppRelease(ctx, dyn, handle.View.Namespace, handle.View.Name); err == nil {
 			if terminal, _ := view.terminalFailure(); terminal {
 				return crPhaseFailedError(view)
 			}
+			crView = &view
 		}
 
 		// 2) 再看工作负载：进度与"完成"只认它。
@@ -118,33 +127,38 @@ func (k *K8sCluster) waitRollout(
 			return fmt.Errorf("读取工作负载 %s/%s 状态失败：%w", ref.Namespace, ref.Workload, err)
 		}
 
-		stage, pct, done, msg := rolloutProgress(dep)
+		stage, pct, _, msg := rolloutProgress(dep)
 		lastMsg = msg
+
+		// 3) 结论由 Deployment 与变更单**共同**裁决（见 judgeRollout）。
+		//    ⚠️ 只看 Deployment 是错的：它说"全部就绪"时，就绪的可能是**旧版本**——
+		//    operator 把新 spec 写进去之前，第一轮轮询就会判成完成，把一次成功的发布
+		//    报成「已滚动完成，但镜像仍是旧 tag」（2026-10-14 实测）。
+		verdict, vmsg, verr := judgeRollout(dep, crView, wantImage, handle.View.ContainerName)
+		if verr != nil {
+			return verr
+		}
+		switch verdict {
+		case verdictComplete:
+			notify(progress, "流量接入", 100)
+			return nil
+		case verdictReverted:
+			// 变更单已被 operator 处理过，Deployment 却还不是期望镜像 —— 真失败。
+			return errors.New(vmsg)
+		case verdictAppReleasePending:
+			// 还没轮到我们：覆盖掉 Deployment 那份"旧版本就绪"的进度文案，继续等。
+			// 注意**不能 continue**：下面的超时判定必须照常跑，否则会无限空转。
+			stage, pct = "等待下发", 20
+			lastMsg = vmsg
+		}
 		if stage != lastStage || pct != lastPct {
 			notify(progress, stage, pct)
 			lastStage, lastPct = stage, pct
 		}
-		if done {
-			// 完成不等于成功。集群说"全部就绪"、镜像却不是我们要的那一版，
-			// 说明中途有人改过（或者 operator 的下发被别的管理者压了回去）——
-			// 这时候报成功就是最典型的那类假成功。
-			_, got, err := deploymentImage(dep, handle.View.ContainerName)
-			if err != nil {
-				return err
-			}
-			if got != wantImage {
-				return fmt.Errorf(
-					"工作负载 %s/%s 已滚动完成，但镜像仍是 %s（期望 %s）："+
-						"请检查是否有其他管理者在改这个工作负载",
-					ref.Namespace, ref.Workload, got, wantImage)
-			}
-			notify(progress, "流量接入", 100)
-			return nil
-		}
 
-		// 3) 集群自己已经判定"这次滚动不可能再自己好了" → 立刻失败，不必等满 deployTimeout。
+		// 4) 集群自己已经判定"这次滚动不可能再自己好了" → 立刻失败，不必等满 deployTimeout。
 		//    判据是 Deployment 的 `Progressing=False / reason=ProgressDeadlineExceeded`
-		//    （见 ErrRolloutStuck）。放在 done 判定**之后**是刻意的：一个已经真的滚完的
+		//    （见 ErrRolloutStuck）。放在结论判定**之后**是刻意的：一个已经真的滚完的
 		//    Deployment 不该因为一条陈旧的条件被报成失败。
 		//    在不自动回滚的前提下，这段等待是纯损失，没有理由不省。
 		if stuckMsg, ok := rolloutDeadlineExceeded(dep); ok {
@@ -233,6 +247,66 @@ func (k *K8sCluster) Scale(ctx context.Context, ref WorkloadRef, replicas int) e
 	}
 
 	return k.waitScaled(ctx, dyn, cs, handle, ref, replicas)
+}
+
+// Release 解除纳管：删掉平台下发的变更单（AppRelease），**完全不碰 Deployment**。
+//
+// 依据 operator 源码（`apprelease_controller.go` 的 reconcileDelete）：AppRelease 带 finalizer，
+// 但删除时的清理动作**只摘掉 Deployment 上的接管注解**（`apps.example.com/managed-by`），
+// 既不删 Deployment，也不改它的镜像与副本 —— 所以"取消纳管"之后集群里那个服务照旧在跑。
+//
+// 这正是"平台只是发布通道"该有的语义：与 `Scale(ref, 0)` 的区别是本质的，
+// 后者把副本声明成 0，是真的停服。
+//
+// 只认 `spec.targetDeployment` 反查出来的那一张（与 ensureAppRelease 同一套口径）：
+//
+//	0 张 —— 平台本来就没接管过它（手工建的服务实例、或变更单已被删）：无事可做，算成功；
+//	多张 —— 两张单会互相覆盖且不报错，不知道删哪一张，硬拒绝让人处理。
+//
+// ⚠️ 已知假设：平台认"一个工作负载一张单"，且那张单是平台下发的。`ensureAppRelease`
+// 接管时并不区分单是谁建的（同名同目标即认），所以这里删的也可能是别人建的同一张单；
+// 在当前部署形态下平台是这张单唯一的写入方，先按此实现。要更严就得给变更单加归属标记，
+// 并在接管时拒绝认领别人的单 —— 那是另一个决定，不在这里偷偷做。
+func (k *K8sCluster) Release(ctx context.Context, ref WorkloadRef) error {
+	if err := ref.validate(); err != nil {
+		return err
+	}
+	dyn, _, err := k.crClients(ctx, ref.ClusterRef)
+	if err != nil {
+		return err
+	}
+
+	existing, err := k.findAppReleasesByTarget(ctx, dyn, ref.Namespace, ref.Workload)
+	if err != nil {
+		return err
+	}
+	switch len(existing) {
+	case 0:
+		return nil
+	case 1:
+	default:
+		names := make([]string, 0, len(existing))
+		for _, v := range existing {
+			names = append(names, v.Namespace+"/"+v.Name)
+		}
+		return fmt.Errorf(
+			"工作负载 %s/%s 被多个变更单同时接管（%s）：不知道该删哪一张，"+
+				"请先人工合并或删除多余的变更单",
+			ref.Namespace, ref.Workload, strings.Join(names, "、"))
+	}
+
+	cr := existing[0]
+	if err := dyn.Resource(appReleaseGVR).Namespace(cr.Namespace).
+		Delete(ctx, cr.Name, metav1.DeleteOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			// 并发：别人刚删掉。目标状态（这张单没了）已经达成。
+			return nil
+		}
+		return fmt.Errorf("删除变更单 %s/%s 失败：%w", cr.Namespace, cr.Name, err)
+	}
+	slog.Info("已解除纳管：变更单已删除（Deployment 的镜像与副本保持不变）",
+		"namespace", cr.Namespace, "appRelease", cr.Name, "workload", ref.Workload)
+	return nil
 }
 
 // waitScaled 等到集群**接受并观察到**目标副本数。

@@ -38,7 +38,7 @@ import {
   SlidersOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { PageHeader, SectionCard } from '@/components/ui';
 import { LogPanel } from '@/components/LogPanel';
 import BatchDeployWizard from '@/components/BatchDeployWizard';
@@ -346,9 +346,22 @@ const RollbackTargetField: React.FC<{
 
 // --------------------------------------------------------------------------- 页面
 
+/** 上次在发布拓扑里选过的项目（key）。命名与 `yn.autorefresh.*` 保持一致。 */
+const TOPO_PROJECT_KEY = 'yn.topo.project';
+
+/** 读上次选过的项目。存储不可用（隐私模式）时返回空串，由调用方兜底。 */
+function readLastProject(): string {
+  try {
+    return localStorage.getItem(TOPO_PROJECT_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
 const Topology: React.FC = () => {
   const { message } = AntApp.useApp();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   /**
    * 把后端的拒绝理由如实展示给用户。
@@ -389,9 +402,63 @@ const Topology: React.FC = () => {
   const projects: Project[] = useMemo(() => projectsApi.data?.list ?? [], [projectsApi.data]);
 
   // 默认选中第一个项目（而不是硬编码某个 key —— 真实数据里那个 key 不一定存在）
+  /**
+   * 选中的项目要**记得住**。
+   *
+   * 原先每次进这一页（或刷新）都弹回 `projects[0]` —— 发布完回来想看刚才那个服务，
+   * 又被甩到默认项目上，得再选一次。项目是这一页的**主语**，丢了主语等于丢了上下文。
+   *
+   * 三个来源，优先级从高到低：
+   *   1. URL 的 `?project=`：可分享、可刷新、从别处跳进来能带上下文；
+   *   2. 上次选过的（localStorage）：日常"发完回来看一眼"走这条；
+   *   3. 第一个项目：兜底，且**必须校验 key 仍然存在**（项目可能刚被删）。
+   */
+  /** 把 URL 里的 `?project=` 对齐到 `key`（replace，不堆历史 —— 翻项目不该让"返回"按好几次）。 */
+  const syncUrlProject = (key: string) => {
+    if ((searchParams.get('project') ?? '') === key) return;
+    const next = new URLSearchParams(searchParams);
+    if (key) next.set('project', key);
+    else next.delete('project');
+    setSearchParams(next, { replace: true });
+  };
+
+  const pickProject = (key: string) => {
+    setProjectKey(key);
+    try {
+      localStorage.setItem(TOPO_PROJECT_KEY, key);
+    } catch {
+      // 隐私模式 / 存储被禁：记不住就不记，不影响这一页能用
+    }
+    syncUrlProject(key);
+  };
+
+  /**
+   * 决定"现在该看哪个项目"，并把 URL 对齐过去。
+   *
+   * ⚠️ 必须监听 `urlProject`：HashRouter 下**只改 hash 不会重新挂载组件**，
+   * 如果只在"没选过"时才读 URL，那么"已经在拓扑页、又点了一个带 ?project= 的链接"
+   * 就会被静默忽略（实测：地址栏换了参数，选中的项目原地不动）。
+   */
+  const urlProject = searchParams.get('project') ?? '';
   useEffect(() => {
-    if (!projectKey && projects.length) setProjectKey(projects[0].key);
-  }, [projects, projectKey]);
+    if (!projects.length) return;
+    const known = (k: string) => !!k && projects.some((p) => p.key === k);
+    const next = known(urlProject)
+      ? urlProject
+      : known(projectKey)
+        ? projectKey // 已经选好了，URL 只是没跟上
+        : known(readLastProject())
+          ? readLastProject()
+          : projects[0].key;
+    if (next !== projectKey) {
+      pickProject(next);
+      return;
+    }
+    // 走到这里说明选中的就是它，但 URL 里可能是个失效/不存在的 key —— 顺手纠正，
+    // 否则地址栏会一直显示一个平台根本不认识的项目（分享出去就是坏链接）。
+    if (urlProject !== next) syncUrlProject(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, urlProject, projectKey]);
 
   const envsApi = useApi(() => environmentApi.list({ pageSize: 100 }), []);
   const envList = useMemo(() => sortByStage(envsApi.data?.list ?? []), [envsApi.data]);
@@ -771,11 +838,13 @@ const Topology: React.FC = () => {
     try {
       await serviceApi.remove(actionSvcId);
     } catch (e) {
-      fail(e, '下线失败');
+      fail(e, '取消纳管失败');
       return;
     }
     closeAction();
-    message.success(`${project?.name ?? projectKey} 已从${actionEnv.name}下线，平台已解除纳管`);
+    message.success(
+      `${project?.name ?? projectKey} 已从${actionEnv.name}取消纳管（集群里的服务未受影响）`,
+    );
     refreshAll();
   };
 
@@ -995,7 +1064,7 @@ const Topology: React.FC = () => {
           <span className="yn-topo-menu__icon">
             <CloudServerOutlined />
           </span>
-          下线服务
+          取消纳管
         </div>
       </div>
     );
@@ -1121,7 +1190,7 @@ const Topology: React.FC = () => {
               style={{ width: 300 }}
               placeholder={projectsApi.loading ? '加载项目…' : '选择项目'}
               value={projectKey || undefined}
-              onChange={setProjectKey}
+              onChange={pickProject}
               optionFilterProp="search"
               suffixIcon={<AppstoreOutlined style={{ color: '#b5bac4' }} />}
               options={projects.map((p) => ({
@@ -1632,29 +1701,36 @@ const Topology: React.FC = () => {
         )}
       </Modal>
 
-      {/* ------------------------------------------------------------ 下线服务 */}
+      {/* ------------------------------------------------------------ 取消纳管 */}
       <Modal
         open={action?.type === 'offline'}
         title={
           <Space size={8}>
             <ExclamationCircleFilled style={{ color: '#ff4d4f' }} />
-            下线服务 · {actionEnv?.name}
+            取消纳管 · {actionEnv?.name}
           </Space>
         }
-        okText="确认下线"
+        okText="确认取消纳管"
         okButtonProps={{ danger: true }}
         width={520}
         onCancel={closeAction}
         onOk={submitOffline}
       >
+        {/* ⚠️ 这段原先写的是「将删除 …的 Deployment 与 Service，该环境将不再提供访问」——
+            两句都不是事实：不但 Deployment/Service 从来没被删过，2026-10-14 起连副本事
+            都不再改了。文案比行为更"狠"，用户就不敢用这个功能。 */}
         <Alert
-          type="error"
+          type="warning"
           showIcon
           style={{ marginTop: 12 }}
-          message={`将删除 ${actionEnv?.namespace}/${projectKey} 的 Deployment 与 Service，该环境将不再提供访问`}
+          message={`只解除平台对 ${actionEnv?.namespace}/${projectKey} 的纳管，集群里的服务不受影响`}
         />
         <p style={{ marginTop: 14, color: '#5c6470' }}>
-          下线不会删除镜像与构建记录；如需恢复，重新执行一次部署即可。
+          平台会删掉自己下发的变更单（AppRelease）并移除服务实例记录；Deployment 的镜像与副本数
+          <b>保持不变</b>，业务不中断。停止服务请用「设定副本数」显式改成 0。
+        </p>
+        <p style={{ marginTop: 8, color: '#5c6470' }}>
+          不会删除镜像与构建记录；想再次接管，重新纳管并部署一次即可。
         </p>
       </Modal>
 

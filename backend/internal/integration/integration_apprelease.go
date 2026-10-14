@@ -617,8 +617,65 @@ func rolloutProgress(dep *appsv1.Deployment) (stage string, pct uint8, done bool
 		fmt.Sprintf("全部 %d 个副本均已更新并可用", dep.Status.UpdatedReplicas)
 }
 
-// deploymentImage 取 Deployment 里指定容器（留空取第一个）的镜像。
+// rolloutVerdict 一轮轮询的结论。
+type rolloutVerdict int
+
+const (
+	// verdictWaiting：还没到能收工的时候（副本没齐 / 还在拉镜像 / 镜像没换）。
+	verdictWaiting rolloutVerdict = iota
+	// verdictAppReleasePending：**Deployment 说自己全部就绪，但那是旧版本的就绪** ——
+	// 变更单刚下发、operator 还没处理，我们要的那版镜像还不在 spec 里。继续等，不是失败。
+	verdictAppReleasePending
+	// verdictComplete：期望镜像已在 spec 里，且副本全部更新并可用。
+	verdictComplete
+	// verdictReverted：变更单**已被 operator 处理过**，Deployment 却仍不是期望镜像 ——
+	// 有人把它改回去了，这时候报成功就是假成功。
+	verdictReverted
+)
+
+/*
+judgeRollout 由 Deployment 与变更单**共同**裁决这一轮该怎么判。抽成纯函数是因为
+最容易错的那一处恰好没有集群也能测：
+
+	`Deployment.status` 只说"某个版本全部就绪"，而**旧版本一直就绪**。于是只看它的话，
+	在 operator 把新 spec 写进 Deployment 之前，第一轮轮询就会判成"完成" → 紧接着比对镜像
+	发现是旧 tag → 报失败。实测（2026-10-14）：首次接管一个已在跑的服务，部署单 300ms 就
+	报「已滚动完成，但镜像仍是旧 tag」，而变更单其实已下发、几秒后真的滚成了新版 ——
+	用户看到的就是"报失败但其实部署成功"。
+
+分辨"还没轮到我们"与"被压回旧版"的依据只能取变更单自己：operator 有没有读进这次下发
+（`status.observedGeneration` 追上 `metadata.generation`）。
+*/
+func judgeRollout(
+	dep *appsv1.Deployment,
+	cr *appReleaseView,
+	wantImage string,
+	containerName string,
+) (rolloutVerdict, string, error) {
+	_, got, err := deploymentImage(dep, containerName)
+	if err != nil {
+		return verdictWaiting, "", err
+	}
+	if got == wantImage {
+		// 镜像对了，剩下的交给 Deployment 自己：副本没齐就继续等。
+		if _, _, done, _ := rolloutProgress(dep); done {
+			return verdictComplete, "", nil
+		}
+		return verdictWaiting, "", nil
+	}
+	// 镜像还不是期望值：看变更单被处理过没有。
+	if cr == nil || cr.ObservedGeneration < cr.Generation {
+		return verdictAppReleasePending, fmt.Sprintf(
+			"变更单已下发，等待 operator 应用（工作负载当前仍是 %s）", got), nil
+	}
+	return verdictReverted, fmt.Sprintf(
+		"工作负载 %s/%s 已滚动完成，但镜像仍是 %s（期望 %s）："+
+			"请检查是否有其他管理者在改这个工作负载",
+		dep.Namespace, dep.Name, got, wantImage), nil
+}
+
 func deploymentImage(dep *appsv1.Deployment, containerName string) (string, string, error) {
+
 	containers := dep.Spec.Template.Spec.Containers
 	if len(containers) == 0 {
 		return "", "", fmt.Errorf("工作负载 %s/%s 的 Pod 模板里没有任何容器",
