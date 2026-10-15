@@ -31,7 +31,8 @@ import { BatchRunner } from './BatchRunner';
 import type { BatchResult, BatchTaskDef, BatchTaskHandle, BatchTaskOutcome } from './BatchRunner';
 import { ProjectTypeTag, ServiceStatusTag } from './StatusTag';
 import { DisabledTip } from '@/components/DisabledTip';
-import { ApiError, deployApi, environmentApi, imageApi, systemApi } from '@/api';
+import { ApiError, deployApi, environmentApi, imageApi, registryApi, systemApi } from '@/api';
+import type { RegistryTags } from '@/api/registry';
 import { canDeployOn, hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
 import { humanSize } from '@/utils/format';
@@ -92,6 +93,15 @@ interface RowModel {
   latest?: ImageRecord;
   /** 可选版本（仓库里该项目的镜像，按推送时间倒序） */
   versions: ImageRecord[];
+  /**
+   * 该项目在**镜像仓库**（Harbor）里的标签。
+   *
+   * ⚠️ 三种状态必须分开，混成一种就会把"还没问"说成"仓库里没有"：
+   *   `undefined` 还没去查（还没走到核对版本那一步）
+   *   `null`      查了但这次没读到
+   *   `{unavailable}` 读到了响应，但响应说读不到（没接仓库 / 找不到仓库 / 没权限）
+   */
+  registry?: RegistryTags | null;
   /** 该实例的集群实时状态（`EnvService.live` 原样带过来） */
   live?: ServiceLive | null;
   /** 集群状态是否**读到了**（`live.available`）。决定"当前版本/变更"两列能不能下结论 */
@@ -109,7 +119,6 @@ interface RowModel {
   /** 平台库里记的 tag —— 只用于判断"有没有可用镜像"，不作为"当前版本"展示 */
   platformTag?: string;
   undeployed: boolean;
-  hasUpdate: boolean;
   /** 集群里实跑的副本数；读不到时为 undefined（不拿平台库的值凑） */
   replicas?: number;
   /**
@@ -151,6 +160,49 @@ interface RowModel {
  *    读不到集群时**不冒充**：既不显示库值，也不把"变更"列标成"已最新"，
  *    因为那是对一个我们并不知道的现状下的断言。
  */
+/**
+ * 目标版本的**选择标识**（两组候选共用一条 value 通道）。
+ *
+ * 候选来自两组：**仓库标签**（Harbor 里实际存在的，含别人推的）与
+ * **平台构建**（image_record，带构建号 / commit / 推送时间可溯源）。
+ * 两组里的 tag 可能**同名**（平台构建完推到仓库时就是同一个），但语义不同、
+ * 后端走的是两条不同的取镜像链路。所以 value 必须带来源前缀 ——
+ * 只存 tag 名的话，同名候选在下拉里长得一模一样，提交时也无从判断该走哪条。
+ */
+const SRC_REGISTRY = 'r:';
+const SRC_PLATFORM = 'p:';
+
+/** 一次从仓库读几个标签。批量场景每个服务一次请求，不宜取太多。 */
+const REG_TAG_LIMIT = 8;
+
+/** 从带前缀的选择标识里取裸 tag（`r:1.2.3` → `1.2.3`）。 */
+function bareTagOf(v: string | undefined): string {
+  if (!v) return '';
+  return v.startsWith(SRC_REGISTRY) || v.startsWith(SRC_PLATFORM) ? v.slice(2) : v;
+}
+
+/**
+ * 一行最终提交什么：**二选一，不能同时给**。
+ *
+ * 后端 `checkImageSource` 对"平台与仓库都给"直接拒（400），
+ * 所以这里用联合类型把"两个都给"从类型上排除掉 —— 比事后加一句注释可靠。
+ */
+type DeployPick = { registryTag: string } | { platformTag: string };
+
+/** 取出 DeployPick 里那个 tag（两种来源的字段名不同，只有这里知道怎么取）。 */
+function pickTagOf(p: DeployPick | undefined): string {
+  if (!p) return '';
+  return 'registryTag' in p ? p.registryTag : p.platformTag;
+}
+
+/** 仓库标签的时间口径说明：Harbor v1 只能给构建时间，v2 才有推送时间。 */
+function regTimeText(t: { time: string; timeKind: string }): string {
+  if (!t.time) return '时间未知';
+  const label = t.timeKind === 'build' ? '构建于' : t.timeKind === 'push' ? '推送于' : '';
+  const when = t.time.slice(0, 19).replace('T', ' ');
+  return label ? `${label} ${when}` : when;
+}
+
 const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   open,
   onClose,
@@ -177,9 +229,15 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   const [scanNote, setScanNote] = useState('');
   const [imageCount, setImageCount] = useState(0);
 
-  /** 逐服务的目标版本（默认 = 仓库最新） */
+  /** 逐服务的目标版本（默认 = 仓库最新，值形如 `r:1.2.3` / `p:1.2.3`，见 SRC_*） */
   const [targets, setTargets] = useState<Record<string, string>>({});
   const [skipped, setSkipped] = useState<string[]>([]);
+  /** 读仓库标签的进行中状态（每个服务一次 Harbor 请求）。 */
+  const [regLoading, setRegLoading] = useState(false);
+  /** 已经查过仓库的项目 —— 来回切步骤不重复请求。 */
+  const regLoadedRef = useRef<Set<string>>(new Set());
+  /** 用户手动改过目标版本的项目：仓库标签回来时**不许**覆盖他的选择。 */
+  const targetTouchedRef = useRef<Set<string>>(new Set());
 
   const [tasks, setTasks] = useState<BatchTaskDef[]>([]);
   const [batchNo, setBatchNo] = useState('');
@@ -237,6 +295,10 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
       setLoadError('');
       setRows([]);
       setTargets({});
+      // 「重新读取」= 仓库结果全部作废（用户可能刚在 Harbor 推了新 tag），
+      // 连"用户改过哪些行"也一并忘掉：这是一次彻底重来，不是增量刷新。
+      regLoadedRef.current = new Set();
+      targetTouchedRef.current = new Set();
       setScanNote('读取仓库镜像…');
       try {
         // 1) 仓库镜像：一次取回全平台镜像（一期总量在 200 以内），
@@ -300,7 +362,7 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
             currentTag,
             platformTag: svc?.tag,
             undeployed: !svc,
-            hasUpdate: exists && !!latest && latest.tag !== currentTag,
+            // ⚠️ 这里**不再**算 hasUpdate：它现在由 `hasUpdateOf` 按**目标版本**现算。
             // 实例总数（不是期望数）：列名是"集群里实际在跑的个数"，
             // 滚动卡住时那个反复崩溃的实例也算在内，否则这一列会显示成"数量正常"。
             replicas: exists ? liveReplicaTotal(live!) : undefined,
@@ -315,9 +377,13 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
           models.filter((m) => m.hasBuild && !m.undeployed && !m.inflight).map((m) => m.projectKey),
         );
         setKeys((prev) => prev.filter((k) => selectable.has(k)));
-        // 默认目标版本 = 仓库最新
+        // 默认目标版本先给「平台最新」—— 它一定带可靠的推送时间，任何情况下都有值；
+        // 等仓库标签读回来再升级成「仓库最新」（见 loadRegistryTags）。
+        // 分两步的理由：仓库读不到时，这一行仍然站得住，不会变成一个空选择。
         setTargets(
-          Object.fromEntries(models.filter((m) => m.latest).map((m) => [m.projectKey, m.latest!.tag])),
+          Object.fromEntries(
+            models.filter((m) => m.latest).map((m) => [m.projectKey, SRC_PLATFORM + m.latest!.tag]),
+          ),
         );
         setScanNote('');
       } catch (e) {
@@ -337,12 +403,107 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
    * 但第 0 步（选择服务）的表格渲染的就是同一份 `rows`，于是选择页永远"暂无数据"，
    * 没有服务可勾选，向导死在第一步。数据只有一份，读在进去之前。
    */
+  /**
+   * 读勾选服务在**镜像仓库**里的标签。
+   *
+   * 为什么不在 loadRows 里一次全读：那要读**环境的全部项目**（实测 41 个），
+   * 每个一次 Harbor 请求 —— 而用户这次可能只发 6 个。放在「核对版本」这一步、
+   * 只读已勾选的，请求数与真实需要一致；来回切步骤也不重复（regLoadedRef 挡着）。
+   *
+   * ⚠️ 读不到**不冒充空列表**：空数组会被读成"这仓库没有标签"，
+   * 而真实原因可能是"没接仓库 / 找不到对应仓库 / 没权限 / 仓库不通"，
+   * 几种情况的处置完全不同。所以如实记成 null / unavailable，界面显示原因。
+   */
+  const loadRegistryTags = useCallback(async (projectKeys: string[]) => {
+    const todo = projectKeys.filter((k) => !regLoadedRef.current.has(k));
+    if (!todo.length) return;
+    // 先登记再发请求：并发触发（切勾选、切步骤）时不会把同一个项目问两遍。
+    todo.forEach((k) => regLoadedRef.current.add(k));
+    setRegLoading(true);
+    try {
+      const results = await Promise.all(
+        todo.map((k) =>
+          registryApi.harborTags(k, REG_TAG_LIMIT).then(
+            (r) => r,
+            () => null, // 请求本身失败 → null，与"响应说读不到"（unavailable）分开
+          ),
+        ),
+      );
+      const byKey = new Map<string, RegistryTags | null>();
+      todo.forEach((k, i) => byKey.set(k, results[i] ?? null));
+
+      setRows((prev) =>
+        prev.map((r) => (byKey.has(r.projectKey) ? { ...r, registry: byKey.get(r.projectKey)! } : r)),
+      );
+
+      // 默认目标版本升级成「仓库最新」—— 用户要的就是它。
+      // ⚠️ 只动**用户没碰过**的行：覆盖用户刚才的选择是这里最容易犯的错，
+      // 而且覆盖后界面看着很正常（值变了但没有任何提示）。
+      setTargets((prev) => {
+        const next = { ...prev };
+        todo.forEach((k) => {
+          if (targetTouchedRef.current.has(k)) return;
+          const reg = byKey.get(k);
+          const tag = reg && !reg.unavailable ? reg.tags[0]?.tag : undefined;
+          if (tag) next[k] = SRC_REGISTRY + tag;
+        });
+        return next;
+      });
+    } finally {
+      setRegLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!open || !envKey) return;
     void loadRows(envKey);
   }, [open, envKey, loadRows]);
 
+  /**
+   * 走到「核对版本」这一步才读仓库标签（并只读已勾选的服务）。
+   * `keys` 在依赖里：用户回头多勾一个服务，它也能补读那一个。
+   */
+  /**
+   * 读仓库标签的**时机**。
+   *
+   * 数据一加载完，就先把**有平台产物的**项目读一轮（实测这类只有个位数到十几个）。
+   * 目的是让第 1 步的「变更」列和第 2 步的默认目标版本用**同一个口径** ——
+   * 否则同一件事在同一页里会有两个答案：一页"有更新"、下一页"没有变化"
+   * （2026-10-15 实测撞到，见 hasUpdateOf 的注释）。
+   *
+   * 走到「核对版本」时再补一次 `keys`：那里可能多出"平台没产物、但用户手工勾上"的项目。
+   * 读过的由 regLoadedRef 挡掉，不会重复请求。
+   */
+  useEffect(() => {
+    if (!open || !rows.length) return;
+    void loadRegistryTags(rows.filter((r) => r.latest).map((r) => r.projectKey));
+  }, [open, rows, loadRegistryTags]);
+
+  useEffect(() => {
+    if (!open || step !== 1) return;
+    void loadRegistryTags(keys);
+  }, [open, step, keys, loadRegistryTags]);
+
   // ------------------------------------------------------------------ 派生
+
+  /**
+   * 「这次发布会变什么」的**唯一口径**。
+   *
+   * ⚠️ 必须按**目标版本**（targets）现算，不能用平台记录里的 latest：
+   * 目标版本的默认值会从「平台最新」升级成「仓库最新」—— 而仓库里可能有平台
+   * 根本不知道的 tag（Jenkins / 别人手工推的）。两个口径一旦分家，同一件事
+   * 在同一页里就会有两个答案：第 1 步说"有更新"，第 2 步说"全部为同版本发布"。
+   * （2026-10-15 实测撞到：平台最新是 2.2.0.1006，而仓库按构建时间最新是 1.2.0.3416，
+   *   正是当前集群在跑的那个 —— 于是两页说法相反。）
+   */
+  const hasUpdateOf = useCallback(
+    (r: RowModel) => {
+      if (!r.exists) return false;
+      const t = bareTagOf(targets[r.projectKey]) || r.latest?.tag;
+      return !!t && t !== r.currentTag;
+    },
+    [targets],
+  );
 
   const filtered = useMemo(
     () =>
@@ -352,22 +513,22 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
         const hitFilter =
           filter === 'all' ||
           (filter === 'undeployed' && r.undeployed) ||
-          (filter === 'update' && r.hasUpdate) ||
+          (filter === 'update' && hasUpdateOf(r)) ||
           // 「已最新」只收**能确认**已最新的：读不到集群的行既不算有更新也不算已最新，
           // 否则"已最新 12"里会混进一堆我们根本不知道现状的服务。
-          (filter === 'same' && r.currentKnown && !r.hasUpdate);
+          (filter === 'same' && r.currentKnown && !hasUpdateOf(r));
         return hitKw && hitFilter;
       }),
-    [rows, filter, kw],
+    [rows, filter, kw, hasUpdateOf],
   );
 
   const counts = useMemo(
     () => ({
       undeployed: rows.filter((r) => r.undeployed).length,
-      update: rows.filter((r) => r.hasUpdate).length,
-      same: rows.filter((r) => !r.undeployed && r.currentKnown && !r.hasUpdate).length,
+      update: rows.filter((r) => hasUpdateOf(r)).length,
+      same: rows.filter((r) => !r.undeployed && r.currentKnown && !hasUpdateOf(r)).length,
     }),
-    [rows],
+    [rows, hasUpdateOf],
   );
 
   const picked = useMemo(
@@ -389,8 +550,14 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
    * 读不到集群的服务既不能算"变更"也不能算"同版本"——那两种说法都是在断言
    * 我们并不知道的现状。单列一档，界面上如实说"无法比对"。
    */
-  const changeCount = picked.filter((r) => r.currentKnown && targets[r.projectKey] !== r.currentTag).length;
-  const sameCount = picked.filter((r) => r.currentKnown && targets[r.projectKey] === r.currentTag).length;
+  // 与「当前运行版本」比对时要去掉来源前缀（`r:1.2.3` → `1.2.3`），
+  // 否则任何选择都会因为多了两个字符被判成"有变更"。
+  const changeCount = picked.filter(
+    (r) => r.currentKnown && bareTagOf(targets[r.projectKey]) !== r.currentTag,
+  ).length;
+  const sameCount = picked.filter(
+    (r) => r.currentKnown && bareTagOf(targets[r.projectKey]) === r.currentTag,
+  ).length;
   const unknownCount = picked.length - changeCount - sameCount;
   /** 该环境下已有进行中部署单的服务（后端会拒绝并发发布，这里提前挡掉） */
   const inflightRows = useMemo(() => rows.filter((r) => r.inflight), [rows]);
@@ -440,12 +607,13 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   /** 本批次的公共提交参数 */
   const startPayloadRef = useRef<{
     envKey: string;
-    tagOf: Record<string, string>;
+    /** 每个项目最终提交什么（平台 tag 或仓库 tag，二选一，见 DeployPick） */
+    pickOf: Record<string, DeployPick>;
     /** 该环境配置的审批人（来自环境 DTO，见下方 startTask 注释） */
     approvers: string[];
   }>({
     envKey: '',
-    tagOf: {},
+    pickOf: {},
     approvers: [],
   });
   const lastOkRef = useRef<Set<string>>(new Set());
@@ -465,14 +633,20 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
     const no = `DP${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Date.now()
       .toString()
       .slice(-6)}`;
-    const tagOf: Record<string, string> = {};
+    const pickOf: Record<string, DeployPick> = {};
     picked.forEach((r) => {
-      // 兜底顺序里用 `platformTag` 而不是集群实况：后端 `resolveDeployImage` 是从
-      // **平台镜像记录**里按 tag 找版本的，集群里跑着什么对这次提交没有影响。
-      tagOf[r.projectKey] = targets[r.projectKey] || r.latest?.tag || r.platformTag || '';
+      const v = targets[r.projectKey];
+      // 兜底顺序：用户没选 → 平台最新 → 平台库里的 tag。
+      // 兜底用 `platformTag` 而不是集群实况：后端是按 tag 去平台镜像记录里找版本的，
+      // 集群里跑着什么对这次提交没有影响。
+      const tag = bareTagOf(v) || r.latest?.tag || r.platformTag || '';
+      // 按**选择的来源**分流，绝不同时带上两个字段（后端会拒）。
+      pickOf[r.projectKey] = v?.startsWith(SRC_REGISTRY)
+        ? { registryTag: tag }
+        : { platformTag: tag };
     });
 
-    startPayloadRef.current = { envKey, tagOf, approvers: env?.approvers ?? [] };
+    startPayloadRef.current = { envKey, pickOf, approvers: env?.approvers ?? [] };
     lastOkRef.current = new Set();
 
     setBatchNo(no);
@@ -483,7 +657,7 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
         subtitle: `${r.projectKey} → ${env?.name ?? envKey}`,
         short: r.projectKey,
         projectKey: r.projectKey,
-        imageHint: tagOf[r.projectKey],
+        imageHint: bareTagOf(targets[r.projectKey]) || r.latest?.tag || r.platformTag,
       })),
     );
     setResult(null);
@@ -500,11 +674,17 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
    * 发布会把它当成"改副本"的操作（那属于服务参数变更，走另一个接口）。
    */
   const startTask = useCallback(async (task: BatchTaskDef): Promise<BatchTaskHandle> => {
-    const { envKey: ek, tagOf, approvers } = startPayloadRef.current;
+    const { envKey: ek, pickOf, approvers } = startPayloadRef.current;
+    const pick: DeployPick = pickOf[task.projectKey] ?? { platformTag: '' };
     const d = await deployApi.create({
       envKey: ek,
       projectKey: task.projectKey,
-      tag: tagOf[task.projectKey],
+      // 二选一（DeployPick 就是联合类型）：选仓库时**不带 tag** ——
+      // 两个都给会被后端 `checkImageSource` 拒成 400，而那条错误到第 3 步才出现，
+      // 用户看到的会是"某个服务发布失败"，与真实原因（参数冲突）对不上。
+      ...('registryTag' in pick
+        ? { imageSource: 'registry' as const, registryTag: pick.registryTag }
+        : { imageSource: 'platform' as const, tag: pick.platformTag }),
       strategy: 'RollingUpdate',
       // remark 会落到每张部署单上、在「部署记录」里可见，是各单与该次点击之间的关联线索，
       // 故这里写明是「界面批次」而不是后端批次单号
@@ -672,7 +852,10 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
       render: (_, r) => currentCell(r),
     },
     {
-      title: '仓库最新版本',
+      // ⚠️ 这一列是**平台构建记录**里的最新，不是镜像仓库里的最新。
+      // 标题写"仓库最新版本"会被读成"镜像仓库"，从而以为它比目标版本更权威 ——
+      // 仓库口径要到「核对版本」那一步才读（那时才有目标版本下拉可选）。
+      title: '平台最新版本',
       key: 'latest',
       width: 258,
       render: (_, r) =>
@@ -719,7 +902,7 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
               将新建
             </Tag>
           </Tooltip>
-        ) : r.hasUpdate ? (
+        ) : hasUpdateOf(r) ? (
           <Tag color="orange" style={{ marginInlineEnd: 0 }}>
             有更新
           </Tag>
@@ -773,29 +956,71 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
       key: 'target',
       width: 380,
       render: (_, r) => {
-        const options = r.versions.slice(0, 12).map((i, idx) => ({
-          label: `${i.tag}　(#${i.buildNo}${idx === 0 ? ' · 最新' : ''})`,
-          value: i.tag,
-        }));
-        if (r.currentTag && !options.some((o) => o.value === r.currentTag)) {
-          options.push({ label: `${r.currentTag}　(当前运行版本)`, value: r.currentTag });
+        const reg = r.registry;
+        const regTags = reg && !reg.unavailable ? reg.tags : [];
+        // 两组候选：**仓库在前**（用户要的正是它），平台构建在后。
+        // 同名 tag 会在两组里各出现一次 —— 这是刻意的，语义不同：
+        // 仓库那条是"仓库里确实存在这个 tag"（可能是别人推的），
+        // 平台那条带 image_record（有构建号 / commit / 推送时间可溯源）。
+        const groups: { label: string; options: { label: string; value: string }[] }[] = [];
+        if (regTags.length) {
+          groups.push({
+            label: `仓库标签（最近 ${regTags.length} 个${
+              reg!.timeKind === 'build' ? ' · 时间是镜像构建时间' : ''
+            }）`,
+            options: regTags.map((t, i) => ({
+              label: `${t.tag}${i === 0 ? ' · 最新' : ''}　${regTimeText(t)}`,
+              value: SRC_REGISTRY + t.tag,
+            })),
+          });
         }
-        return options.length ? (
-          <Tooltip title={targets[r.projectKey]}>
+        const plat = r.versions.slice(0, 12).map((i, idx) => ({
+          label: `${i.tag}　(#${i.buildNo}${idx === 0 ? ' · 最新' : ''})`,
+          value: SRC_PLATFORM + i.tag,
+        }));
+        if (r.currentTag && !r.versions.some((i) => i.tag === r.currentTag)) {
+          // 集群里在跑、但已不在平台的候选里：留着它，否则"再发一次当前版本"没有选项。
+          plat.push({ label: `${r.currentTag}　(当前运行版本)`, value: SRC_PLATFORM + r.currentTag });
+        }
+        if (plat.length) groups.push({ label: '平台构建', options: plat });
+
+        if (!groups.length) {
+          return (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {regLoading ? '正在读取仓库标签…' : '仓库中没有可用镜像，无法发布'}
+            </Text>
+          );
+        }
+        return (
+          <Space direction="vertical" size={2} style={{ width: '100%' }}>
             <Select
               showSearch
               size="small"
               style={{ width: 350 }}
+              // 只有"仓库还没回来、且平台那组也没有内容"时才转圈；
+              // 平台组已经有了却一起转圈，会让用户以为下拉是空的、点不了。
+              loading={regLoading && !r.versions.length}
               value={targets[r.projectKey]}
-              onChange={(v) => setTargets((prev) => ({ ...prev, [r.projectKey]: v }))}
-              options={options}
+              onChange={(v) => {
+                // 记下"这一行用户动过"：仓库标签后到时不再覆盖他的选择。
+                targetTouchedRef.current.add(r.projectKey);
+                setTargets((prev) => ({ ...prev, [r.projectKey]: v }));
+              }}
+              options={groups}
               placeholder="选择版本"
             />
-          </Tooltip>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            仓库中没有可用镜像，无法发布
-          </Text>
+            {/* 仓库读不到必须说明原因。否则"下拉里没有仓库那一组"会被读成
+                "仓库里没有标签" —— 两者的处置完全不同。 */}
+            {reg?.unavailable ? (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {reg.unavailable}
+              </Text>
+            ) : r.registry === null ? (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                读仓库标签请求失败，仅列出平台构建的版本
+              </Text>
+            ) : null}
+          </Space>
         );
       },
     },
@@ -972,7 +1197,7 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
                     ...new Set([
                       ...prev,
                       ...filtered
-                        .filter((r) => r.hasUpdate && r.hasBuild && !r.undeployed && !r.inflight)
+                        .filter((r) => hasUpdateOf(r) && r.hasBuild && !r.undeployed && !r.inflight)
                         .map((r) => r.projectKey),
                     ]),
                   ])
@@ -1149,7 +1374,7 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
             onTaskDone={(task, outcome) => {
               if (outcome.ok) {
                 lastOkRef.current.add(task.id);
-                const tag = startPayloadRef.current.tagOf[task.projectKey];
+                const tag = pickTagOf(startPayloadRef.current.pickOf[task.projectKey]);
                 if (tag) onServiceDeployed?.(startPayloadRef.current.envKey, task.projectKey, tag);
               } else {
                 lastOkRef.current.delete(task.id);
@@ -1314,8 +1539,15 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
               </span>
               <span style={{ color: '#1677ff' }}>→</span>
               <span className="yn-mono" style={{ color: '#1677ff' }}>
-                {targets[r.projectKey]}
+                {bareTagOf(targets[r.projectKey])}
               </span>
+              {/* 来源必须显示出来：同名的 tag 在"平台构建"和"仓库标签"下走的是两条
+                  不同的取镜像链路，事后查"这次发的是哪一份"时它是关键线索。 */}
+              {targets[r.projectKey]?.startsWith(SRC_REGISTRY) ? (
+                <Tag style={{ marginInlineEnd: 0, fontSize: 11 }}>仓库</Tag>
+              ) : targets[r.projectKey]?.startsWith(SRC_PLATFORM) ? (
+                <Tag style={{ marginInlineEnd: 0, fontSize: 11 }}>平台</Tag>
+              ) : null}
             </div>
           ))}
         </div>
