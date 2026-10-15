@@ -44,20 +44,27 @@ type EnvironmentQuery struct {
 
 // EnvironmentInput 环境新建/编辑入参。
 type EnvironmentInput struct {
-	Key            string   `json:"key" binding:"omitempty,max=64"`
-	Name           string   `json:"name" binding:"required,max=64"`
-	Cluster        string   `json:"cluster" binding:"required,max=128"`
-	ClusterVersion string   `json:"clusterVersion" binding:"omitempty,max=32"`
-	Namespace      string   `json:"namespace" binding:"required,max=128"`
-	DeployMethod   string   `json:"deployMethod" binding:"omitempty,oneof=k8s helm compose script"`
-	Registry       string   `json:"registry" binding:"omitempty,max=128"`
-	IngressDomain  string   `json:"ingressDomain" binding:"omitempty,max=191"`
-	NeedApproval   *bool    `json:"needApproval"`
-	Approvers      []string `json:"approvers"`
-	Owner          string   `json:"owner"`
-	Description    string   `json:"description" binding:"omitempty,max=512"`
-	ProjectKeys    []string `json:"projectKeys"`
-	Enabled        *bool    `json:"enabled"`
+	Key            string `json:"key" binding:"omitempty,max=64"`
+	Name           string `json:"name" binding:"required,max=64"`
+	Cluster        string `json:"cluster" binding:"required,max=128"`
+	ClusterVersion string `json:"clusterVersion" binding:"omitempty,max=32"`
+	Namespace      string `json:"namespace" binding:"required,max=128"`
+	// DeployMethod 收窄成只认 "k8s"：平台没有别的部署方式 —— 改集群一律写 AppRelease CR，
+	// 由 operator 下发到 Deployment。此前这里是 `oneof=k8s helm compose script`，
+	// 但选了 helm/compose 行为完全一样，是个假选项（前端已不再提供选择、也不再提交本字段）。
+	//
+	// 字段本身留着，是因为下面两处映射还要用它兜底：
+	// 新建时 `stringOr(in.DeployMethod, "k8s")`、编辑时 `stringOr(in.DeployMethod, e.DeployMethod)`
+	// —— 不传即"没提这件事"，编辑不会把库里可能残留的历史值顺手改掉。
+	DeployMethod  string   `json:"deployMethod" binding:"omitempty,oneof=k8s"`
+	Registry      string   `json:"registry" binding:"omitempty,max=128"`
+	IngressDomain string   `json:"ingressDomain" binding:"omitempty,max=191"`
+	NeedApproval  *bool    `json:"needApproval"`
+	Approvers     []string `json:"approvers"`
+	Owner         string   `json:"owner"`
+	Description   string   `json:"description" binding:"omitempty,max=512"`
+	ProjectKeys   []string `json:"projectKeys"`
+	Enabled       *bool    `json:"enabled"`
 
 	// 发布阶段与链路序号：环境自带（见 model.Environment 的 StageLabel/StageOrder）。
 	// StageOrder 为指针，nil 表示"没设"，与 0 区分开。

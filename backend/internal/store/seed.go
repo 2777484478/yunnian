@@ -73,11 +73,17 @@ var projectSpecs = []projectSpec{
 // 注意 projectKeys 是**显式枚举**而不是按规则推导：环境里有几个服务是业务决策，
 // 不是可以算出来的——原型里这份清单也是硬编码的，照抄才能保证一致。
 type envSpec struct {
-	Key          string
-	Name         string
-	Cluster      string
-	ClusterVer   string
-	Namespace    string
+	Key        string
+	Name       string
+	Cluster    string
+	ClusterVer string
+	Namespace  string
+	// DeployMethod 平台**只有一种**：写 AppRelease CR，由 operator 下发到 Deployment。
+	//
+	// 这里保留字段只是为了对齐模型（DB 列 default 'k8s'），**值一律 k8s**。
+	// 原种子里给 staging/prod 填 helm、给 perf 填 compose —— 那是原型期的假多样性：
+	// 后端没有任何代码读这一列，全新部署的人却会在环境列表上看到「Helm」「Docker Compose」
+	// 标签，以为平台支持这些方式。2026-10-15 收敛。
 	DeployMethod string
 	Domain       string
 	Owner        string
@@ -113,7 +119,7 @@ var envSpecs = []envSpec{
 	},
 	{
 		Key: "staging", Name: "预发布区", Cluster: "k8s-staging-01", ClusterVer: "v1.29.6",
-		Namespace: "yunnian-staging", DeployMethod: "helm", Domain: "*.staging.yunnian.cn",
+		Namespace: "yunnian-staging", DeployMethod: "k8s", Domain: "*.staging.yunnian.cn",
 		Owner: "李静", Description: "与生产配置对齐的预发环境，回归验证通过后方可上线",
 		Health: "warning", CPU: 68, Mem: 79, Nodes: 4, Enabled: true,
 		Vars: [][3]string{
@@ -141,7 +147,7 @@ var envSpecs = []envSpec{
 	},
 	{
 		Key: "prod", Name: "正式区", Cluster: "k8s-prod-01（双可用区）", ClusterVer: "v1.29.6",
-		Namespace: "yunnian-prod", DeployMethod: "helm", Domain: "*.yunnian.cn",
+		Namespace: "yunnian-prod", DeployMethod: "k8s", Domain: "*.yunnian.cn",
 		Owner: "运维示例", Description: "生产环境，部署需运维审批，支持一键回滚",
 		Approval: true, Approvers: []string{"运维示例", "林曦"},
 		Health: "healthy", CPU: 51, Mem: 64, Nodes: 12, Enabled: true,
@@ -161,7 +167,7 @@ var envSpecs = []envSpec{
 	},
 	{
 		Key: "perf", Name: "压测区", Cluster: "k8s-test-01", ClusterVer: "v1.29.6",
-		Namespace: "yunnian-perf", DeployMethod: "compose", Domain: "*.perf.yunnian.cn",
+		Namespace: "yunnian-perf", DeployMethod: "k8s", Domain: "*.perf.yunnian.cn",
 		Owner: "高鹏", Description: "性能压测专用环境，与测试区共享集群但资源隔离",
 		Health: "error", CPU: 91, Mem: 88, Nodes: 2, Enabled: false,
 		Vars: [][3]string{

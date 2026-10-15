@@ -22,7 +22,7 @@
 //      开了审批显示「需审批」，否则显示「直接发布」——两句话都是后端真的会做的事。
 // ---------------------------------------------------------------------------
 
-import type { DeployMethod, Environment } from '@/types';
+import type { Environment } from '@/types';
 
 // --------------------------------------------------------------------------- 集群标识归一化
 
@@ -182,15 +182,6 @@ export function versionViewOf(tag?: string): VersionView {
   }
   return { version: t, build: '' };
 }
-
-// --------------------------------------------------------------------------- 部署方式文案
-
-export const DEPLOY_METHOD_LABEL: Record<DeployMethod, string> = {
-  k8s: 'K8s Deployment',
-  helm: 'Helm Chart',
-  compose: 'Docker Compose',
-  script: '自定义脚本',
-};
 
 // --------------------------------------------------------------------------- 集群状态文案
 

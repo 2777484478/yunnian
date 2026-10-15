@@ -45,7 +45,6 @@ import BatchDeployWizard from '@/components/BatchDeployWizard';
 import { STATE_STYLE, TopoLink, TopoNode } from '@/components/TopoNode';
 import type { NodeState } from '@/components/TopoNode';
 import {
-  DEPLOY_METHOD_LABEL,
   clusterBadgeOf,
   clusterKeyOf,
   gateOf,
@@ -1613,9 +1612,6 @@ const Topology: React.FC = () => {
         <Descriptions column={2} size="small" bordered style={{ marginTop: 12 }}>
           <Descriptions.Item label="集群">{actionEnv ? clusterKeyOf(actionEnv.cluster) : '—'}</Descriptions.Item>
           <Descriptions.Item label="命名空间">{actionEnv?.namespace ?? '—'}</Descriptions.Item>
-          <Descriptions.Item label="部署方式">
-            {actionEnv ? DEPLOY_METHOD_LABEL[actionEnv.deployMethod] : '—'}
-          </Descriptions.Item>
           <Descriptions.Item label="入口域名">{actionSvc?.entrypoint ?? '—'}</Descriptions.Item>
           <Descriptions.Item label="镜像" span={2}>
             {actionLive ? (

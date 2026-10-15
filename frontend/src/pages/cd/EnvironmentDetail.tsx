@@ -61,7 +61,6 @@ import {
   DeployStatusTag,
   EnvStatusBadge,
   ImageText,
-  MethodTag,
   ServiceStatusTag,
 } from '@/components/StatusTag';
 import { ApiError, deployApi, environmentApi, rollbackApi, serviceApi } from '@/api';
@@ -1168,7 +1167,6 @@ const EnvironmentDetail: React.FC = () => {
                 否则会出现"下面「集群资源」写着 93%、上面的徽标却按几小时前的 96%
                 判成资源紧张"—— 一张页面自相矛盾。 */}
             <EnvStatusBadge status={envResStatus(res)} />
-            <MethodTag method={env.deployMethod} />
             {env.needApproval ? (
               <Tooltip title={`审批人：${env.approvers.join('、') || '未指定'}`}>
                 <Tag color="orange" icon={<SafetyCertificateOutlined />} style={{ marginInlineEnd: 0 }}>
@@ -1365,8 +1363,10 @@ const EnvironmentDetail: React.FC = () => {
       {/* ------------------------------------------------------------ 集群负载
           这一块原是右栏的「集群资源」，现在移到最上面并补上"已用 / 可分配" ——
           进环境详情第一眼要回答的是"这台集群还撑得住吗"，而不是一堆静态配置。
-          右栏整列因此取消，服务列表拿到整行宽度；环境标识 / 部署方式 / 镜像仓库 /
-          入口域名那些静态字段在页头与「编辑环境」里都有，不该占这块版面。 */}
+          右栏整列因此取消，服务列表拿到整行宽度；环境标识 / 镜像仓库 /
+          入口域名那些静态字段在页头与「编辑环境」里都有，不该占这块版面。
+          （「部署方式」不在其中：平台只有 AppRelease/operator 一条路，
+          那个标签已随假选项一起删掉。2026-10-15） */}
       <SectionCard
         title="集群负载"
         bodyStyle={{ padding: '16px 20px' }}

@@ -19,7 +19,6 @@ import type {
   UserRole,
   ProjectType,
   BuildMethod,
-  DeployMethod,
 } from '@/types';
 
 // --------------------------------------------------------------------------- 构建状态
@@ -137,16 +136,16 @@ export const ProjectTypeTag: React.FC<{ type: ProjectType }> = ({ type }) =>
     <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>后端</Tag>
   );
 
-const METHOD_TEXT: Record<BuildMethod | DeployMethod, string> = {
+// 现在只有**构建方式**用这个标签。「部署方式」那三个值（k8s/helm/compose）已删：
+// 平台改集群只有一条路（写 AppRelease，由 operator 下发），恒为同一个值，
+// 那种标签挂在哪里都等于没信息 —— 所以类型也一并收窄，避免有人再按它分支。
+const METHOD_TEXT: Record<BuildMethod, string> = {
   dockerfile: 'Dockerfile',
   jenkins: 'Jenkins Job',
   script: '自定义脚本',
-  k8s: 'K8s Deployment',
-  helm: 'Helm',
-  compose: 'Docker Compose',
 };
 
-export const MethodTag: React.FC<{ method: BuildMethod | DeployMethod }> = ({ method }) => (
+export const MethodTag: React.FC<{ method: BuildMethod }> = ({ method }) => (
   <Tag style={{ marginInlineEnd: 0 }}>{METHOD_TEXT[method] ?? method}</Tag>
 );
 

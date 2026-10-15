@@ -13,6 +13,8 @@ import {
   Select,
   Space,
   Switch,
+  Tag,
+  Typography,
 } from 'antd';
 import { KVFields } from '@/components/KVFields';
 import { clusterApi, environmentApi, userApi } from '@/api';
@@ -20,6 +22,8 @@ import type { EnvProjectCandidate } from '@/api/cd';
 import { clusterBadgeOf, clusterKeyOf } from '@/config/topology';
 import { useApi } from '@/hooks/useApi';
 import type { Environment, EnvVar } from '@/types';
+
+const { Text } = Typography;
 
 /**
  * 新建/编辑抽屉的表单值。与后端 `EnvironmentInput` 逐字段对齐
@@ -35,7 +39,9 @@ export interface EnvFormValues {
   cluster: string;
   clusterVersion?: string;
   namespace: string;
-  deployMethod: Environment['deployMethod'];
+  // 这里**没有** deployMethod：平台改集群只有一条路（写 AppRelease，由 operator 下发），
+  // 那个字段没有任何后端代码读它，表单因此不再收集。
+  // 提交时不带它 → 后端 `stringOr(in.DeployMethod, …)` 走兜底：新建落 k8s、编辑保留原值。
   // —— 新建/编辑都有 ——
   owner?: string;
   needApproval?: boolean;
@@ -168,7 +174,6 @@ export const EnvironmentEditDrawer: React.FC<EnvironmentEditDrawerProps> = ({
     if (!target) {
       form.resetFields();
       form.setFieldsValue({
-        deployMethod: 'k8s',
         enabled: true,
         needApproval: false,
         approvers: [],
@@ -184,7 +189,6 @@ export const EnvironmentEditDrawer: React.FC<EnvironmentEditDrawerProps> = ({
       cluster: target.cluster,
       clusterVersion: target.clusterVersion,
       namespace: target.namespace,
-      deployMethod: target.deployMethod,
       registry: target.registry,
       ingressDomain: target.ingressDomain,
       // 负责人：DTO 回的是**展示名**，而选择器的 value 是用户名 → 换一次再预填，
@@ -231,7 +235,6 @@ export const EnvironmentEditDrawer: React.FC<EnvironmentEditDrawerProps> = ({
         cluster: v.cluster,
         clusterVersion: v.clusterVersion,
         namespace: v.namespace,
-        deployMethod: v.deployMethod,
         registry: v.registry,
         ingressDomain: v.ingressDomain,
         owner: v.owner,
@@ -338,15 +341,33 @@ export const EnvironmentEditDrawer: React.FC<EnvironmentEditDrawerProps> = ({
             </Form.Item>
           </Col>
           <Col span={12}>
-            <Form.Item name="deployMethod" label="部署方式" rules={[{ required: true }]}>
-              <Select
-                options={[
-                  { label: 'K8s Deployment', value: 'k8s' },
-                  { label: 'Helm', value: 'helm' },
-                  { label: 'Docker Compose', value: 'compose' },
-                  { label: '自定义脚本', value: 'script' },
-                ]}
-              />
+            {/*
+              这里原来是个四选一的下拉（K8s Deployment / Helm / Docker Compose / 自定义脚本），
+              但平台**只有一条路**：改集群一律写 AppRelease CR，由 operator 下发到 Deployment
+              （`internal/service` 与 `internal/integration` 里没有任何代码读 deploy_method）。
+              选 Helm 和选 K8s，行为完全一样 —— 那是个假选项，还会让人误以为平台支持这些方式。
+
+              所以不再提供选择，改为把真实情况写出来。不提交该字段：
+              后端 `stringOr(in.DeployMethod, …)` 会兜底 —— 新建落 k8s，编辑保留原值
+              （不会把库里可能存在的历史值顺手改掉）。
+            */}
+            <Form.Item
+              label="部署方式"
+              // `required` 在这里**不是为了校验**（本项没有 name，不会产生任何校验），
+              // 而是为了让 antd 别在 label 后面追加「（可选）」：本表单开了
+              // `requiredMark="optional"`，非必填项一律被加这三个字。
+              // 而"部署方式"不是"可选"，是"只有一种"——写成可选会正好传达反了。
+              required
+              tooltip="平台修改集群的唯一通道：写 AppRelease（apps.example.com/v1alpha1），由 operator 下发到 Deployment"
+            >
+              <div style={{ minHeight: 32, display: 'flex', alignItems: 'center' }}>
+                <Tag color="blue" style={{ marginInlineEnd: 8 }}>
+                  K8s
+                </Tag>
+                <Text type="secondary" style={{ fontSize: 12.5 }}>
+                  通过 AppRelease 由 operator 下发
+                </Text>
+              </div>
             </Form.Item>
           </Col>
           <Col span={6}>

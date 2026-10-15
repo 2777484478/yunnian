@@ -19,9 +19,6 @@ export type BuildMethod = 'dockerfile' | 'jenkins' | 'script';
  */
 export type BuildStatus = 'queued' | 'running' | 'success' | 'failed' | 'canceled' | 'interrupted';
 
-/** 部署方式 */
-export type DeployMethod = 'k8s' | 'helm' | 'compose' | 'script';
-
 /**
  * 环境**资源状态**（不是服务健康）。
  *
@@ -219,7 +216,15 @@ export interface Environment {
   cluster: string;
   clusterVersion: string;
   namespace: string;
-  deployMethod: DeployMethod;
+  /**
+   * 部署方式。后端仍会返回这个字段（原型期留下的列，可能残留 helm/compose 的历史值），
+   * 但**前端不再消费**：平台改集群只有一条路 —— 写 AppRelease CR，由 operator 下发到
+   * Deployment，后端没有任何代码读它。曾经这里是个四选一下拉 + 列表列 + 标签，
+   * 全是假选项（选 Helm 和选 K8s 行为完全一样，2026-10-15 收敛掉）。
+   *
+   * 故意标成 `string` 而不是联合类型：不给"再按它分支"留余地。
+   */
+  deployMethod: string;
   /** 关联项目 key 列表 */
   projectKeys: string[];
   vars: EnvVar[];

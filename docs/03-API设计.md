@@ -725,6 +725,11 @@ data: {"reason":"finished"}
 > 另有 `approverUsernames`（与 `approvers` 一一对应的登录名，专供编辑表单预填
 > —— 只回展示名时表单没法预填，"打开编辑不重选"就等于把审批人清空）。
 > 字段以 `backend/internal/service/dto.go` 的 `EnvironmentDTO` 为准。
+>
+> 另外 `deployMethod` 是**原型期遗留字段**：平台只有一种部署方式 —— 写 AppRelease CR、
+> 由 operator 下发到 Deployment，全仓没有任何代码读它，前端也不再消费
+> （新建/编辑抽屉里那个四选一下拉已改成一行只读说明）。示例里保留它，只是因为它确实
+> 还在响应里；入参已收窄成只认 `k8s`（不传即"没提这件事"）。2026-10-15 收敛。
 
 **POST /environments/{key}/test-connection**
 ```json

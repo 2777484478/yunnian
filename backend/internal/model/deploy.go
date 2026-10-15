@@ -10,17 +10,22 @@ import (
 
 // Environment 部署环境（一个 K8s 集群 + Namespace 的组合）。
 type Environment struct {
-	ID            uint64  `gorm:"primaryKey;autoIncrement" json:"-"`
-	EnvKey        string  `gorm:"column:env_key;size:64;uniqueIndex:uk_env_key" json:"key"`
-	Name          string  `gorm:"size:64" json:"name"`
-	Cluster       string  `gorm:"size:128" json:"cluster"`
-	ClusterVer    string  `gorm:"column:cluster_version;size:32" json:"clusterVersion"`
-	Namespace     string  `gorm:"size:128" json:"namespace"`
-	KubeCredID    *uint64 `gorm:"column:kubeconfig_credential_id" json:"-"`
-	DeployMethod  string  `gorm:"size:16;not null;default:k8s" json:"deployMethod"` // k8s/helm/compose/script
-	HelmChart     string  `gorm:"size:255" json:"-"`
-	Registry      string  `gorm:"size:128" json:"registry"`
-	IngressDomain string  `gorm:"size:191" json:"ingressDomain"`
+	ID         uint64  `gorm:"primaryKey;autoIncrement" json:"-"`
+	EnvKey     string  `gorm:"column:env_key;size:64;uniqueIndex:uk_env_key" json:"key"`
+	Name       string  `gorm:"size:64" json:"name"`
+	Cluster    string  `gorm:"size:128" json:"cluster"`
+	ClusterVer string  `gorm:"column:cluster_version;size:32" json:"clusterVersion"`
+	Namespace  string  `gorm:"size:128" json:"namespace"`
+	KubeCredID *uint64 `gorm:"column:kubeconfig_credential_id" json:"-"`
+	// DeployMethod 是**原型期留下的列**，平台改集群只有一条路：写 AppRelease CR，
+	// 由 operator 下发到 Deployment —— 全仓没有任何代码读这一列。
+	// 保留列是为了不改表结构（可能残留 helm/compose 的历史值），但**不再对外提供选择**，
+	// 前端也不消费（见 service.EnvironmentInput.DeployMethod 的说明）。2026-10-15 收敛。
+	DeployMethod string `gorm:"size:16;not null;default:k8s" json:"deployMethod"`
+	// HelmChart 更彻底：连写入代码都没有过，是原型建表时留的空列。
+	HelmChart     string `gorm:"size:255" json:"-"`
+	Registry      string `gorm:"size:128" json:"registry"`
+	IngressDomain string `gorm:"size:191" json:"ingressDomain"`
 	// StageLabel / StageOrder：发布阶段名与链路序号，由环境自带（而不是前端按 key 硬映射），
 	// 这样自定义环境（如「华东压测区」）也能排进链路，而不是被扔到最后。
 	// StageOrder 用指针：nil = 没设（排到所有设了序号的之后），0 与"没设"必须能区分开。

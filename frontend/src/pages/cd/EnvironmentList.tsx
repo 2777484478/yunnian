@@ -29,7 +29,7 @@ import {
 import { Link, useNavigate } from 'react-router-dom';
 import { PageHeader, SectionCard, StatCard } from '@/components/ui';
 import { UsageBar } from '@/components/charts';
-import { EnvStatusBadge, MethodTag } from '@/components/StatusTag';
+import { EnvStatusBadge } from '@/components/StatusTag';
 import { DisabledTip } from '@/components/DisabledTip';
 import { EnvironmentActions } from '@/components/EnvironmentActions';
 import { EnvironmentEditDrawer } from '@/components/EnvironmentEditDrawer';
@@ -173,13 +173,14 @@ const EnvironmentList: React.FC = () => {
   // 原型期的"导出"按钮之前是纯摆设。这里改成真实的 CSV 下载：数据已经在手上，
   // 不值得为它加一个后端接口。
   const exportCsv = () => {
-    const head = ['环境标识', '环境名称', 'K8s集群', 'Namespace', '部署方式', '项目数', '服务数', 'CPU%', '内存%', '负责人', '状态', '启用'];
+    // 「部署方式」列去掉了：平台改集群只有一条路（写 AppRelease，由 operator 下发），
+    // 这一列恒为同一个值 —— 一个恒常列在导出的表里也一样没有信息量。
+    const head = ['环境标识', '环境名称', 'K8s集群', 'Namespace', '项目数', '服务数', 'CPU%', '内存%', '负责人', '状态', '启用'];
     const rows = envs.map((e) => [
       e.key,
       e.name,
       e.cluster,
       e.namespace,
-      e.deployMethod,
       String(e.projectKeys.length),
       String(servicesOf(e.key).length),
       // 导出与页面上是同一份数：实时读到的写数字，读不到留空。
@@ -267,7 +268,6 @@ const EnvironmentList: React.FC = () => {
         </div>
       ),
     },
-    { title: '部署方式', dataIndex: 'deployMethod', width: 140, render: (v) => <MethodTag method={v} /> },
     {
       title: '服务 / 项目',
       key: 'svc',
@@ -355,7 +355,7 @@ const EnvironmentList: React.FC = () => {
       <PageHeader
         breadcrumb={[{ title: 'CD 环境部署' }, { title: '环境管理' }]}
         title="环境管理"
-        description="维护测试 / 预发布 / 灰度 / 正式等部署环境，配置集群、Namespace 与部署方式"
+        description="维护测试 / 预发布 / 灰度 / 正式等部署环境，配置集群与 Namespace"
         extra={
           <Space>
             <Segmented
@@ -509,7 +509,8 @@ const EnvironmentList: React.FC = () => {
                     </div>
                     <div style={{ marginTop: 10 }}>
                       <Space size={6} wrap>
-                        <MethodTag method={env.deployMethod} />
+                        {/* 原「部署方式」标签已去掉：平台只有 AppRelease/operator 一条路，
+                            每个环境都顶着同一个标签，等于没信息。 */}
                         {/* 节点数读得到就用**集群实时的**（这个值跟 CPU/内存同一次请求回来，
                             不受 metrics-server 缺失影响）；整条请求失败才退到环境快照
                             —— 那时下面的用量行会同时显示"读不到集群用量"，不会让人误以为
@@ -610,7 +611,11 @@ const EnvironmentList: React.FC = () => {
             loading={envApi.loading}
             dataSource={envs}
             columns={columns}
-            scroll={{ x: 1720 }}
+            // 1446 = 各列固定宽度之和（200+108+260+130+240+130+96+92+190）。
+            // 原值 1720 是含「部署方式」列时的写法；删列后必须重算一遍 ——
+            // 这个"表格最小宽度"一旦大于真实列宽，表格右侧就会凭空多出一段空白。
+            // 值仍大于容器宽（约 1200），所以横向滚动照旧：9 列本来就放不下。
+            scroll={{ x: 1446 }}
             pagination={{ pageSize: 12, showTotal: (t) => `共 ${t} 个环境` }}
           />
         </SectionCard>
