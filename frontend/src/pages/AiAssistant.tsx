@@ -667,7 +667,7 @@ const AiAssistant: React.FC = () => {
           )}
         </div>
 
-        <div style={{ borderTop: '1px solid #eceef2', paddingTop: 12 }}>
+        <div className="yn-ai-composer">
           <div className="yn-ai-suggest">
             {suggestions.map((s) => (
               <span

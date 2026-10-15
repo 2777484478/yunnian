@@ -787,14 +787,23 @@ body {
   align-items: stretch;
 }
 
+/* 左栏做成**浅灰底卡片**，右栏是白底卡片，两者成对出现。
+   早先的写法是"两栏都白底 + 左栏一条 border-right"：白底、白留白、白底，
+   中间那条 1px 细线在整片白里根本立不住，整页看着就是一整块
+   （2026-10-15 用户反馈"左右不太明显，像连在一起的"）。
+   现在靠**底色差**分区，边框只负责收边。 */
 .yn-ai-side {
-  flex: 0 0 244px;
-  width: 244px;
+  flex: 0 0 240px;
+  width: 240px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  border-right: 1px solid var(--yn-border);
-  padding-right: 14px;
+  background: var(--yn-bg);
+  /* 用 border-strong 而不是 border：--yn-border(#eceef2) 在白底上几乎看不见，
+     两栏边框若都淡到看不出来，白底那一侧又会退回"和页面融为一体"。 */
+  border: 1px solid var(--yn-border-strong);
+  border-radius: var(--yn-radius);
+  padding: 12px;
 }
 
 .yn-ai-side__list {
@@ -825,8 +834,9 @@ body {
   transition: background 0.16s;
 }
 
+/* 悬停变白：底已经是浅灰，再叠一层同色灰是看不出来的 */
 .yn-ai-conv:hover {
-  background: var(--yn-bg);
+  background: var(--yn-card);
 }
 
 .yn-ai-conv--active {
@@ -877,6 +887,21 @@ body {
   flex-direction: column;
   height: calc(100vh - var(--yn-header-h) - 48px);
   min-height: 520px;
+  background: var(--yn-card);
+  border: 1px solid var(--yn-border-strong);
+  border-radius: var(--yn-radius);
+  box-shadow: 0 1px 2px rgba(20, 26, 38, 0.03);
+  /* 横向 18px：和左栏"卡片 padding 12 + 会话项 padding 10 = 22px"对齐，
+     两栏里的文字左边界落在同一条竖线上。 */
+  padding: 0 18px 14px;
+}
+
+/* 输入区。分隔线用负 margin 通到卡片两边，才像"卡片底部的输入区"，
+   而不是卡片里又套了一段小方框。 */
+.yn-ai-composer {
+  border-top: 1px solid var(--yn-border);
+  margin: 0 -18px;
+  padding: 12px 18px 0;
 }
 
 .yn-ai-body {
