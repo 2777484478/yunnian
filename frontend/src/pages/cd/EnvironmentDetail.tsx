@@ -66,7 +66,7 @@ import {
 import { ApiError, deployApi, environmentApi, rollbackApi, serviceApi } from '@/api';
 import type { DeployCreated } from '@/api';
 import { envResStatus, envUsage } from '@/hooks/useEnvResources';
-import type { EnvProjectCandidate } from '@/api/cd';
+import type { ClusterNodeStat, EnvProjectCandidate } from '@/api/cd';
 import { canDeployOn, canRollbackOn, hasPerm } from '@/auth';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { useApi } from '@/hooks/useApi';
@@ -264,6 +264,50 @@ const ServiceUsage: React.FC<{ s: EnvService }> = ({ s }) => {
   );
 };
 
+/**
+ * 节点级用量单元格：进度条 + 百分比，悬浮看绝对值。
+ *
+ * 两种"没有值"都显示 `—`，**不画 0% 的条**：
+ *   - `hasMetrics=false`：该节点没有 metrics（metrics-server 没覆盖 / 抓取失败）；
+ *   - 分母为 0：读不到该节点的 allocatable。
+ * 一条 0% 的绿条会被读成"这台很闲"，而实际是"没读到" —— 两者的处置完全不同。
+ */
+const NodeUsageCell: React.FC<{
+  used: number;
+  total: number;
+  hasMetrics: boolean;
+  format: (v: number) => string;
+}> = ({ used, total, hasMetrics, format }) => {
+  if (!hasMetrics) {
+    return (
+      <Tooltip title="该节点没有 metrics 数据（metrics-server 未覆盖，或这台抓取失败）">
+        <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
+          —
+        </Text>
+      </Tooltip>
+    );
+  }
+  if (!Number.isFinite(total) || total <= 0) {
+    return (
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        —
+      </Text>
+    );
+  }
+  const p = Math.round((used / total) * 100);
+  // 颜色分档与后端 `SyncEnvironment` 同口径（≥90 error、≥75 warning）。
+  // 同一份数据在两处给出不同颜色，用户会以为其中一个错了。
+  const color = p >= 90 ? '#ff4d4f' : p >= 75 ? '#faad14' : '#52c41a';
+  return (
+    <Tooltip title={`${format(used)} / ${format(total)}`}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'default' }}>
+        <Progress percent={p} showInfo={false} size="small" strokeColor={color} style={{ margin: 0, width: 80 }} />
+        <span className="yn-mono" style={{ fontSize: 12 }}>{p}%</span>
+      </div>
+    </Tooltip>
+  );
+};
+
 const EnvironmentDetail: React.FC = () => {
   const { key = '' } = useParams();
   const navigate = useNavigate();
@@ -330,6 +374,71 @@ const EnvironmentDetail: React.FC = () => {
     res?.cpuCores && usage ? `${cores((res.cpuCores * usage.cpuUsage) / 100)} / ${cores(res.cpuCores)} 核` : '';
   const memCapacityText =
     res?.memBytes && usage ? `${gib((res.memBytes * usage.memUsage) / 100)} / ${gib(res.memBytes)}` : '';
+
+  /**
+   * 「集群负载」卡里的**按节点**明细。
+   *
+   * 为什么要有它：汇总只回答"整体还剩多少"，回答不了"哪台压力大" ——
+   * 而后者才是加节点 / 迁 Pod / 排查"为什么调度不上去"的依据。
+   * 触发它的是用户 2026-10-15 的疑问（"这里 5 个节点为什么只显示一个节点的集群负载"）：
+   * 汇总本身没错，那 5 台是 2C16G 的小机器，加起来的量级恰好接近一台稍大的单机 ——
+   * 只看汇总数字，确实读不出"这是 5 台加起来的"。
+   */
+  const nodeColumns: ColumnsType<ClusterNodeStat> = [
+    {
+      title: '节点',
+      dataIndex: 'name',
+      ellipsis: true,
+      render: (v: string, r) => (
+        <>
+          <Tooltip title={v}>
+            <span className="yn-mono" style={{ fontSize: 12 }}>
+              {v}
+            </span>
+          </Tooltip>
+          {r.roles ? (
+            <Tag style={{ marginInlineStart: 6, marginInlineEnd: 0, fontSize: 11 }}>{r.roles}</Tag>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      title: 'CPU',
+      key: 'cpu',
+      width: 168,
+      render: (_, r) => (
+        <NodeUsageCell
+          used={r.cpuUsage}
+          total={r.cpuCores}
+          hasMetrics={r.hasMetrics}
+          format={(v) => `${cores(v)} 核`}
+        />
+      ),
+    },
+    {
+      title: '内存',
+      key: 'mem',
+      width: 168,
+      render: (_, r) => (
+        <NodeUsageCell used={r.memUsage} total={r.memBytes} hasMetrics={r.hasMetrics} format={(v) => gib(v)} />
+      ),
+    },
+    {
+      title: '状态',
+      key: 'ready',
+      width: 100,
+      render: (_, r) =>
+        r.ready ? (
+          <Tag color="success" style={{ marginInlineEnd: 0 }}>
+            Ready
+          </Tag>
+        ) : (
+          <Tag color="error" style={{ marginInlineEnd: 0 }}>
+            NotReady
+          </Tag>
+        ),
+    },
+  ];
 
   // 本环境实际跑着的 Pod 总数：各服务实时用量里的 Pod 数累加。
   // 读不到集群状态的服务贡献 0，所以下面的 footer 必须说明有几个没读到 ——
@@ -1409,6 +1518,26 @@ const EnvironmentDetail: React.FC = () => {
                 message="内存水位偏高"
                 description="集群可分配内存已接近上限，新 Pod 可能调度等待或被 OOM Kill。"
               />
+            ) : null}
+
+            {res?.nodeList?.length ? (
+              <div style={{ marginTop: 16, borderTop: '1px solid var(--yn-border)', paddingTop: 12 }}>
+                <div style={{ fontSize: 12.5, color: '#5c6470', marginBottom: 6 }}>
+                  按节点（{res.nodeList.length} 个）
+                  <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                    百分比以该节点的可分配量为分母
+                  </Text>
+                </div>
+                <Table<ClusterNodeStat>
+                  size="small"
+                  rowKey="name"
+                  columns={nodeColumns}
+                  dataSource={res.nodeList}
+                  pagination={false}
+                  // 节点多时卡不能无限长：固定表头 + 表体滚动。节点少时高度自适应。
+                  scroll={{ y: 260 }}
+                />
+              </div>
             ) : null}
           </>
         ) : (

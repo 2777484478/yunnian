@@ -201,6 +201,37 @@ type ClusterState struct {
 	// CPUUsage / MemUsage 已用百分比（0-100）。MetricsAvailable=false 时无意义。
 	CPUUsage uint8 `json:"cpuUsage"`
 	MemUsage uint8 `json:"memUsage"`
+	// NodeList 每个节点的容量与用量（2026-10-15 新增）。
+	//
+	// 上面那几个汇总数只能回答"整体还剩多少"，回答不了"**哪台压力大**" ——
+	// 而后者才是加节点、迁 Pod、排查"为什么调度不上去"时的依据。
+	// 用户 2026-10-15 的原话："我这里 5 个节点为什么只显示一个节点的集群负载"：
+	// 汇总本身没错（5 台小机器加起来才 9.65 核），但那一眼确实看不出"是 5 台"。
+	//
+	// 与汇总同一次采集填充，不额外发请求。
+	NodeList []NodeStat `json:"nodeList,omitempty"`
+}
+
+// NodeStat 单个节点的容量与用量。
+//
+// 逐节点收集的意义在 HasMetrics：metrics-server 可能只覆盖**部分**节点
+// （刚加入的节点、某一台抓取持续失败）。拿"整体读到了"覆盖到每一台，
+// 会让那几台显示成 0% —— 那是"没读到"，不是"很闲"。
+type NodeStat struct {
+	Name string `json:"name"`
+	// Ready 取自 NodeReady condition。取不到该 condition 时按 false（不猜）。
+	Ready bool `json:"ready"`
+	// Roles 节点角色，从 `node-role.kubernetes.io/<role>` 标签推导（如 control-plane）；
+	// 普通工作节点通常没有这个标签，此时为空串 —— 渲染层空着显示，不编一个 "worker"。
+	Roles string `json:"roles,omitempty"`
+	// CPUCores / MemBytes 该节点 allocatable（与汇总同一口径）。
+	CPUCores float64 `json:"cpuCores"`
+	MemBytes uint64  `json:"memBytes"`
+	// CPUUsage / MemUsage 该节点已用（核 / 字节）。HasMetrics=false 时无意义。
+	CPUUsage float64 `json:"cpuUsage"`
+	MemUsage uint64  `json:"memUsage"`
+	// HasMetrics 该节点是否真有 metrics 数据。
+	HasMetrics bool `json:"hasMetrics"`
 }
 
 // PodInfo 一个 Pod 的概要状态。

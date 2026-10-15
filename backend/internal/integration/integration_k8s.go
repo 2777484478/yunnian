@@ -265,24 +265,84 @@ func (k *K8sCluster) Nodes(ctx context.Context, ref ClusterRef) (*ClusterState, 
 	out := &ClusterState{Nodes: len(list.Items), Version: strings.TrimSpace(ver.GitVersion)}
 	// 容量分母用 allocatable 而不是 capacity：capacity 含系统预留，
 	// 拿它算百分比会系统性偏低，看着"很闲"其实已经吃满。
-	var cpuCap, memCap float64
+	//
+	// 逐节点收集而不是只累加总量：汇总回答不了"哪台压力大"，
+	// 而那才是加节点 / 迁 Pod 时的依据（2026-10-15）。
+	// metrics 同样按节点名索引 —— 整体读到了不等于每台都读到了。
+	usageByNode, metricsOK := k.nodeUsageByNode(ctx, cs)
+
+	var cpuCap, memCap, usedCPU, usedMem float64
+	out.NodeList = make([]NodeStat, 0, len(list.Items))
 	for i := range list.Items {
-		if q, ok := list.Items[i].Status.Allocatable[corev1.ResourceCPU]; ok {
-			cpuCap += q.AsApproximateFloat64()
+		n := list.Items[i]
+		var ncpu float64
+		var nmem uint64
+		if q, ok := n.Status.Allocatable[corev1.ResourceCPU]; ok {
+			ncpu = q.AsApproximateFloat64()
 		}
-		if q, ok := list.Items[i].Status.Allocatable[corev1.ResourceMemory]; ok {
-			memCap += float64(q.Value())
+		if q, ok := n.Status.Allocatable[corev1.ResourceMemory]; ok {
+			nmem = uint64(q.Value())
 		}
+		cpuCap += ncpu
+		memCap += float64(nmem)
+
+		st := NodeStat{
+			Name: n.Name, Ready: nodeReady(n), Roles: nodeRoles(n),
+			CPUCores: ncpu, MemBytes: nmem,
+		}
+		if u, ok := usageByNode[n.Name]; ok {
+			st.HasMetrics = true
+			st.CPUUsage, st.MemUsage = u.cpu, uint64(u.mem)
+			usedCPU += u.cpu
+			usedMem += u.mem
+		}
+		out.NodeList = append(out.NodeList, st)
 	}
 	out.CPUCores, out.MemBytes = cpuCap, uint64(memCap)
 
-	used, ok := k.nodeUsage(ctx, cs)
-	if ok && cpuCap > 0 && memCap > 0 {
+	if metricsOK && cpuCap > 0 && memCap > 0 {
 		out.MetricsAvailable = true
-		out.CPUUsage = percent(used.cpu / cpuCap)
-		out.MemUsage = percent(used.mem / memCap)
+		out.CPUUsage = percent(usedCPU / cpuCap)
+		out.MemUsage = percent(usedMem / memCap)
 	}
 	return out, nil
+}
+
+// nodeReady 读 NodeReady condition。
+//
+// 取不到该 condition 时返回 false 而不是 true：状态不明的节点标成"就绪"
+// 会让界面上少一个该被看见的问题。
+func nodeReady(n corev1.Node) bool {
+	for _, c := range n.Status.Conditions {
+		if c.Type != corev1.NodeReady {
+			continue
+		}
+		// condition 的 status 是三值字符串（True/False/Unknown），只有 True 才算就绪。
+		return c.Status == corev1.ConditionTrue
+	}
+	return false
+}
+
+// nodeRoles 从 `node-role.kubernetes.io/<role>` 标签推导角色。
+//
+// 推导不出就返回空串 —— 普通工作节点本来就没有这类标签，
+// 编一个 "worker" 出来会让人以为它是集群里登记过的角色。
+func nodeRoles(n corev1.Node) string {
+	const prefix = "node-role.kubernetes.io/"
+	roles := make([]string, 0, 2)
+	for k := range n.Labels {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		if r := strings.TrimPrefix(k, prefix); r != "" {
+			roles = append(roles, r)
+		}
+	}
+	if len(roles) == 0 {
+		return ""
+	}
+	sort.Strings(roles)
+	return strings.Join(roles, ",")
 }
 
 // Ping 连通性测试：真拨一次集群 API。
@@ -698,30 +758,50 @@ func aggregateUsage(
 	return out
 }
 
-// nodeUsage 汇总全集群节点的实时用量。第二个返回值表示"是否真的读到了"。
-func (k *K8sCluster) nodeUsage(ctx context.Context, cs kubernetes.Interface) (usagePair, bool) {
+// nodeUsageByNode 读各节点的实时用量，**按节点名索引**。
+//
+// 两个"没有数据"要分开：
+//   - 第二个返回值为 false = 整体没读到（没装 metrics-server / 无权读该接口）；
+//   - map 里缺某个节点 = 那一台没报数（刚加入、抓取持续失败）。
+//
+// 混为一谈的后果是具体的：拿"整体读到了"覆盖到每台，缺数据的那台会显示成 0% ——
+// 那是"没读到"，不是"很闲"。
+func (k *K8sCluster) nodeUsageByNode(ctx context.Context, cs kubernetes.Interface) (map[string]usagePair, bool) {
 	raw, err := cs.Discovery().RESTClient().Get().
 		AbsPath("/apis/metrics.k8s.io/v1beta1/nodes").
 		DoRaw(ctx)
 	if err != nil {
-		return usagePair{}, false
+		return nil, false
 	}
 	var parsed struct {
 		Items []struct {
+			// metadata.name 是"这份用量属于哪台节点"的唯一依据。
+			// metrics 的 items 顺序不保证与节点列表一致，靠下标对齐一定会错位。
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
 			Usage map[string]string `json:"usage"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil || len(parsed.Items) == 0 {
-		return usagePair{}, false
+		return nil, false
 	}
-	var out usagePair
+	out := make(map[string]usagePair, len(parsed.Items))
 	for _, it := range parsed.Items {
+		if strings.TrimSpace(it.Metadata.Name) == "" {
+			continue
+		}
+		var u usagePair
 		if q, err := resource.ParseQuantity(it.Usage["cpu"]); err == nil {
-			out.cpu += q.AsApproximateFloat64()
+			u.cpu = q.AsApproximateFloat64()
 		}
 		if q, err := resource.ParseQuantity(it.Usage["memory"]); err == nil {
-			out.mem += float64(q.Value())
+			u.mem = float64(q.Value())
 		}
+		out[it.Metadata.Name] = u
+	}
+	if len(out) == 0 {
+		return nil, false
 	}
 	return out, true
 }

@@ -56,6 +56,33 @@ export interface EnvResources {
    */
   cpuCores?: number;
   memBytes?: number;
+  /**
+   * 每个节点的容量与用量（2026-10-15 新增）。
+   *
+   * 上面那几个汇总数只能回答"整体还剩多少"，回答不了"**哪台压力大**"。
+   * ⚠️ `hasMetrics` 是**逐节点**的：metrics-server 可能只覆盖部分节点
+   * （刚加入的、某台抓取持续失败），缺数据的那台要显示成 "—" 而不是 0% ——
+   * "没读到"和"很闲"是两码事。
+   */
+  nodeList?: ClusterNodeStat[];
+}
+
+/** 单个节点的容量与用量（`EnvResources.nodeList` 的元素）。 */
+export interface ClusterNodeStat {
+  /** 节点名（集群内的 machine name） */
+  name: string;
+  /** NodeReady condition 是否为 True；取不到该 condition 时后端按 false 处理（不猜） */
+  ready: boolean;
+  /** 角色标签推导结果（如 control-plane）。普通工作节点没有这个标签，为空串 */
+  roles?: string;
+  /** 该节点 allocatable（与汇总同一口径，不是 capacity） */
+  cpuCores: number;
+  memBytes: number;
+  /** 该节点已用（核 / 字节）。hasMetrics=false 时无意义 */
+  cpuUsage: number;
+  memUsage: number;
+  /** 该节点是否真有 metrics 数据 */
+  hasMetrics: boolean;
 }
 
 /** 部署单 AI 诊断（GET /deployments/{id}/ai-diagnosis） */
