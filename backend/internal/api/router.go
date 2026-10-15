@@ -274,6 +274,7 @@ func (h *handler) registerAI(g *gin.RouterGroup) {
 	a.POST("/chat", h.aiChat)
 	a.GET("/conversations", h.aiConversations)
 	a.GET("/conversations/:id", h.aiConversation)
+	a.DELETE("/conversations/:id", h.aiDeleteConversation)
 	a.POST("/analyze-build/:buildId", h.aiAnalyzeBuild)
 	a.POST("/analyze-deploy/:deployId", h.aiAnalyzeDeploy)
 }

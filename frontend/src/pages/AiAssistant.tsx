@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, App as AntApp, Button, Drawer, Input, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Input, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
   ClearOutlined,
-  HistoryOutlined,
+  DeleteOutlined,
   LoadingOutlined,
+  PlusOutlined,
   RobotOutlined,
   SendOutlined,
   SettingOutlined,
@@ -14,12 +15,12 @@ import {
   WarningOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { PageHeader, SectionCard } from '@/components/ui';
+import { PageHeader } from '@/components/ui';
 import { aiApi, environmentApi, modelApi } from '@/api';
-import type { ChatAttachment, ConversationsResult, ToolStep } from '@/api';
+import type { ChatAttachment, Conversation, StoredMessage, ToolStep } from '@/api';
 import { hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
-import { fmt } from '@/utils/format';
+import { ago, fmt } from '@/utils/format';
 
 const { Text } = Typography;
 
@@ -77,6 +78,56 @@ interface ChatMessage {
 const now = () => fmt(new Date());
 
 /**
+ * 会话列表按时间分组（今天 / 7 天内 / 30 天内 / 更早）。
+ *
+ * 与 DeepSeek 同一套分法。列表一长，纯按时间倒序也认不出哪条是哪条；
+ * 分组让人先按"大概什么时候聊的"定位，再扫标题。
+ *
+ * 空组不渲染（否则一个新用户会先看到四行光秃秃的"今天/7 天内/…"）。
+ */
+function groupConversations(list: Conversation[]): [string, Conversation[]][] {
+  const d0 = new Date();
+  const startOfToday = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate()).getTime();
+  const d7 = startOfToday - 6 * 86400_000;
+  const d30 = startOfToday - 29 * 86400_000;
+  const buckets: [string, Conversation[]][] = [
+    ['今天', []],
+    ['7 天内', []],
+    ['30 天内', []],
+    ['更早', []],
+  ];
+  for (const c of list) {
+    const t = new Date(c.lastMsgAt).getTime();
+    // 时间解析不出来时归到"更早"，**不要**丢进"今天"：
+    // 那会让一条坏数据永远顶在最上面。
+    if (Number.isNaN(t)) buckets[3][1].push(c);
+    else if (t >= startOfToday) buckets[0][1].push(c);
+    else if (t >= d7) buckets[1][1].push(c);
+    else if (t >= d30) buckets[2][1].push(c);
+    else buckets[3][1].push(c);
+  }
+  return buckets.filter(([, items]) => items.length > 0);
+}
+
+/**
+ * 历史消息 → 页面消息模型。
+ *
+ * 只做字段搬运，不做加工：历史里的 attachments / tools 是**当时**的结构化留痕，
+ * 原样交回给同一套渲染函数（renderTool / renderAttachment），
+ * 这样"回看"和"刚发生"长得完全一样 —— 两套渲染迟早会漂移成两种说法。
+ */
+function toChatMessage(m: StoredMessage): ChatMessage {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    at: fmt(m.at),
+    attachments: m.attachments,
+    tools: m.tools,
+  };
+}
+
+/**
  * 把工具入参/返回格式化成可读 JSON。
  *
  * 入参是模型生成的**字符串**（且可能不是合法 JSON），所以解不开就原样显示 ——
@@ -104,14 +155,18 @@ function resolveRoute(action: string): string | null {
 }
 
 const AiAssistant: React.FC = () => {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const navigate = useNavigate();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | undefined>();
-  const [historyOpen, setHistoryOpen] = useState(false);
+  /** 左栏会话列表（只含当前账号自己的，后端按登录用户过滤）。 */
+  const [convs, setConvs] = useState<Conversation[]>([]);
+  const [convsLoading, setConvsLoading] = useState(true);
+  /** 正在打开的历史会话 key（用于把那一条显示成加载态）。 */
+  const [openingKey, setOpeningKey] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -139,8 +194,29 @@ const AiAssistant: React.FC = () => {
   /** 通道状态未知只可能是"没权限看"，因为请求本身没有失败（失败会走 error） */
   const modelUnknown = !canSeeModels;
 
-  const historyApi = useApi(() => aiApi.conversations(), [], { enabled: historyOpen });
-  const history: ConversationsResult | null = historyApi.data;
+  /**
+   * 拉会话列表。
+   *
+   * 不用 `useApi`：那是"挂载时拉一次 + 手动 refresh"的形状，而这里需要在
+   * **每次问答结束后**都刷一次 —— 新会话是后端在第一轮 Prepare 里创建的，
+   * 不刷的话用户刚聊完却在左边找不到它（只有下次进页面才出现）。
+   */
+  const loadConversations = useCallback(async () => {
+    try {
+      const r = await aiApi.conversations(1, 100);
+      setConvs(r.list);
+    } catch (e) {
+      // 列表拉不到不该影响提问（它只是个侧栏），但**必须说出来**：
+      // 否则用户对着永远空着的左栏，会以为"历史功能没做"而反复重试。
+      message.error(`会话列表加载失败：${(e as Error).message}`);
+    } finally {
+      setConvsLoading(false);
+    }
+  }, [message]);
+
+  useEffect(() => {
+    void loadConversations();
+  }, [loadConversations]);
 
   // 只为预置提问取环境名。失败就不显示带环境名的那两条（下面有兜底），
   // **不**因此把整页打成错误态 —— 提问框本身跟这个列表没关系。
@@ -163,6 +239,75 @@ const AiAssistant: React.FC = () => {
     setStreaming(false);
     setMessages((m) => m.map((x) => (x.streaming ? { ...x, streaming: false } : x)));
   }, []);
+
+  /** 开一段新对话：清空右侧，并**丢掉** conversationId。 */
+  const newConversation = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setStreaming(false);
+    setMessages([]);
+    setInput('');
+    // 必须清掉旧 key：留着它的话，下一句会接着上一段对话的上下文继续问，
+    // 而用户点的是「新建对话」。
+    setConversationId(undefined);
+  }, []);
+
+  /**
+   * 打开一条历史会话，把当时的消息原样铺回来。
+   *
+   * 工具留痕与结构化卡片一并还原 —— 用户翻记录多半就是想看
+   * "当时到底查了哪几个服务、集群回了什么"。
+   */
+  const openConversation = useCallback(
+    async (key: string) => {
+      if (key === conversationId && messages.length > 0) return;
+      if (streaming) {
+        message.warning('正在回答中，请先点「停止」或等它结束');
+        return;
+      }
+      setOpeningKey(key);
+      try {
+        const d = await aiApi.conversation(key);
+        setConversationId(d.conversation.key);
+        setMessages(d.messages.map(toChatMessage));
+      } catch (e) {
+        message.error(`打开会话失败：${(e as Error).message}`);
+      } finally {
+        setOpeningKey(null);
+      }
+    },
+    [conversationId, message, messages.length, streaming],
+  );
+
+  /** 删除一条会话（二次确认：删掉找不回来）。 */
+  const removeConversation = useCallback(
+    (key: string, title: string) => {
+      if (streaming) {
+        message.warning('正在回答中，请先点「停止」再删除');
+        return;
+      }
+      modal.confirm({
+        title: `删除会话「${title}」？`,
+        content: '这段对话的内容会一并清除，无法找回。',
+        okText: '删除',
+        okButtonProps: { danger: true },
+        onOk: async () => {
+          try {
+            await aiApi.deleteConversation(key);
+            message.success('已删除');
+            // 删的正是当前打开的那条 → 顺手清空右侧，
+            // 否则会出现"左边没了、右边还摊着"，下次提问又会带着已删会话的 key 去问。
+            if (key === conversationId) newConversation();
+            void loadConversations();
+          } catch (e) {
+            message.error(`删除失败：${(e as Error).message}`);
+            throw e;
+          }
+        },
+      });
+    },
+    [conversationId, loadConversations, message, modal, newConversation, streaming],
+  );
 
   const ask = async (q: string) => {
     const question = q.trim();
@@ -208,6 +353,12 @@ const AiAssistant: React.FC = () => {
       },
       ac.signal,
     );
+
+    // 无论正常结束还是被中断，都刷一次左栏。
+    //
+    // 会话在后端是**第一轮提问时**就建好的，用户点「停止」并不会撤销它 ——
+    // 只信 onEnd 的话，中断这条路就不会刷新，用户会看到"我刚问过的话没进历史"。
+    void loadConversations();
   };
 
   /**
@@ -334,24 +485,14 @@ const AiAssistant: React.FC = () => {
                 <Button icon={<SettingOutlined />} onClick={() => navigate('/system/models')} />
               </Tooltip>
             ) : null}
-            <Button
-              icon={<HistoryOutlined />}
-              onClick={() => {
-                setHistoryOpen(true);
-                historyApi.refresh();
-              }}
-            >
-              历史会话
-            </Button>
+            {/* 「历史会话」按钮已去掉：会话列表现在**常驻左栏**（2026-10-15），
+                再留一个抽屉入口就是同一份数据的第二个开关 —— 两处状态还要互相同步。 */}
             <Button
               icon={<ClearOutlined />}
               disabled={!messages.length}
               onClick={() => {
-                stop();
-                setMessages([]);
-                // 清空即开新会话：不复用旧 conversationId，避免上下文串到下一轮
-                setConversationId(undefined);
-                message.success('已清空当前会话');
+                newConversation();
+                message.success('已清空当前对话');
               }}
             >
               清空
@@ -392,6 +533,62 @@ const AiAssistant: React.FC = () => {
         />
       ) : null}
 
+      <div className="yn-ai-page">
+        {/* ---------------------------------------------------- 左：历史会话
+            DeepSeek 那种"左边能看到历史"的形态，配色沿用本平台这套浅色 token。
+            数据只含**当前账号自己的**会话（后端按登录用户过滤）。 */}
+        <aside className="yn-ai-side">
+          <Button block icon={<PlusOutlined />} onClick={newConversation}>
+            新建对话
+          </Button>
+          <div className="yn-ai-side__list">
+            {convsLoading ? (
+              <div className="yn-ai-side__hint">
+                <LoadingOutlined /> 正在加载…
+              </div>
+            ) : convs.length === 0 ? (
+              <div className="yn-ai-side__hint">
+                还没有历史对话
+                <div style={{ marginTop: 4 }}>问第一句时会自动建一条</div>
+              </div>
+            ) : (
+              groupConversations(convs).map(([label, items]) => (
+                <div key={label}>
+                  <div className="yn-ai-side__group">{label}</div>
+                  {items.map((c) => (
+                    <div
+                      key={c.key}
+                      className={`yn-ai-conv${c.key === conversationId ? ' yn-ai-conv--active' : ''}`}
+                      title={c.title}
+                      onClick={() => void openConversation(c.key)}
+                    >
+                      <div className="yn-ai-conv__title">
+                        {openingKey === c.key ? <LoadingOutlined style={{ marginRight: 6 }} /> : null}
+                        {c.title}
+                      </div>
+                      <div className="yn-ai-conv__meta">
+                        <span>{ago(c.lastMsgAt)}</span>
+                        {/* 删除按钮必须 stopPropagation：否则点它会连带打开这条会话 */}
+                        <span
+                          className="yn-ai-conv__del"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeConversation(c.key, c.title);
+                          }}
+                        >
+                          <DeleteOutlined /> 删除
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))
+            )}
+          </div>
+        </aside>
+
+        {/* ---------------------------------------------------- 右：对话 */}
+        <div style={{ flex: 1, minWidth: 0 }}>
       <div className="yn-ai-shell">
         <div className="yn-ai-body" ref={bodyRef}>
           {messages.length === 0 ? (
@@ -554,42 +751,8 @@ const AiAssistant: React.FC = () => {
         </div>
       </div>
 
-      <Drawer
-        open={historyOpen}
-        width={480}
-        title="历史会话"
-        onClose={() => setHistoryOpen(false)}
-      >
-        {historyApi.loading ? (
-          <Space>
-            <LoadingOutlined />
-            <Text type="secondary">正在查询…</Text>
-          </Space>
-        ) : history && !history.usable ? (
-          <Alert
-            type="info"
-            showIcon
-            message="一期不保存会话历史"
-            description={
-              history.reason ||
-              '平台的 22 张表里没有会话表，模型上下文是一次性的——每次提问都会重新采集平台事实快照，而不是让模型"记住"上次的数字。'
-            }
-          />
-        ) : history && history.list.length ? (
-          <SectionCard bodyStyle={{ padding: 0 }}>
-            {history.list.map((c) => (
-              <div key={c.id} style={{ padding: '10px 12px', borderBottom: '1px solid #f0f2f5' }}>
-                <div style={{ fontWeight: 500 }}>{c.title}</div>
-                <div className="yn-mono" style={{ fontSize: 12, color: '#9aa0aa' }}>
-                  {c.id} · {fmt(c.at)}
-                </div>
-              </div>
-            ))}
-          </SectionCard>
-        ) : (
-          <Alert type="info" showIcon message="暂无历史会话" />
-        )}
-      </Drawer>
+        </div>
+      </div>
     </div>
   );
 };

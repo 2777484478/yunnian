@@ -81,6 +81,15 @@ export type {
 } from './jenkins';
 
 export { aiApi } from './ai';
-export type { ChatInput, ChatHandlers, ChatAttachment, ConversationsResult, ToolStep } from './ai';
+export type {
+  ChatInput,
+  ChatHandlers,
+  ChatAttachment,
+  ConversationsResult,
+  Conversation,
+  ConversationDetail,
+  StoredMessage,
+  ToolStep,
+} from './ai';
 
 export { clusterApi } from './cluster';

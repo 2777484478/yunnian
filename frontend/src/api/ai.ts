@@ -51,16 +51,50 @@ export interface ChatHandlers {
 }
 
 /**
- * 会话历史查询结果。
+ * 会话列表项。
  *
- * 一期**不落库**（docs/02 的 22 张表里没有会话表），后端如实返回空列表 +
- * `usable=false` + 原因说明。页面据此隐藏/禁用历史入口，而不是渲染一个永远空的列表
- * ——把"没有这个能力"和"有但没数据"区分开，用户才不会反复点。
+ * 2026-10-15 起会话**真落库**了（此前是空壳：一期不建表，后端返回空列表 +
+ * usable=false）。原因见后端 `service/ai_conversation.go` 的文件头。
  */
+export interface Conversation {
+  /** 对外标识（conv_xxxxxx）。前端全程用它，不要试图解析 */
+  key: string;
+  /** 标题 = 首问的前若干字（后端生成），列表里靠它区分哪条是哪条 */
+  title: string;
+  /** 消息条数（user + assistant 合计） */
+  msgCount: number;
+  /**
+   * 最后一条消息的时间（ISO8601 带时区）。
+   * 左侧列表按它分「今天 / 7 天内 / 30 天内 / 更早」，所以不能用切片后的字符串，
+   * 要交给 `new Date()` 解析。
+   */
+  lastMsgAt: string;
+  createdAt: string;
+}
+
 export interface ConversationsResult {
-  list: { id: string; title: string; at: string }[];
-  usable: boolean;
-  reason?: string;
+  list: Conversation[];
+  total: number;
+}
+
+/**
+ * 会话里的一条历史消息。
+ *
+ * 字段与 SSE 事件同源（attachment / tool / token），所以回看时能把
+ * "当时查了什么工具、拿到了什么卡片"原样重放，而不只是重放一段正文。
+ */
+export interface StoredMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  attachments?: ChatAttachment[];
+  tools?: ToolStep[];
+  at: string;
+}
+
+export interface ConversationDetail {
+  conversation: Conversation;
+  messages: StoredMessage[];
 }
 
 export const aiApi = {
@@ -121,6 +155,15 @@ export const aiApi = {
   analyzeDeploy: (deployId: string) =>
     http.post<{ reason: string; suggestion: string; confidence: number }>(`/ai/analyze-deploy/${deployId}`),
 
-  /** 会话历史。一期返回 `usable=false`（未落库），页面按此隐藏入口。 */
-  conversations: () => http.get<ConversationsResult>('/ai/conversations'),
+  /** 会话列表（只含**当前账号自己的**，后端按登录用户过滤）。 */
+  conversations: (page = 1, pageSize = 50) =>
+    http.get<ConversationsResult>('/ai/conversations', { page, pageSize }),
+
+  /** 一个会话的全部消息（正序，从第一句开始）。 */
+  conversation: (key: string) =>
+    http.get<ConversationDetail>(`/ai/conversations/${encodeURIComponent(key)}`),
+
+  /** 删除会话（消息一并清除）。 */
+  deleteConversation: (key: string) =>
+    http.del<{ deleted: boolean }>(`/ai/conversations/${encodeURIComponent(key)}`),
 };

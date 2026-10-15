@@ -773,6 +773,105 @@ body {
   font-size: 12px;
 }
 
+/* ---------------------------------------------------------------------------
+   AI 助手：左侧会话列表 + 右侧对话（2026-10-15）
+
+   形态取自 DeepSeek（左边常驻历史会话，按时间分组），但配色一律用本平台这套
+   浅色 token —— 不引入它的暗色皮肤，否则这一页会像嵌了另一个产品进来。
+   --------------------------------------------------------------------------- */
+.yn-ai-page {
+  display: flex;
+  gap: 16px;
+  /* stretch：左栏跟着右侧对话区一样高。右侧 .yn-ai-shell 有明确高度，
+     所以这里不必再写一遍 calc（写两处迟早会不一致）。 */
+  align-items: stretch;
+}
+
+.yn-ai-side {
+  flex: 0 0 244px;
+  width: 244px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-right: 1px solid var(--yn-border);
+  padding-right: 14px;
+}
+
+.yn-ai-side__list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0 -6px;
+  padding: 0 6px 8px;
+}
+
+.yn-ai-side__hint {
+  color: var(--yn-text-3);
+  font-size: 12.5px;
+  padding: 14px 8px;
+  line-height: 1.7;
+}
+
+.yn-ai-side__group {
+  font-size: 11.5px;
+  color: var(--yn-text-3);
+  padding: 10px 8px 4px;
+}
+
+.yn-ai-conv {
+  border-radius: var(--yn-radius);
+  border: 1px solid transparent;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: background 0.16s;
+}
+
+.yn-ai-conv:hover {
+  background: var(--yn-bg);
+}
+
+.yn-ai-conv--active {
+  background: var(--yn-primary-bg);
+  border-color: #cfe0ff;
+}
+
+.yn-ai-conv__title {
+  font-size: 13px;
+  color: var(--yn-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yn-ai-conv--active .yn-ai-conv__title {
+  color: var(--yn-primary);
+  font-weight: 500;
+}
+
+.yn-ai-conv__meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--yn-text-3);
+}
+
+/* 删除只在悬停时出现。常显的话，一列会话看着就像一排"删除"按钮 */
+.yn-ai-conv__del {
+  opacity: 0;
+  transition: opacity 0.16s;
+  white-space: nowrap;
+}
+
+.yn-ai-conv:hover .yn-ai-conv__del {
+  opacity: 1;
+}
+
+.yn-ai-conv__del:hover {
+  color: var(--yn-error);
+}
+
 .yn-ai-shell {
   display: flex;
   flex-direction: column;

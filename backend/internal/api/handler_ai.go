@@ -32,7 +32,7 @@ func (h *handler) aiChat(c *gin.Context) {
 
 	// 流已经开始了就无法再改状态码，所以"检查前置条件"必须放在 newSSEStream 之前。
 	// 这里让 service 先做一次轻量预检（模型通道是否可用），避免开流后才发现没配通道。
-	pre, err := h.svc.AI.Prepare(c.Request.Context(), in)
+	pre, err := h.svc.AI.Prepare(c.Request.Context(), in, caller(c))
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -73,6 +73,13 @@ func (h *handler) aiChat(c *gin.Context) {
 				"若反复如此，请到「系统管理 › 模型设置」确认当前通道的连通性。",
 		})
 	}
+
+	// 落库放在 end 之前、**且不区分成功失败**：失败的这一轮同样要留痕 ——
+	// 用户回头翻记录，恰恰常常是想再看一遍"当时那次为什么没答上来"。
+	// 它内部自己开 ctx（客户端此刻可能已经断开，见 FinishConversation 的注释），
+	// 失败也只记日志，不会影响已经推给用户的内容。
+	h.svc.AI.FinishConversation(c.Request.Context(), pre, in.Message, text)
+
 	// end 事件即使出错也要发：前端据此关闭 EventSource，
 	// 否则它只能靠心跳超时才断开，表现为"回答完了但连接不动"。
 	s.send("end", gin.H{"reason": "finished", "conversationId": pre.ConversationID})
@@ -80,16 +87,35 @@ func (h *handler) aiChat(c *gin.Context) {
 
 // aiConversations GET /ai/conversations
 //
-// 一期不持久化会话历史（docs/02 的 22 张表里没有会话表，模型上下文是一次性的）。
-// 这里返回空列表 + 说明，而不是造一批假会话出来——
-// 前端拿到空列表会自然渲染"暂无历史"，看到 usable=false 也能决定要不要隐藏入口。
+// 只返回**当前账号自己的**会话。2026-10-15 之前这里是个空壳（一期不落库），
+// 现在真查库 —— 归属过滤在 service 层，见 ai_conversation.go 的文件头。
 func (h *handler) aiConversations(c *gin.Context) {
-	httpx.OK(c, gin.H{"list": []any{}, "usable": false, "reason": "会话历史未持久化（一期不落库）"})
+	q := pageQuery(c)
+	list, total, err := h.svc.AI.ListConversations(c.Request.Context(), caller(c), q.Page, q.PageSize)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"list": list, "total": total})
 }
 
-// aiConversation GET /ai/conversations/{id}
+// aiConversation GET /ai/conversations/{key}
 func (h *handler) aiConversation(c *gin.Context) {
-	httpx.Fail(c, errValidation("会话历史未持久化，无法按 ID 查询"))
+	conv, msgs, err := h.svc.AI.ConversationDetail(c.Request.Context(), caller(c), c.Param("id"))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"conversation": conv, "messages": msgs})
+}
+
+// aiDeleteConversation DELETE /ai/conversations/{key}
+func (h *handler) aiDeleteConversation(c *gin.Context) {
+	if err := h.svc.AI.DeleteConversation(c.Request.Context(), caller(c), c.Param("id")); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"deleted": true})
 }
 
 // --------------------------------------------------------------------------- AI 归因

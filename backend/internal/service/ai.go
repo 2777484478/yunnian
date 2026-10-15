@@ -81,17 +81,28 @@ type ChatAttachment struct {
 // HTTP 状态码就锁死在 200 了，用户只能看到一个 200 加一条错误事件。
 type ChatSession struct {
 	ConversationID string
-	Attachments    []ChatAttachment
+	// convPK 会话主键。0 表示这次提问没有归属会话（未登录等异常路径），
+	// 此时不落库。对外只给 ConversationID（conv_key），主键不外泄。
+	convPK uint64
+	// Attachments 本轮起始事实的结构化卡片，落库时挂在这一轮的回答上。
+	Attachments []ChatAttachment
 
 	client   *llm.Client
 	messages []llm.Message
 	// tools 只读工具的声明。模型据此决定要不要自己取数。
 	tools []llm.Tool
-	model string
+	// toolTraces 本轮**真正执行过**的工具调用留痕（一轮里可能查好几个）。
+	//
+	// 只用于落库回放，**不参与 prompt**：工具返回值已经作为 tool 消息进过
+	// messages 了，再塞一遍就是重复上下文。
+	toolTraces []AIToolResult
+	model      string
 }
 
 // Prepare 校验模型通道、聚合起始事实、拼装提示词与工具声明。
-func (a *AIService) Prepare(ctx context.Context, in ChatInput) (*ChatSession, error) {
+//
+// c 用来定位会话归属（会话是私有数据，见 ai_conversation.go 的文件头）。
+func (a *AIService) Prepare(ctx context.Context, in ChatInput, c Caller) (*ChatSession, error) {
 	question := strings.TrimSpace(in.Message)
 	if question == "" {
 		return nil, errs.Invalid("提问内容不能为空")
@@ -102,22 +113,35 @@ func (a *AIService) Prepare(ctx context.Context, in ChatInput) (*ChatSession, er
 		return nil, err
 	}
 
-	facts, attachments := a.collectFacts(ctx, in.Context)
-
-	convID := strings.TrimSpace(in.ConversationID)
-	if convID == "" {
-		// 一期不持久化会话，但仍然回一个 ID：前端要拿它做"同一话题内多轮"的标识，
-		// 后续接入落库时也不需要改前端。
-		convID = "conv_" + randomToken(6)
+	// 会话：传了 key 就续上那段对话（并校验归属），没传就现建一个。
+	// 建在"第一句提问"这一刻，而不是打开页面时 —— 否则用户进来又离开会攒一堆空会话。
+	conv, err := a.ensureConversation(ctx, c, in.ConversationID, question)
+	if err != nil {
+		return nil, err
 	}
+	history, err := a.loadHistory(ctx, conv.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	facts, attachments := a.collectFacts(ctx, in.Context)
 
 	msgs := []llm.Message{
 		{Role: "system", Content: aiSystemPrompt},
 	}
+	// 历史在系统提示之后、事实快照之前。
+	//
+	// ⚠️ **事实快照必须紧贴当前问题**：它描述的是"此刻集群是什么样"，
+	// 若把它排在历史前面，模型会把它读成"很久以前的一条记录"，
+	// 转而用历史里那段更靠近问题的旧结论来回答 —— 而旧结论往往已经过期。
+	if len(history) > 0 {
+		msgs = append(msgs, history...)
+	}
 	if len(facts) > 0 {
 		msgs = append(msgs, llm.Message{
 			Role: "system",
-			Content: "以下是平台当前的只读事实快照（发起提问时查询所得）。" +
+			Content: "以下是平台**此刻**的只读事实快照（发起本次提问时查询所得）。" +
+				"它比上文历史里的任何结论都新，两者冲突时以它为准。" +
 				"它只是**起点**：快照里没有的数据去调工具查，不要因为快照里没有就说「查不到」。\n" +
 				strings.Join(facts, "\n"),
 		})
@@ -125,7 +149,8 @@ func (a *AIService) Prepare(ctx context.Context, in ChatInput) (*ChatSession, er
 	msgs = append(msgs, llm.Message{Role: "user", Content: question})
 
 	return &ChatSession{
-		ConversationID: convID,
+		ConversationID: conv.ConvKey,
+		convPK:         conv.ID,
 		Attachments:    attachments,
 		client:         client,
 		messages:       msgs,
@@ -178,6 +203,10 @@ func (a *AIService) Run(
 		})
 		for _, tc := range step.ToolCalls {
 			res := a.runTool(ctx, tc)
+			// 留痕：回看历史时要把"当时查了什么工具、拿到了什么"**原样重放**。
+			// 只存一段正文的话，用户翻记录时最想看的那部分恰好没有 ——
+			// 他翻记录多半就是想看"当时到底查了哪几个服务、集群回了什么"。
+			sess.toolTraces = append(sess.toolTraces, res)
 			if onTool != nil {
 				if err := onTool(res); err != nil {
 					return text.String(), total, err
