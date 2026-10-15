@@ -868,7 +868,10 @@ const EnvironmentDetail: React.FC = () => {
     {
       title: '当前镜像版本',
       dataIndex: 'image',
-      width: 300,
+      // 200：总宽必须塞进内容区（实测容器 1189），否则横向滚动时
+      // 固定的「操作」列会把左边这一列盖掉一截（看着像内容被切坏了）。
+      // 地址本身是**中间省略、保留尾部 tag**，压窄不影响看版本号。
+      width: 200,
       render: (v, r) => {
         const lv = liveState(r);
         // 展示**集群里正在跑的**镜像，而不是平台库里记的那个：
@@ -876,7 +879,7 @@ const EnvironmentDetail: React.FC = () => {
         // 集群里 1.2.0.2577），而用户关心的显然是线上跑的是哪个。
         return (
           <div>
-            {lv ? <ImageText value={lv.image} width={320} /> : <LiveFallback s={r} />}
+            {lv ? <ImageText value={lv.image} width={168} /> : <LiveFallback s={r} />}
             <div style={{ fontSize: 12, color: '#9aa0aa', marginTop: 3 }}>
               {lv ? `集群实时 · 平台记录更新于 ${r.updatedAt}` : `平台记录 ${v || '—'}`}
             </div>
@@ -887,7 +890,7 @@ const EnvironmentDetail: React.FC = () => {
     {
       title: '副本',
       key: 'replicas',
-      width: 106,
+      width: 100,
       render: (_, r) => {
         const lv = liveState(r);
         if (!lv) return <LiveFallback s={r} />;
@@ -912,13 +915,13 @@ const EnvironmentDetail: React.FC = () => {
       // 紧跟在「副本」后面：先看有几个实例，紧接着就看这些实例吃了多少资源。
       title: '负载（实时）',
       key: 'usage',
-      width: 210,
+      width: 200,
       render: (_, r) => <ServiceUsage s={r} />,
     },
     {
       title: '状态',
       key: 'status',
-      width: 106,
+      width: 100,
       render: (_, r) => {
         const lv = liveState(r);
         if (!lv) return <LiveFallback s={r} />;
@@ -931,7 +934,7 @@ const EnvironmentDetail: React.FC = () => {
       // 那种错不会报错，只会让人对着一个"看着很正常"的数字下错结论。
       title: '资源规格（声明）',
       key: 'res',
-      width: 176,
+      width: 166,
       render: (_, r) => {
         const lv = liveState(r);
         if (!lv) return <LiveFallback s={r} />;
@@ -958,8 +961,8 @@ const EnvironmentDetail: React.FC = () => {
       title: '操作',
       key: 'action',
       fixed: 'right',
-      // 三个动作（部署 / 日志 / 更多）都是 link 按钮，150 放不下会被挤成换行。
-      width: 176,
+      // 三个动作（部署 / 日志 / 更多）都是 link 按钮，放不下会被挤成换行。
+      width: 170,
       render: (_, r) => (
         <Space size={2}>
           {/* 原写法是 <Tooltip><Button disabled/></Tooltip>：disabled 的 button 不派发
@@ -1440,7 +1443,7 @@ const EnvironmentDetail: React.FC = () => {
                       loading={servicesApi.loading}
                       dataSource={services}
                       columns={serviceColumns}
-                      scroll={{ x: 1270 }}
+                      scroll={{ x: 1120 }}
                       expandable={{
                         expandedRowRender: (r) => {
                           const lv = liveState(r);
@@ -1672,75 +1675,6 @@ const EnvironmentDetail: React.FC = () => {
               },
             ]}
           />
-        </Col>
-      </Row>
-
-      {/* 右栏取消后，这两块挪到列表下方并排 —— 它们不该再占主内容的位置。 */}
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={24} xl={12}>
-          <SectionCard title="最近部署动态" bodyStyle={{ padding: '8px 8px 12px' }}>
-            {envDeploys.slice(0, 6).map((d) => (
-              <div key={d.id} style={{ padding: '8px 12px', borderRadius: 6 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Space size={8}>
-                    <span style={{ fontSize: 13, fontWeight: 500 }}>{d.projectKey}</span>
-                    <DeployStatusTag status={d.status} showIcon={false} />
-                  </Space>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {(d.startedAt || '').slice(5, 16)}
-                  </Text>
-                </div>
-                <div
-                  className="yn-mono"
-                  style={{ fontSize: 11.5, color: '#9aa0aa', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                >
-                  {d.image.split(':').pop()}
-                </div>
-              </div>
-            ))}
-            {!envDeploys.length ? (
-              <div style={{ padding: '16px 12px', color: '#9aa0aa', fontSize: 13 }}>该环境还没有部署记录</div>
-            ) : null}
-          </SectionCard>
-
-        </Col>
-        <Col xs={24} xl={12}>
-          <SectionCard title="待处理" bodyStyle={{ padding: '8px 8px 12px' }}>
-            {abnormal.length ? (
-              abnormal.map((s) => (
-                <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px' }}>
-                  <div>
-                    <div style={{ fontSize: 13 }}>{s.projectKey}</div>
-                    <div style={{ fontSize: 12, color: '#9aa0aa' }}>
-                      {/* 就绪数同样只认集群实况：拿平台库的 2/2 去报一个正在掉副本的服务，
-                          比不显示更糟。分母用实例总数（见 liveReplicaTotal）——
-                          滚动卡住时多出来的那个崩溃实例必须在数字里看得见。 */}
-                      {liveState(s)
-                        ? `${liveState(s)!.readyReplicas}/${liveReplicaTotal(liveState(s)!)} 副本就绪`
-                        : liveFallbackText(s)}
-                    </div>
-                  </div>
-                  <Space size={2}>
-                    <Button size="small" type="link" onClick={() => openLogs(s)} style={{ paddingInline: 4 }}>
-                      日志
-                    </Button>
-                    {/* 后端两把锁：路由 rollback:execute + handler deploy:{env}（见 canRollbackOn）。
-                        权限点表里没有 rollback:{env} 这种形态，不能照 canRollback 反向编一个。 */}
-                    <DisabledTip title={canRollback ? undefined : `需要 rollback:execute 与 deploy:${key} 权限`}>
-                      <Button size="small" type="link" danger disabled={!canRollback} onClick={() => openRollback(s)} style={{ paddingInline: 4 }}>
-                        回滚
-                      </Button>
-                    </DisabledTip>
-                  </Space>
-                </div>
-              ))
-            ) : (
-              <div style={{ padding: '16px 12px', color: '#9aa0aa', fontSize: 13 }}>
-                暂无待处理事项
-                {liveUnknownCount ? `（${liveUnknownCount} 个服务的集群状态读取不到，未纳入判断）` : ''}
-              </div>
-            )}
-          </SectionCard>
         </Col>
       </Row>
 
