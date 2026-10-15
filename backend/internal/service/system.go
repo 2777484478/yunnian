@@ -2568,6 +2568,10 @@ func validateNotifyTarget(typ, target string) error {
 // deploy_success、rollback_executed、env_unhealthy、deploy_approval 的旧写法）
 // 没有任何代码会触发。用户勾了、看到勾上了、以为配好了 —— 然后永远收不到。
 // 这种"安静的假承诺"比报错难发现得多：没有任何地方会亮红灯。
+//
+// 2026-10-15 成功侧（build_succeeded / deploy_succeeded）**带着触发点**加回了清单，
+// 所以现在可选的是七个码。具体几个以 SupportedNotifyEvents 为准 —— 别在这里写死数字，
+// 白名单、前端选项、错误提示里的可选值全部由那一份清单派生。
 func validateNotifyEvents(events []string) error {
 	labels := make([]string, 0, len(SupportedNotifyEvents))
 	for _, e := range SupportedNotifyEvents {

@@ -450,6 +450,10 @@ AI 通道不在配置文件里：模型密钥需要脱敏回显与运行时变�
     没有任何代码会触发。用户勾上、看到勾上了、以为配好了 —— 然后永远收不到。
     现在白名单与前端选项都读 `SupportedNotifyEvents` 一份清单，另由
     `TestSupportedNotifyEventsAreComplete` 钉住"每个码都有中文标签、且都登记了触发点"。
+    2026-10-15 成功侧以**带触发点**的方式回归（`build_succeeded` / `deploy_succeeded`）：
+    用户要求"发布成功要通知到群里"。⚠️ 判定点必须挂在 rollout **真正完成**之后
+    （构建侧是镜像已登记，部署侧是 `ApplyImage` 返回 nil），提前到"spec 提交完"
+    会变成一条比没有还糟的通知 —— 它在 rollout 失败之前就报成功。
   - **`TestNotifyChannel` 从"格式预检"改成真投递**，`ok=false` 意味着这次真的没发出去，
     失败原因是**对端的原话**（如钉钉 `errcode=310000 机器人发送签名不匹配`）。
   - **结果回写 `last_sent_at` / `fail_count` / `last_error`**（`last_error` 是新增列），

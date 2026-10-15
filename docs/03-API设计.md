@@ -1185,10 +1185,19 @@ data: {"reason":"finished"}
   企业微信 / 飞书 / 自定义 Webhook 曾经也在枚举里，但没有任何发送实现 ——
   配得出来却永远发不出去，所以从入参枚举里去掉。入库的历史记录仍会原样返回其 `type`，
   但投递会明确失败并把原因写进 `lastError`，**不会静默成功**。
-- `events`：**`build_failed` / `build_interrupted` / `deploy_failed` / `deploy_interrupted` /
-  `deploy_pending_approval`**。这是平台当前**真的会触发**的全部事件。传入其它码返回 `40000`
+- `events`：**`build_failed` / `build_interrupted` / `build_succeeded` / `deploy_failed` /
+  `deploy_interrupted` / `deploy_pending_approval` / `deploy_succeeded`**。
+  这是平台当前**真的会触发**的全部事件（与后端 `SupportedNotifyEvents` 同源）。传入其它码返回 `40000`
   并列出可选值 —— 以前这里放行任意字符串，于是界面上 8 个事件码里有 5 个永远不会推送，
   用户勾上了却永远收不到。
+- **成功侧的两个码（`build_succeeded` / `deploy_succeeded`）是 2026-10-15 加回来的**，
+  且是**连同触发点一起**加的（用户要求：发布成功要通知到群里，否则没人知道发布成功、
+  项目正不正常）。为什么和失败侧分成两个码而不是合成一个"构建结束"：成功是常态、
+  失败是例外，两者量差一到两个数量级，合成一个会让想收告警的人被成功消息淹掉。
+  新建渠道默认只勾告警，要收成功通知需要自己勾上。
+- `deploy_succeeded` **同时覆盖回滚成功**（消息标题会写成「回滚成功」）——
+  回滚本质也是一次换镜像的发布，订阅者关心的是"这次发布成功了"，不是走哪条链路，
+  所以不再需要独立的 `rollback_executed`。
 
 **「被中断」为什么与被「失败」分成两个码**（`build_interrupted` / `deploy_interrupted`，2026-10-10 补）：
 

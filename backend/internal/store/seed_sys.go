@@ -22,9 +22,14 @@ import (
 //
 // 加回来很便宜：写一个发送器 + 把类型加进 `service.NotifyInput.Type` 的 oneof。
 //
-// `events` 同样只种**真的会触发**的三个码（与 `service.SupportedNotifyEvents` 一致）。
+// `events` 同样只种**真的会触发**的码（与 `service.SupportedNotifyEvents` 一致）。
 // 原种子里的 `env_unhealthy` / `deploy_success` / `deploy_approval` / `rollback_executed`
 // 没有任何代码会触发 —— 勾上、存库、看到勾上了，然后永远收不到。
+//
+// ⚠️ 2026-10-15 起 `SupportedNotifyEvents` 多了两个成功码（`build_succeeded` /
+// `deploy_succeeded`），但**种子刻意不订阅它们**：成功是回执、不是告警，
+// 一个全新的告警群上线就被每次构建成功的消息刷屏，等于把真告警埋掉。
+// 需要的人到「通知渠道」里自己勾一下即可。
 //
 // 注：dingtalk / email 的 Target 仍是 `****` 占位（真实地址属凭据，不入库到种子），
 // 装完要由使用者在「系统管理 › 通知渠道」里填真实值。

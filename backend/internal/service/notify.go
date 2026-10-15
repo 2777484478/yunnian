@@ -66,9 +66,11 @@ type NotifyEvent string
 const (
 	EventBuildFailed          NotifyEvent = "build_failed"
 	EventBuildInterrupted     NotifyEvent = "build_interrupted"
+	EventBuildSucceeded       NotifyEvent = "build_succeeded"
 	EventDeployFailed         NotifyEvent = "deploy_failed"
 	EventDeployInterrupted    NotifyEvent = "deploy_interrupted"
 	EventDeployPendingApprove NotifyEvent = "deploy_pending_approval"
+	EventDeploySucceeded      NotifyEvent = "deploy_succeeded"
 )
 
 // 「被平台重启中断」为什么不并进 `*_failed`：
@@ -79,6 +81,31 @@ const (
 // 引着人去翻代码和依赖 —— 而真实要做的事只有一件：**重新触发**。
 // 反过来，订阅了 `build_failed` 的告警群也未必想在凌晨被一条"平台自己重启了"叫醒。
 // 两者是可分开订阅的，所以这里给两个独立的码。
+
+// 成功通知（`*_succeeded`）与失败通知是**两种不同的东西**，别把它们当成同一件事的两面：
+//
+//   - 失败通知回答"出事了，谁来看" —— 它是**告警**，所以按 error 级别、要求被看到；
+//   - 成功通知回答"这次发布成功了，可以开始验收了" —— 它是**回执**。
+//     用户 2026-10-15 的原话："发布成功了，我肯定要通知到群里的运维同事啊"。
+//
+// ⚠️ 是**发布成功**，不是"发布结束"。用户 2026-10-15 特意纠正过这个措辞，
+// 因为两者差别很大："结束"只说明流程停了 —— **失败也是结束**，
+// 而收件人要拿这条消息判断"项目没问题"。所以判定点必须是 rollout 成功
+// （见下面那段），措辞也不能写成"结束"。
+//
+// 为什么它们必须分开订阅：成功是常态、失败是例外，两者的量差一到两个数量级
+// （本机 41 个项目，构建成功一天几十次）。合成一个"构建结束"事件，想收成功的人
+// 会被做失败告警的人投诉；反之亦然。订阅列表里分两个码，各自按需勾。
+//
+// ⚠️ **成功通知的判定点必须是"真跑完了"，不是"提交了"**：
+//   - 构建侧：`finishBuild(status="success")`，即镜像已产出并登记（脚本退出 0 **不算**，
+//     见 ci.go 的 SCRIPT_NO_IMAGE —— 退出码为 0 却没有任何镜像产出是明确失败）；
+//   - 部署侧：`runDeploy` 的成功分支，即 `ApplyImage` 返回 nil。它内部用 `judgeRollout`
+//     确认过"**期望镜像已生效** + 就绪副本到位"，而不是 spec 刚提交完。
+//
+// 这个区别是这一整条链路存在的意义：用户收到它要能直接判断"项目没问题"。
+// 挂在"提交完成"上会变成一条**比没有还糟**的通知 —— 它在 rollout 失败之前就发出去，
+// 群里所有人刚看到"发布成功"，紧接着平台报部署失败。
 const (
 	// interruptedListLimit 一条中断汇总消息里最多列出几条明细。
 	//
@@ -91,10 +118,14 @@ const (
 
 // SupportedNotifyEvents 平台**真的会发出**的事件。
 //
-// ⚠️ 这份清单是「能勾选 == 后端受理」这条约定的落点。它故意只列已实现的五项：
+// ⚠️ 这份清单是「能勾选 == 后端受理」这条约定的落点。每一项都必须在
+// `internal/service` 里有一个真实的 Dispatch 调用点（见上面那段注释里的判定点）；
 // 界面上曾经可选 build_success / deploy_success / rollback_executed / env_unhealthy
-// 这些码，但**没有任何代码会触发它们** —— 用户勾了、存库了、然后永远收不到，
+// 这些码，但**当时没有任何代码会触发它们** —— 用户勾了、存库了、然后永远收不到，
 // 而界面上那个勾还在，看起来一切正常。要么实现它，要么别让它出现在选项里。
+//
+// 2026-10-15 把 build_succeeded / deploy_succeeded 以**带触发点**的方式加了回来
+// （失败侧当年是"直接删掉"，成功侧是"补齐实现再上架"，两条路的判据是同一条）。
 //
 // 后端的入参白名单（`validateNotifyEvents`）直接读这份清单，所以往这里加一项，
 // 前端选项、后端受理、种子回归测试（`seed_notify_channels_test.go`）三处同时生效 ——
@@ -102,9 +133,11 @@ const (
 var SupportedNotifyEvents = []NotifyEvent{
 	EventBuildFailed,
 	EventBuildInterrupted,
+	EventBuildSucceeded,
 	EventDeployFailed,
 	EventDeployInterrupted,
 	EventDeployPendingApprove,
+	EventDeploySucceeded,
 }
 
 // IsSupportedNotifyEvent 判断事件码是否是平台会发出的事件。
@@ -124,14 +157,46 @@ func eventLabel(code NotifyEvent) string {
 		return "构建失败"
 	case EventBuildInterrupted:
 		return "构建被中断"
+	case EventBuildSucceeded:
+		return "构建成功"
 	case EventDeployFailed:
 		return "部署失败"
 	case EventDeployInterrupted:
 		return "部署被中断"
 	case EventDeployPendingApprove:
 		return "部署待审批"
+	case EventDeploySucceeded:
+		return "部署成功"
 	}
 	return string(code)
+}
+
+// levelIcon 按级别给标题加一个前缀符号。
+//
+// 三种消息会进**同一个群**：失败（要人来看）、被中断（要人去重跑）、成功（告诉大家可以验收了）。
+// 钉钉/邮件都只显示一行标题，纯文字标题在滚动里要读完才知道是哪一类；
+// 一个符号能让人在扫列表时就分出来。
+//
+// ⚠️ 用的是 emoji 而不是 markdown 颜色：钉钉的 markdown 是子集，没有颜色语法。
+func levelIcon(level string) string {
+	switch level {
+	case "error":
+		return "❌ "
+	case "warning":
+		return "⚠️ "
+	case "success":
+		return "✅ "
+	}
+	return ""
+}
+
+// notifyTitle 渲染最终标题。
+//
+// `NotifyMessage.Title` 里**不带**符号：构造器只管事实，符号由级别推出来。
+// 这样"改一次配色"只动这一个函数，不用回去改五个构造器 —— 而且不会出现
+// "某个构造器忘了加符号"这种半套效果。
+func notifyTitle(m NotifyMessage) string {
+	return levelIcon(m.Level) + m.Title
 }
 
 // --------------------------------------------------------------------------- 消息
@@ -395,6 +460,33 @@ func (s *NotifyService) BuildFailedMessage(rec *model.BuildRecord) NotifyMessage
 	return m
 }
 
+// BuildSucceededMessage 构造「构建成功」通知。
+//
+// image 由调用方查好传进来：构建记录里只有一个 `image_record_id`，镜像地址在
+// image_record 上。查不到就传空串 —— 渲染层会跳过空字段，**不要**拿 tag 或分支去凑
+// （凑出来的那一行看起来和真值一模一样，却指不到东西）。
+func (s *NotifyService) BuildSucceededMessage(rec *model.BuildRecord, image string) NotifyMessage {
+	return NotifyMessage{
+		Event: EventBuildSucceeded,
+		Title: fmt.Sprintf("构建成功 · %s #%d", rec.ProjectKey, rec.BuildNo),
+		Level: "success",
+		// 成功消息的 Reason 写的不是"原因"而是**这意味着什么**。
+		// 收件人拿它决定下一步动作，所以要说清"现在可以做什么"，
+		// 而不是把标题换个说法再讲一遍。
+		Reason: "镜像已产出并登记，可以在「部署」里选择它发布。",
+		Fields: []NotifyField{
+			{Name: "项目", Value: rec.ProjectKey},
+			{Name: "构建号", Value: "#" + strconv.FormatUint(uint64(rec.BuildNo), 10)},
+			{Name: "镜像", Value: image},
+			{Name: "分支", Value: rec.Branch},
+			{Name: "提交", Value: shortCommit(rec.CommitID)},
+			{Name: "触发人", Value: rec.TriggerName},
+			{Name: "耗时", Value: durationHint(rec.DurationSec)},
+		},
+		Link: s.link("/#/ci/builds"),
+	}
+}
+
 // DeployFailedMessage 构造「部署失败」通知。
 func (s *NotifyService) DeployFailedMessage(rec *model.DeployRecord) NotifyMessage {
 	m := NotifyMessage{
@@ -430,6 +522,43 @@ func (s *NotifyService) DeployPendingMessage(rec *model.DeployRecord) NotifyMess
 			{Name: "部署单", Value: rec.DeployNo},
 			{Name: "镜像", Value: rec.Image},
 			{Name: "申请人", Value: rec.OperatorName},
+		},
+		Link: s.link("/#/cd/deploys"),
+	}
+}
+
+// DeploySucceededMessage 构造「部署成功」通知。
+//
+// 这是用户要的那一条：**发布成功 + 项目正常**。
+//
+// 两条容易做错的边界：
+//
+//  1. **回滚产生的部署单也走这里**（`ParentDeploy != nil`，终态是 `rolled_back`）。
+//     回滚本质就是一次换镜像的发布，群里同样需要知道"回滚成功、服务恢复了"。
+//     不为它单开一个事件码 —— 订阅者关心的是"这次发布成功了"，不是"它属于哪条链路"；
+//     区别只放在标题里（回滚成功 / 部署成功）。
+//
+//  2. Reason 里刻意写明"就绪"而不是"已提交"。调用点已经保证过这一条
+//     （`ApplyImage` 返回 nil 意味着期望镜像生效 + 就绪副本到位），
+//     这里要做的只是**把它说出来** —— 用户就是靠这句话判断"项目没问题"。
+func (s *NotifyService) DeploySucceededMessage(rec *model.DeployRecord) NotifyMessage {
+	title := fmt.Sprintf("部署成功 · %s/%s", rec.EnvKey, rec.ProjectKey)
+	if rec.ParentDeploy != nil {
+		title = fmt.Sprintf("回滚成功 · %s/%s", rec.EnvKey, rec.ProjectKey)
+	}
+	return NotifyMessage{
+		Event:  EventDeploySucceeded,
+		Title:  title,
+		Level:  "success",
+		Reason: "新版本已发布成功：滚动更新完成，Pod 全部就绪，可以直接验收。",
+		Fields: []NotifyField{
+			{Name: "环境", Value: rec.EnvKey},
+			{Name: "项目", Value: rec.ProjectKey},
+			{Name: "部署单", Value: rec.DeployNo},
+			{Name: "镜像", Value: rec.Image},
+			{Name: "副本", Value: fmt.Sprintf("%d 个", rec.Replicas)},
+			{Name: "操作人", Value: rec.OperatorName},
+			{Name: "耗时", Value: durationHint(rec.DurationSec)},
 		},
 		Link: s.link("/#/cd/deploys"),
 	}
@@ -522,6 +651,22 @@ func commitHint(id string) string {
 	return ""
 }
 
+// durationHint 把秒数渲染成 "42s" / "1m57s"。
+//
+// 指针为空时返回空串而不是 "0s"：`duration_sec` 在终态落库前是 NULL，
+// 而 0 秒是一个**合法但没见过**的耗时 —— 渲染成 "0s" 会让人以为这次构建秒过。
+// 渲染层会跳过空值字段，所以这里返回空串即可。
+func durationHint(sec *uint32) string {
+	if sec == nil {
+		return ""
+	}
+	s := *sec
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	return fmt.Sprintf("%dm%ds", s/60, s%60)
+}
+
 // joinNonEmpty 用 sep 连接非空片段；全空时返回空串。
 //
 // 用于拼"一行事实"（分支 · 提交 · 触发人）：钉钉与邮件两套渲染都会跳过空值字段，
@@ -558,10 +703,22 @@ func firstNonEmpty(vals ...string) string {
 
 // --------------------------------------------------------------------------- 渲染
 
+// reasonLabel Reason 这一栏的表头。
+//
+// 失败消息里它是"原因"；而成功消息的 Reason 写的是"这意味着什么"
+// （"滚动更新已完成，新版本 Pod 已全部就绪"）—— 标成"原因"会被读成
+// "为什么会成功"，语义反了。所以表头跟着级别走。
+func reasonLabel(m NotifyMessage) string {
+	if m.Level == "success" {
+		return "说明"
+	}
+	return "原因"
+}
+
 // renderPlainText 邮件正文。
 func renderPlainText(m NotifyMessage) string {
 	var b strings.Builder
-	b.WriteString(m.Title + "\n")
+	b.WriteString(notifyTitle(m) + "\n")
 	b.WriteString(strings.Repeat("=", 48) + "\n\n")
 	for _, f := range m.Fields {
 		if strings.TrimSpace(f.Value) == "" {
@@ -570,7 +727,7 @@ func renderPlainText(m NotifyMessage) string {
 		fmt.Fprintf(&b, "%s：%s\n", f.Name, f.Value)
 	}
 	if m.Reason != "" {
-		fmt.Fprintf(&b, "\n原因：%s\n", m.Reason)
+		fmt.Fprintf(&b, "\n%s：%s\n", reasonLabel(m), m.Reason)
 	}
 	if m.Link != "" {
 		fmt.Fprintf(&b, "\n查看详情：%s\n", m.Link)
@@ -585,7 +742,7 @@ func renderPlainText(m NotifyMessage) string {
 // 用别的语法（表格、代码块高亮）不会报错，只会原样显示出符号，看着像坏掉了。
 func renderDingtalkMarkdown(m NotifyMessage) string {
 	var b strings.Builder
-	b.WriteString("### " + m.Title + "\n\n")
+	b.WriteString("### " + notifyTitle(m) + "\n\n")
 	for _, f := range m.Fields {
 		if strings.TrimSpace(f.Value) == "" {
 			continue
@@ -593,7 +750,7 @@ func renderDingtalkMarkdown(m NotifyMessage) string {
 		fmt.Fprintf(&b, "- **%s**：%s\n", f.Name, f.Value)
 	}
 	if m.Reason != "" {
-		fmt.Fprintf(&b, "\n> **原因**：%s\n", m.Reason)
+		fmt.Fprintf(&b, "\n> **%s**：%s\n", reasonLabel(m), m.Reason)
 	}
 	if m.Link != "" {
 		fmt.Fprintf(&b, "\n[查看详情](%s)\n", m.Link)
@@ -649,7 +806,7 @@ func (d *dingtalkNotifier) Send(ctx context.Context, ch *model.NotifyChannel, m 
 	payload := map[string]any{
 		"msgtype": "markdown",
 		"markdown": map[string]string{
-			"title": m.Title,
+			"title": notifyTitle(m),
 			"text":  renderDingtalkMarkdown(m),
 		},
 	}
@@ -848,7 +1005,7 @@ func buildEmail(ec config.NotifyEmailConfig, from string, to []string, m NotifyM
 	}
 	fmt.Fprintf(&b, "From: %s\r\n", fromHeader)
 	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
-	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("UTF-8", "[云辇] "+m.Title))
+	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("UTF-8", "[云辇] "+notifyTitle(m)))
 	fmt.Fprintf(&b, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")

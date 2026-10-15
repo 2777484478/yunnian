@@ -301,11 +301,16 @@ func TestInterruptedMessageShapes(t *testing.T) {
 func TestSupportedNotifyEventsAreComplete(t *testing.T) {
 	// ⚠️ 人为维护：新增事件码时**必须**在这里登记，登记就等于声明"确认有代码会 Dispatch 它"。
 	triggered := map[NotifyEvent]string{
-		EventBuildFailed:          "ci.go finishBuild",
-		EventBuildInterrupted:     "ci.go ReconcileInterrupted",
+		EventBuildFailed:      "ci.go finishBuild",
+		EventBuildInterrupted: "ci.go ReconcileInterrupted",
+		// 成功侧的两个码 2026-10-15 加回来时**带着触发点一起**：
+		// 构建在两条收尾路径（runBuild 的镜像登记之后 / jenkins.go 的 finish 闭包）各发一次，
+		// 部署在 runDeploy 的成功分支（终态落库之后）。两处都在"事实齐全"之后，别往前提。
+		EventBuildSucceeded:       "ci.go runBuild 收尾 / jenkins.go finish（镜像登记之后）",
 		EventDeployFailed:         "cd.go failDeploy",
 		EventDeployInterrupted:    "cd.go ReconcileInterrupted",
 		EventDeployPendingApprove: "cd.go CreateDeployment / ExecuteRollback",
+		EventDeploySucceeded:      "cd.go runDeploy 成功分支（终态落库之后）",
 	}
 
 	seen := map[string]bool{}

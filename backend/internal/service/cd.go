@@ -1822,6 +1822,10 @@ func (s *CDService) runDeploy(taskCtx context.Context, deployID uint64) {
 	s.markImageDeployed(ctx, rec.ImageRecID, rec.EnvKey)
 	s.finishRollbackOf(ctx, deployID, "success", duration)
 
+	// 部署成功通知。放在这里（终态已落库 + 回滚单也收尾了），
+	// 而不是 ApplyImage 刚返回 nil 时 —— 见 notifyDeploySucceeded 的注释。
+	s.notifyDeploySucceeded(ctx, deployID)
+
 	s.appendDeployLog(ctx, streamKey, "info", fmt.Sprintf("部署完成，%s/%s 已更新为 %s",
 		rec.EnvKey, rec.ProjectKey, tagOfImage(rec.Image)))
 	_ = s.deps.Stream.Finish(ctx, streamKey, "finished")
@@ -1866,6 +1870,30 @@ func (s *CDService) notifyDeployFailed(ctx context.Context, deployID uint64) {
 		return
 	}
 	s.notify.Dispatch(ctx, s.notify.DeployFailedMessage(&rec))
+}
+
+// notifyDeploySucceeded 部署成功后推送通知 —— "发布成功、可以验收了"的那一条。
+//
+// ⚠️ 是**发布成功**，不是"发布流程结束"（用户 2026-10-15 特意纠正过措辞）：
+// 结束只说明流程停了，失败也是结束；收件人要拿这条消息判断"项目没问题"。
+// 所以调用点有两个硬条件：
+//
+//  1. **终态已经落库**（那个 tx 成功返回）。提前到 `ApplyImage` 刚返回 nil 就发，
+//     会出现"群里说部署成功、界面上还停在部署中"—— 写终态失败时平台会走
+//     PERSIST_FAILED 报失败，而消息已经发出去了；
+//  2. **`ApplyImage` 返回了 nil**，即它内部 `judgeRollout` 已经确认
+//     "期望镜像生效 + 就绪副本到位"。这正是用户要的"知道项目没问题"的依据 ——
+//     挂在"spec 提交完成"上会在 rollout 失败之前就报成功，比没有还糟。
+//
+// 回滚单（`ParentDeploy != nil`，终态 `rolled_back`）也走这里：回滚就是一次换镜像的
+// 发布，群里同样要知道"回滚成功、服务恢复了"，事件码不另开（见 DeploySucceededMessage）。
+func (s *CDService) notifyDeploySucceeded(ctx context.Context, deployID uint64) {
+	var rec model.DeployRecord
+	if err := s.db(ctx).First(&rec, deployID).Error; err != nil {
+		s.log("cd.deploy").Warn("读取部署记录用于通知成功", "deployId", deployID, "err", err)
+		return
+	}
+	s.notify.Dispatch(ctx, s.notify.DeploySucceededMessage(&rec))
 }
 
 // ListDeployments 部署记录列表。

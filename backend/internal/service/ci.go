@@ -1559,6 +1559,8 @@ func (s *CIService) finalizeBuild(run *buildRun, result *integration.BuildResult
 			log.Warn("回写镜像记录失败", "err", err)
 		}
 	}
+	// 放在镜像挂到构建记录**之后**：成功通知里要带镜像地址，早了就没有。
+	s.notifyBuildSucceeded(ctx, run.buildID)
 	_, _ = s.deps.Stream.Append(ctx, streamKey, "info", "构建完成", fin)
 	_ = s.deps.Stream.Finish(ctx, streamKey, "finished")
 	s.persistBuildLogs(ctx, run.buildID, run.sink.collected)
@@ -1596,6 +1598,11 @@ func (s *CIService) finishBuild(ctx context.Context, buildID uint64, status, sta
 	if status == "failed" {
 		s.notifyBuildFailed(ctx, buildID)
 	}
+	// ⚠️ 成功通知**刻意不在这里发**。走到这一步时镜像还没登记完：
+	// runner 模式是 finishBuild 之后才回写 image_record_id，Jenkins 模式更是
+	// 连 image_record 都还没建。而"构建成功"这条通知里最有信息量的就是镜像地址
+	// （用户拿它去部署），在这里发等于每次都少一个字段。
+	// 所以它在两条收尾路径的**镜像登记之后**各发一次，见 notifyBuildSucceeded。
 }
 
 // notifyBuildFailed 构建失败时推送通知。
@@ -1609,6 +1616,33 @@ func (s *CIService) notifyBuildFailed(ctx context.Context, buildID uint64) {
 		return
 	}
 	s.notify.Dispatch(ctx, s.notify.BuildFailedMessage(&rec))
+}
+
+// notifyBuildSucceeded 构建成功后推送通知。
+//
+// ⚠️ **调用点必须在镜像登记之后**（runner 模式见 runBuild 的收尾，
+// Jenkins 模式见 jenkins.go 的 finish 闭包）。原因不是代码整洁，是事实顺序：
+// 镜像地址写在 image_record 上，而 build_record 只是一个外键指向它 ——
+// 在登记之前发通知，消息里那行「镜像」永远是空的，且**不会报任何错**。
+//
+// ⚠️ 没登记到镜像（Jenkins Job 只编译不推镜像）**照样发**：那次构建确实成功了，
+// 群里要的是"发版结束"这个事实。镜像字段留空由渲染层跳过，不编一个地址出来。
+func (s *CIService) notifyBuildSucceeded(ctx context.Context, buildID uint64) {
+	var rec model.BuildRecord
+	if err := s.db(ctx).First(&rec, buildID).Error; err != nil {
+		s.log("ci.build").Warn("读取构建记录用于通知成功", "buildId", buildID, "err", err)
+		return
+	}
+	image := ""
+	if rec.ImageRecordID != nil {
+		var img model.ImageRecord
+		if err := s.db(ctx).First(&img, *rec.ImageRecordID).Error; err != nil {
+			s.log("ci.build").Warn("读取镜像记录用于通知成功", "buildId", buildID, "err", err)
+		} else {
+			image = img.Image
+		}
+	}
+	s.notify.Dispatch(ctx, s.notify.BuildSucceededMessage(&rec, image))
 }
 
 // recordImage 构建成功后登记镜像版本。

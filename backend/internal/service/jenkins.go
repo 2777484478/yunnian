@@ -585,6 +585,15 @@ func (s *CIService) runJenkinsBuild(taskCtx context.Context, buildID uint64, pro
 			// 读不到镜像就如实不登记（界面显示"—"），不用一个猜测去覆盖事实。
 			s.recordJenkinsImage(fctx, buildID, projectKey, strings.Join(pushedLines, "\n"), log)
 		}
+		// 成功通知放在镜像登记**之后**：它要带镜像地址，而 recordJenkinsImage
+		// 才刚把 image_record_id 挂到这次构建上。见 notifyBuildSucceeded 的注释。
+		//
+		// 刻意不被上面那句 `len(pushedLines) > 0` 连坐：Jenkins Job 里本来就有
+		// 只做编译、不推镜像的，那些构建也是成功的，群里同样要知道它结束了。
+		// 镜像字段留空由渲染层跳过。
+		if status == "success" {
+			s.notifyBuildSucceeded(fctx, buildID)
+		}
 		_ = s.deps.Stream.Finish(fctx, streamKey, status)
 	}
 

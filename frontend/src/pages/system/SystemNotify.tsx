@@ -48,9 +48,12 @@ const { Text } = Typography;
 //    但选了也永远不会发 —— 那种"安静的假承诺"没有任何地方会亮红灯。
 //    库里可能还有历史记录，界面对认不出的类型原样显示类型名，不伪装。
 //
-//  · **事件只列后端真会触发的三个**。曾经这里有 8 个码（build_success、
+//  · **事件只列后端真会触发的七个**。曾经这里有 8 个码（build_success、
 //    rollback_executed、env_unhealthy…），其中 5 个没有任何代码会发出。
 //    勾上它们只是往库里写一个字符串，用户却以为配好了。
+//    2026-10-15 把 build_succeeded / deploy_succeeded **连同后端触发点一起**加了回来
+//    （用户要求：发布成功要通知到群里，否则没人知道发布结束、项目正不正常）。
+//    判据没变 —— 能勾选就必须真的收得到。
 //
 //  · **测试按钮现在是真投递**。返回 ok=false 不再是"后端还没接入"，
 //    而是"这次真的没发出去"——所以照实报错，并把对端的原话（签名不匹配、
@@ -68,15 +71,20 @@ const TYPE_META: Record<string, { label: string; icon: React.ReactNode; color: s
 /**
  * 事件码 → 中文。**只收录平台真会发出的事件**（与后端 SupportedNotifyEvents 同步）。
  *
+ * 顺序就是「订阅事件」勾选框和矩阵里的行序：按构建 → 部署分组，
+ * 组内失败 / 被中断 / 成功，最后是部署的两个特殊态。
+ *
  * 库里可能还存着旧配置里的事件码；那些码会走下面的"原样透传 + 平台不推送"分支，
  * 而不是被静默丢掉 —— 用户需要看到自己配的东西现在处于什么状态。
  */
 const EVENT_LABEL: Record<string, string> = {
   build_failed: '构建失败',
   build_interrupted: '构建被中断',
+  build_succeeded: '构建成功',
   deploy_failed: '部署失败',
   deploy_interrupted: '部署被中断',
   deploy_pending_approval: '部署待审批',
+  deploy_succeeded: '部署成功',
 };
 
 const EVENT_OPTIONS = Object.keys(EVENT_LABEL).map((code) => ({
@@ -92,6 +100,11 @@ const eventLabel = (code: string) => EVENT_LABEL[code] ?? code;
  * 「被中断」也在这里。它的成因不是构建/部署本身出错（所以和 `*_failed` 分开订阅），
  * 但它**不会自行恢复** —— 记录停在终态，唯一该做的事是"重新触发"。
  * 没有订阅就等于这件事只存在于列表页里，等谁碰巧翻到。
+ *
+ * ⚠️ 两个 `*_succeeded` **刻意不进这份清单**，也**不设为新建渠道的默认勾选**。
+ * 这里的每一项都是"没人订阅 = 出事没人知道"，而成功不是事故；把它算进去会让
+ * 这一格永远显示"已覆盖"，从而失去意义。新建渠道默认只勾告警，要收成功通知
+ * 得自己勾一下 —— 这是刻意的，成功通知的量比告警高一到两个数量级（见抽屉里的说明）。
  */
 const CRITICAL_EVENTS = ['build_failed', 'build_interrupted', 'deploy_failed', 'deploy_interrupted'];
 
@@ -378,10 +391,11 @@ const SystemNotify: React.FC = () => {
         breadcrumb={[{ title: '系统管理' }, { title: '通知渠道' }]}
         title="通知渠道"
         // 这句原先写的是「构建成功/失败、部署成功/失败、待审批与回滚事件可推送至邮件、
-        // 钉钉、企业微信、飞书或自定义 Webhook」—— **其中两个短语都是承诺不出来的东西**：
-        // 企微/飞书/Webhook 没有发送器，构建成功/部署成功/回滚也没有任何代码会触发。
-        // 页面描述是用户对这个功能的第一印象，写成"可选"就等于承诺。
-        description="构建 / 部署失败与被中断、部署待审批，会推送到已启用且订阅了该事件的渠道"
+        // 钉钉、企业微信、飞书或自定义 Webhook」—— **企微/飞书/Webhook 没有发送器，
+        // 而当时构建成功/部署成功/回滚也没有任何代码会触发**，写成"可选"就等于承诺。
+        // 2026-10-15 成功侧补齐了触发点（构建成功 / 部署成功），所以现在可以如实写进来；
+        // 回滚执行仍然没有独立事件码 —— 回滚产生的部署单走 deploy_succeeded。
+        description="构建 / 部署的失败、被中断与成功，以及部署待审批，会推送到已启用且订阅了该事件的渠道"
         extra={
           <Space>
             <Button
@@ -456,7 +470,7 @@ const SystemNotify: React.FC = () => {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="构建 / 部署失败与被中断、部署待审批，会按订阅矩阵推送到已启用的渠道"
+        message="构建 / 部署的失败、被中断与成功，以及部署待审批，会按订阅矩阵推送到已启用的渠道"
         description={
           <>
             目前接入两种通道：<b>邮件</b>（SMTP，发信服务器在平台配置 <span className="yn-mono">notify.email</span> 里维护）
@@ -644,7 +658,17 @@ const SystemNotify: React.FC = () => {
             name="events"
             label="订阅事件"
             rules={[{ required: true, message: '请至少选择一个事件' }]}
-            extra="这五个是平台当前会实际推送的全部事件（含「被中断」——平台重启打断、不会自行恢复，需要重新触发）；构建成功、回滚执行等暂不推送，所以没有提供勾选。"
+            extra={
+              <>
+                这七个是平台当前会实际推送的全部事件。
+                <br />
+                <b>失败 / 被中断</b>是告警 —— 出事了要有人看，新建渠道默认就勾上。
+                <br />
+                <b>构建成功 / 部署成功</b>是回执 —— 告诉你这轮<b>发布成功</b>、新版本 Pod 已全部就绪，
+                可以直接验收了；<b>回滚产生的部署单也走「部署成功」</b>（标题会写成"回滚成功"）。
+                成功后通知的量比告警高一到两个数量级，所以默认<b>不</b>勾，需要就自己勾上。
+              </>
+            }
           >
             <Checkbox.Group options={EVENT_OPTIONS} />
           </Form.Item>
