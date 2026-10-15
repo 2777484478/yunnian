@@ -201,6 +201,112 @@
   background: #f7f9fc;
 }
 
+/* --------------------------------------------------------------------------- 版本对比与目标版本 */
+
+/* 三段版本号必须**一眼分得出主次**：
+     · 前一环境（参考）—— 灰、最轻，它是"别人在跑的"
+     · 目标环境当前（现状）—— 常规文字色，它是"现在的"
+     · 确认发布（本次要动的）—— 主色 + 浅底，它是"接下来会变的"
+   三列同样灰度的话，扫一眼分不清哪个是结果、哪个只是参考 ——
+   而这一屏最容易犯的错恰恰是**看错列**（把参考值当成要发的版本）。 */
+.yn-ver {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.yn-ver__tag {
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yn-ver--ref .yn-ver__tag {
+  color: #8c8c8c;
+  font-weight: 400;
+}
+
+.yn-ver--now .yn-ver__tag {
+  color: var(--yn-text);
+}
+
+.yn-ver--pick {
+  background: var(--yn-primary-bg);
+  border: 1px solid #cfe0ff;
+  border-radius: 6px;
+  padding: 3px 10px;
+}
+
+.yn-ver--pick .yn-ver__tag {
+  color: var(--yn-primary);
+}
+
+/* 对比列（前一环境）整列淡一档：它是**参考**，不该和当前环境的版本拥有同样的视觉权重。
+   只压单元格，不压表头 —— 表头还要能看清是哪个环境。 */
+.yn-pick__table td.yn-col-ref,
+.yn-confirm td.yn-col-ref {
+  background: #fcfcfd;
+}
+
+/* 确认表格里的目标版本下拉：默认那颗 antd 小尺寸 Select 太"裸"，
+   在一屏都是版本号的地方显得像个未完成的输入框。给它一点边距与内背景，
+   让它读起来像"一块可选的值"，而不是"一个待填的空"。 */
+.yn-target-select .ant-select-selector {
+  border-radius: 6px !important;
+  padding-inline: 10px !important;
+}
+
+.yn-target-select.ant-select-focused .ant-select-selector,
+.yn-target-select:hover .ant-select-selector {
+  border-color: var(--yn-primary) !important;
+}
+
+/* 已选值就用仓库来源时给一个极轻的底色提示（与「来源」标签呼应） */
+.yn-target-select .ant-select-selection-item {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 选中值用**主色**：它是这一屏唯一的"结果"，必须比左边两列参考值更抢眼。
+   我第一版漏了这层 —— labelRender 里只给了 .yn-ver__tag（默认深灰），
+   于是"要发的版本"看起来和"当前版本"一样重，主次又糊掉了。 */
+.yn-target-select .ant-select-selection-item .yn-ver__tag,
+.yn-target-select .ant-select-selection-placeholder {
+  color: var(--yn-primary);
+  font-weight: 500;
+}
+
+.yn-target-select .ant-select-selection-placeholder {
+  color: var(--yn-text-3);
+  font-weight: 400;
+}
+
+/* 目标版本右侧的「来源」小签。
+   空心描边而不是实心 Tag —— 它是**说明**（这个 tag 是从哪儿来的），不是状态：
+   实心色块会和上面那些真正的状态标签抢注意力。 */
+.yn-src-badge {
+  display: inline-block;
+  flex: none;
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 7px;
+  border-radius: 4px;
+  color: #1677ff;
+  background: #f2f7ff;
+  border: 1px solid #cfe0ff;
+  cursor: default;
+}
+
+.yn-src-badge--plat {
+  color: #8c8c8c;
+  background: #fafafa;
+  border-color: #e8e8e8;
+}
+
 /* --------------------------------------------------------------------------- 目标环境选择 */
 
 .yn-envpick {

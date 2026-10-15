@@ -25,12 +25,14 @@ import {
   ReloadOutlined,
   RocketOutlined,
   SearchOutlined,
+  SwapOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { BatchRunner } from './BatchRunner';
 import type { BatchResult, BatchTaskDef, BatchTaskHandle, BatchTaskOutcome } from './BatchRunner';
 import { ProjectTypeTag, ServiceStatusTag } from './StatusTag';
 import { DisabledTip } from '@/components/DisabledTip';
+import { sortByStage, stageOf } from '@/config/topology';
 import { ApiError, deployApi, environmentApi, imageApi, registryApi, systemApi } from '@/api';
 import type { RegistryTags } from '@/api/registry';
 import { canDeployOn, hasPerm } from '@/auth';
@@ -54,15 +56,35 @@ export interface BatchDeployWizardProps {
 
 type FilterKey = 'all' | 'undeployed' | 'update' | 'same';
 
-/** 版本 tag 很长（分支-commit-时间戳），列内截断 + tooltip 补全 */
-const TagText: React.FC<{ value?: string; color?: string }> = ({ value, color = '#5c6470' }) =>
+/**
+ * 对比列最多展示几个环境（**含目标环境本身**）。
+ *
+ * 用户 2026-10-15 明确要求"只展示 2 个环境"：目标环境 + 链路里紧邻的前一个。
+ * 做成常量而不是写死"前一个"，是因为这取舍是**版面**问题而不是逻辑问题 ——
+ * 多一个环境就多一列版本号，横向立刻挤爆（版本 tag 本身就有 10 来个字符）。
+ * 真要放开只改这个数字，不必碰取数逻辑。
+ */
+const MAX_COMPARE_ENVS = 2;
+
+/**
+ * 版本号单元格。三种变体对应这一屏里三种不同的语义：
+ *
+ *   `ref`  前一环境在跑的（参考，最轻的灰）
+ *   `now`  目标环境当前的（现状，常规文字色）
+ *   `pick` 本次要发布的（结果，主色 + 浅底）
+ *
+ * 不做成三种灰度的 `<Tag>`：标签自带边框和背景，三列并排会变成三块同质的色块，
+ * 反而更难分辨谁是谁。这里只调**字色与底色**，版本号本体的字形始终一致 ——
+ * 对比时眼睛只需要读数字，不用重新定位。
+ */
+const TagText: React.FC<{ value?: string; variant?: 'ref' | 'now' | 'pick' }> = ({
+  value,
+  variant = 'now',
+}) =>
   value ? (
     <Tooltip title={value}>
-      <span
-        className="yn-mono yn-ellipsis"
-        style={{ display: 'inline-block', maxWidth: '100%', color, fontWeight: 500, fontSize: 12.5 }}
-      >
-        {value}
+      <span className={`yn-ver yn-ver--${variant}`}>
+        <span className="yn-ver__tag">{value}</span>
       </span>
     </Tooltip>
   ) : (
@@ -464,6 +486,111 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
    * `keys` 在依赖里：用户回头多勾一个服务，它也能补读那一个。
    */
   /**
+   * 链路里**紧邻的前一个环境**。
+   *
+   * 按 `sortByStage`（优先用环境自带的链路序号，没有才回退到按 key 的默认阶段表）
+   * 排一遍，取目标环境的前一个。这样"链路第几位"就是用户自己配的那个值，
+   * 不被前端的映射表覆盖 —— 与拓扑页用的是同一个排序函数，两处不会给出不同的链路。
+   *
+   * ⚠️ 只取**紧邻**的一个，且 `MAX_COMPARE_ENVS` 限制了展示的环境数（含目标本身）。
+   * 再往前取（开发 → 预发 → 生产）虽然也能取，但每多一个环境就多一列版本号，
+   * 表会挤到读不了 —— 用户要的是"跟上一环对比"，不是全链路铺开。
+   */
+  const prevEnv = useMemo(() => {
+    if (!env) return undefined;
+    const chain = sortByStage(envs);
+    const i = chain.findIndex((e) => e.key === env.key);
+    // 目标环境在链路里找不到（理论上不会，envs 就是这一份）时不猜，直接不展示对比列。
+    if (i <= 0) return undefined;
+    return chain[i - 1];
+  }, [envs, env]);
+
+  /**
+   * 前一环境的服务实时状态，按 projectKey 索引。
+   *
+   * ⚠️ 状态是**独立存的**，不是往 `rows` 里回写字段。第一版就是回写 rows，
+   * 结果那一列整列显示 "—"：拉取这个 effect 只在"前一环境变了"时跑，
+   * 而它第一次跑时 `rows` 还空着（数据还在路上）→ `rows.map` 是空转，
+   * 之后 rows 到了、effect 却因去重不再重跑 —— 于是永远没有人给那些行填值。
+   *
+   * 派生出来就没这个问题：rows 什么时候到都能算，且不必在两次 setRows 之间对齐时序。
+   *   undefined 还没读到（请求在路上）
+   *   null      读取失败
+   *   Map       读到了（里面缺某个 projectKey = 前一环境没纳管它）
+   */
+  const [prevSvcs, setPrevSvcs] = useState<Map<string, EnvService> | null | undefined>(undefined);
+  /**
+   * `targets` 的最新值（供 `syncFromPrev` 读）。
+   *
+   * 不把它写进 `useCallback` 的依赖再读闭包：那样每改一次版本都会重建回调，
+   * 而它被挂在下拉的 onClick 上 —— 重建本身不致命，但"读到旧闭包里的 targets"
+   * 会让同步动作基于上一帧的值计算，表现是**偶发少同步一行**。
+   */
+  const targetsRef = useRef(targets);
+  targetsRef.current = targets;
+
+  /** 已经为哪个环境读过服务列表 —— 同一次会话里不重复请求，换环境才重读。 */
+  const lastPrevKeyRef = useRef<string>('');
+
+  /**
+   * 读**前一环境**的服务列表（一次请求覆盖所有行，不是每行一次）。
+   *
+   * 复用 `environmentApi.services`：它返回的 `live` 就是**该环境集群的实时状态**，
+   * 与「当前版本」列用的是同一份口径 —— 两个环境放在一起比必须同口径，
+   * 否则"两边版本不一样"可能只是两边取数方式不同造成的假象。
+   */
+  const loadPrevSvcs = useCallback(async (pk: string) => {
+    try {
+      const d = await environmentApi.services(pk);
+      setPrevSvcs(new Map(d.map((s) => [s.projectKey, s])));
+    } catch {
+      // 整个前一环境的服务列表读不到：记成 null，界面显示"读取失败"。
+      // **不静默留空** —— 留空会被读成"前一环境没有这些服务"，那是另一个结论。
+      setPrevSvcs(null);
+    }
+  }, []);
+
+  /**
+   * 前一环境一旦确定就整表读一次。
+   *
+   * 不按勾选过滤：勾选会变，而这一列的价值正是"让我在勾选时就看到上一环跑的是什么"。
+   */
+  useEffect(() => {
+    if (!open || !prevEnv) {
+      setPrevSvcs(undefined);
+      return;
+    }
+    // 换个前一环境就是另一份数据，必须重读；同一次会话里同一个环境不重复请求。
+    if (lastPrevKeyRef.current === prevEnv.key) return;
+    lastPrevKeyRef.current = prevEnv.key;
+    setPrevSvcs(undefined);
+    void loadPrevSvcs(prevEnv.key);
+  }, [open, prevEnv, loadPrevSvcs]);
+
+  /**
+   * 逐行的前一环境版本 —— 由 `prevSvcs` 与当前 rows **派生**，不回写 rows。
+   *
+   * 三种"没有值"在这里分开（对应三种不同的处置）：
+   *   还没读到（prevSvcs === undefined）→ 请求在路上，文案说"正在读取"
+   *   读取失败（prevSvcs === null）     → 去查前一环境的集群通不通
+   *   前一环境没纳管这个服务             → 去前一环境把它纳管进来
+   */
+  const prevInfoOf = useCallback(
+    (projectKey: string): { tag?: string; reason?: string } => {
+      if (!prevEnv) return { reason: '链路里没有更靠前的环境' };
+      if (prevSvcs === undefined) return { reason: '正在读取前一环境…' };
+      if (prevSvcs === null) return { reason: `读取 ${prevEnv.key} 失败` };
+      const s = prevSvcs.get(projectKey);
+      if (!s) return { reason: `${prevEnv.key} 未纳管此服务` };
+      const live = s.live;
+      if (!live || !live.available) return { reason: `读不到 ${prevEnv.key} 的集群状态` };
+      if (!live.exists) return { reason: `${prevEnv.key} 集群里没有这个工作负载` };
+      return { tag: live.tag || undefined, reason: live.tag ? undefined : '前一环境的版本号为空' };
+    },
+    [prevEnv, prevSvcs],
+  );
+
+  /**
    * 读仓库标签的**时机**。
    *
    * 数据一加载完，就先把**有平台产物的**项目读一轮（实测这类只有个位数到十几个）。
@@ -535,6 +662,56 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
     () => rows.filter((r) => keys.includes(r.projectKey) && !skipped.includes(r.projectKey)),
     [rows, keys, skipped],
   );
+
+  /**
+   * 「同步版本号」：把目标版本一键对齐到**前一环境正在跑的版本**。
+   *
+   * 为什么要这个按钮：现在的流程是"152 发完，去阿里云按仓库最新再发一遍"，
+   * 而两边选的其实应该是**同一个 tag**（同一份镜像逐环晋级）。手点 6 个下拉、
+   * 每次都要认一遍版本号，既慢又容易点错 —— 而点错的后果是发一个别的版本上去。
+   *
+   * 三条边界，每条都对应一种真实情况：
+   *
+   *  1. **前一环境的版本不一定在仓库候选里**（用户已拍板：追加进候选并选中）。
+   *     不追加的话，`Select` 会因为 value 不在 options 里而显示成空值 ——
+   *     看着像"没选"，提交时却带着那个 tag，比直接报错更难发现。
+   *     追加的候选会在 label 里标明来源是"前一环境在跑"，不与真正的仓库标签混淆。
+   *
+   *  2. **读不到的行保持原样**（用户已拍板），但必须在行内说明原因。
+   *     静默跳过会让人以为"同步过了"，而实际上那一行还指着仓库最新。
+   *
+   *  3. **标记为"用户已选择"**：仓库标签可能还在回来的路上，它回来时只覆盖
+   *     用户没碰过的行 —— 不同步标记的话，刚同步好的值会被仓库最新冲掉，
+   *     而界面上没有任何提示。
+   *
+   * 返回同步/跳过/未动 的条数，供调用方提示 —— 只说"已同步"会掩盖后两类。
+   */
+  const syncFromPrev = useCallback(() => {
+    let synced = 0;
+    let unreadable = 0;
+    let same = 0;
+    // ⚠️ 读值放在 setTargets 的 updater **外面**：React 在开发模式下会重复调用
+    // updater，把计数写在里面会让条数翻倍（表现是"已同步 12 个"而实际只有 6 个）。
+    const next: Record<string, string> = { ...targetsRef.current };
+    picked.forEach((r) => {
+      const t = prevInfoOf(r.projectKey).tag;
+      if (!t) {
+        unreadable += 1;
+        return;
+      }
+      if (bareTagOf(next[r.projectKey]) === t) {
+        same += 1;
+        return;
+      }
+      // 统一记成仓库来源：它与仓库标签是同一类东西（仓库里实际存在的 tag），
+      // 后端走的也是同一条取镜像链路。只有"候选里没有它"这一点需要单独补进去。
+      next[r.projectKey] = SRC_REGISTRY + t;
+      targetTouchedRef.current.add(r.projectKey);
+      synced += 1;
+    });
+    setTargets(next);
+    return { synced, unreadable, same };
+  }, [picked]);
 
   /**
    * "仓库里连一个镜像都没有"的服务。
@@ -820,11 +997,57 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
     }
     return (
       <Space size={6} style={{ maxWidth: '100%' }}>
-        <TagText value={r.currentTag} />
+        <TagText value={r.currentTag} variant="now" />
         {r.live ? <ServiceStatusTag status={liveStatusWord(r.live.status)} /> : null}
       </Space>
     );
   };
+
+  /**
+   * 「前一环境当前版本」列 —— 第 1 步与第 2 步**共用同一个定义**。
+   *
+   * 为什么不各写一份：本项目的环境级动作曾经因为"定义在视图层、而视图有两个"
+   * 漂移过一次（见 EnvironmentActions 的注释）。版本对比列比按钮更容易漂 ——
+   * 一处按链路序号、另一处按默认阶段表，同一件事在两个步骤里就会给出不同的对照环境。
+   * 要做成函数而不是常量：列头文案依赖 `prevEnv` / `env`，它们是运行期状态。
+   */
+  const prevColumn = (): ColumnsType<RowModel>[number] => ({
+    // 列头只写**环境名**，不写"当前版本" —— 后者会让表头折成两行（环境名 + 4 个字，
+    // 在 96px 里放不下），而"这一列是版本号"从单元格内容就看得出来。
+    // 完整口径（含链路第几位）放 tooltip，不占版面。
+    title: prevEnv ? (
+      <Tooltip
+        title={`${prevEnv.name}（${prevEnv.key}）正在跑的版本 · 链路第 ${stageOf(prevEnv).order} 位${
+          prevEnv.stageLabel ? ` · ${prevEnv.stageLabel}` : ''
+        }${
+          typeof prevEnv.stageOrder !== 'number'
+            ? '。该环境没有设置「链路序号」，是靠默认阶段表排到这里的 —— 若要固定顺序，请在「编辑环境」里给它设一个序号'
+            : ''
+        }　只展示 ${MAX_COMPARE_ENVS} 个环境（目标 + 前一环）`}
+      >
+        <span style={{ cursor: 'help' }}>{prevEnv.name}</span>
+      </Tooltip>
+    ) : (
+      '前一环境'
+    ),
+    key: 'prev',
+    // 114：够放 10 个字符的 tag（12.5px 等宽约 7.5px/字）；TagText 带 tooltip 补全。
+    width: 114,
+    className: 'yn-col-ref',
+    render: (_, r) => {
+      const p = prevInfoOf(r.projectKey);
+      if (p.tag) return <TagText value={p.tag} variant="ref" />;
+      // 读不到 / 未纳管 / 集群里没有：三种情况各有原因，原样说出来。
+      // 留空会被读成"前一环境没有这个服务"，那是另一个结论。
+      return (
+        <Tooltip title={p.reason}>
+          <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
+            —
+          </Text>
+        </Tooltip>
+      );
+    },
+  });
 
   const pickColumns: ColumnsType<RowModel> = [
     {
@@ -845,10 +1068,12 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
         </div>
       ),
     },
+    prevColumn(),
     {
       title: `${env?.name ?? ''} 当前版本`,
       key: 'current',
-      width: 258,
+      // 两列版本号并排后总宽会顶到容器外面，各自收窄；TagText 带 tooltip 补全全值。
+      width: 168,
       render: (_, r) => currentCell(r),
     },
     {
@@ -857,11 +1082,11 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
       // 仓库口径要到「核对版本」那一步才读（那时才有目标版本下拉可选）。
       title: '平台最新版本',
       key: 'latest',
-      width: 258,
+      width: 178,
       render: (_, r) =>
         r.latest ? (
           <Space size={6} style={{ maxWidth: '100%' }}>
-            <TagText value={r.latest.tag} color="#1677ff" />
+            <TagText value={r.latest.tag} variant="now" />
             <Tooltip
               // size 后端给的是**字节**，拼成 `${size}MB` 会差 6 个数量级；
               // 而且读不到时它是 null，会渲染成 "nullMB"。统一走 humanSize。
@@ -945,16 +1170,27 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
         </Space>
       ),
     },
+    prevColumn(),
     {
-      title: `${env?.name ?? ''} 当前版本`,
+      // 列头只写环境名 —— 两个环境名并排（前一环 / 目标），谁是参考、谁是目标一目了然。
+      // 写"… 当前版本"会把 8 个汉字的环境名挤到换行（实测「机房测试环境152」折成两行），
+      // 而"这一列是版本号"从单元格内容就看得出来。完整口径放 tooltip。
+      title: (
+        <Tooltip title={`${env?.name ?? ''}（${env?.key ?? ''}）集群里正在跑的版本`}>
+          <span style={{ cursor: 'help' }}>{env?.name ?? '当前版本'}</span>
+        </Tooltip>
+      ),
       key: 'current',
-      width: 250,
+      // 收窄到 158：列头是环境名，值靠 TagText 的 tooltip 补全。
+      width: 158,
       render: (_, r) => currentCell(r),
     },
     {
       title: '确认发布版本（可修改）',
       key: 'target',
-      width: 380,
+      // 收窄到 300（原 380）：下拉本身已收到 236，加上下面的来源标签与原因说明够用。
+      // 用户 2026-10-15 明确要求"这一列展示小一点"——加了对比列之后总宽会顶出容器。
+      width: 300,
       render: (_, r) => {
         const reg = r.registry;
         const regTags = reg && !reg.unavailable ? reg.tags : [];
@@ -974,6 +1210,25 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
             })),
           });
         }
+        /**
+         * 「同步版本号」送进来的前一环境版本，若**不在**上面的仓库候选里，补一条。
+         *
+         * 不补的话 `Select` 拿到一个不在 options 里的 value 会显示成**空**：
+         * 用户看着"这一行没选版本"，提交时却带着那个 tag —— 比直接报错更难发现。
+         * 标出来源是为了不把它与"仓库里真实存在的标签"混为一谈：
+         * 它是一个**前一环境正在跑**的版本，仓库里现在还有没有它，平台没有验证过。
+         */
+        const chosen = bareTagOf(targets[r.projectKey]);
+        const chosenIsRegistry = targets[r.projectKey]?.startsWith(SRC_REGISTRY);
+        if (chosen && chosenIsRegistry && !regTags.some((t) => t.tag === chosen)) {
+          const g = groups.find((x) => x.label.startsWith('仓库标签'));
+          const opt = {
+            label: `${chosen}　(前一环境在跑，仓库近期列表里没有它)`,
+            value: SRC_REGISTRY + chosen,
+          };
+          if (g) g.options.unshift(opt);
+          else groups.unshift({ label: '来自前一环境', options: [opt] });
+        }
         const plat = r.versions.slice(0, 12).map((i, idx) => ({
           label: `${i.tag}　(#${i.buildNo}${idx === 0 ? ' · 最新' : ''})`,
           value: SRC_PLATFORM + i.tag,
@@ -992,29 +1247,67 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
           );
         }
         return (
-          <Space direction="vertical" size={2} style={{ width: '100%' }}>
-            <Select
-              showSearch
-              size="small"
-              style={{ width: 350 }}
-              // 只有"仓库还没回来、且平台那组也没有内容"时才转圈；
-              // 平台组已经有了却一起转圈，会让用户以为下拉是空的、点不了。
-              loading={regLoading && !r.versions.length}
-              value={targets[r.projectKey]}
-              onChange={(v) => {
-                // 记下"这一行用户动过"：仓库标签后到时不再覆盖他的选择。
-                targetTouchedRef.current.add(r.projectKey);
-                setTargets((prev) => ({ ...prev, [r.projectKey]: v }));
-              }}
-              options={groups}
-              placeholder="选择版本"
-            />
+          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+            <Space size={6} style={{ width: '100%' }} align="center">
+              <Tooltip title={chosen || undefined}>
+                <Select
+                  className="yn-target-select"
+                  showSearch
+                  size="small"
+                  // 收窄到 208（原 350）：加了「前一环境」列之后总宽会顶出容器，
+                  // 而这一列的信息量主要在**选中的那个 tag**，靠 labelRender 只显示 tag，
+                  // 完整说明（构建时间等）留在下拉里看。
+                  style={{ width: 208 }}
+                  // ⚠️ **不要**再传 optionLabelProp：它和 labelRender 同时给会让选中值
+                  // 渲染出**带来源前缀的裸 value**（实测显示成 `r:1.2.0.3417`）——
+                  // 那是内部标识泄漏到了界面上，用户会以为版本号真长这样。
+                  // labelRender 已经能完全控制选中态的显示。
+                  // 只显示裸 tag，不显示 label 里那一长串（"· 最新　构建于 …"）——
+                  // 选中态是**结果**，不是候选列表，把说明塞进去会把列撑爆。
+                  // 完整值走外层 Tooltip，来源（仓库 / 平台）走右边那个小标记。
+                  labelRender={() => (
+                    <span className="yn-ver__tag">{chosen || '选择版本'}</span>
+                  )}
+                  // 只有"仓库还没回来、且平台那组也没有内容"时才转圈；
+                  // 平台组已经有了却一起转圈，会让用户以为下拉是空的、点不了。
+                  loading={regLoading && !r.versions.length}
+                  value={targets[r.projectKey]}
+                  onChange={(v) => {
+                    // 记下"这一行用户动过"：仓库标签后到时不再覆盖他的选择。
+                    targetTouchedRef.current.add(r.projectKey);
+                    setTargets((prev) => ({ ...prev, [r.projectKey]: v }));
+                  }}
+                  options={groups}
+                  placeholder="选择版本"
+                />
+              </Tooltip>
+              {/* 来源：同名 tag 在"仓库标签"和"平台构建"下走的是两条不同的取镜像链路，
+                  事后查"这次发的是哪一份"时它是关键线索，所以常显、不藏进 tooltip。
+                  用极轻的描边小签而不是实心 Tag：它是**说明**，不是状态。 */}
+              {chosen ? (
+                chosenIsRegistry ? (
+                  <Tooltip title="取自镜像仓库里实际存在的标签（含别人推的、Jenkins 推的）">
+                    <span className="yn-src-badge">仓库</span>
+                  </Tooltip>
+                ) : (
+                  <Tooltip title="取自平台自己构建过的镜像记录（带构建号 / 提交号可溯源）">
+                    <span className="yn-src-badge yn-src-badge--plat">平台</span>
+                  </Tooltip>
+                )
+              ) : null}
+            </Space>
             {/* 仓库读不到必须说明原因。否则"下拉里没有仓库那一组"会被读成
                 "仓库里没有标签" —— 两者的处置完全不同。 */}
             {reg?.unavailable ? (
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                {reg.unavailable}
-              </Text>
+              <Tooltip title={reg.unavailable}>
+                <Text
+                  type="secondary"
+                  className="yn-ellipsis"
+                  style={{ fontSize: 11, display: 'block', maxWidth: 300, cursor: 'help' }}
+                >
+                  {reg.unavailable}
+                </Text>
+              </Tooltip>
             ) : r.registry === null ? (
               <Text type="secondary" style={{ fontSize: 11 }}>
                 读仓库标签请求失败，仅列出平台构建的版本
@@ -1319,9 +1612,56 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
                     请在下方逐条核对版本号后再提交
                   </Text>
                 </Space>
-                <Button size="small" icon={<ReloadOutlined />} onClick={() => void loadRows(envKey)}>
-                  重新读取
-                </Button>
+                <Space size={8}>
+                  {/* 一键把目标版本对齐到**前一环境正在跑的版本**：
+                      同一份镜像逐环晋级时，两边本来就该是同一个 tag。
+                      手动点 6 个下拉、每次都认一遍版本号，慢且容易点错。 */}
+                  <DisabledTip
+                    title={
+                      !prevEnv
+                        ? '链路里没有比当前环境更靠前的环境，无法同步。'
+                        : !picked.length
+                          ? '还没有勾选服务。'
+                          : undefined
+                    }
+                  >
+                    <Button
+                      size="small"
+                      icon={<SwapOutlined />}
+                      disabled={!prevEnv || !picked.length}
+                      onClick={() => {
+                        const { synced, unreadable, same } = syncFromPrev();
+                        if (synced) {
+                          // 只用 success 会让人以为"全同步好了"；把没动的那两类一并说出来 ——
+                          // 它们才是需要用户接手的地方。
+                          notification.success({
+                            message: `已同步 ${synced} 个服务的版本号`,
+                            description: [
+                              same ? `${same} 个本来就已经是前一环境的版本` : '',
+                              unreadable
+                                ? `${unreadable} 个读不到前一环境的状态，保持原样（行内已标出原因）`
+                                : '',
+                            ]
+                              .filter(Boolean)
+                              .join('；'),
+                            duration: 6,
+                          });
+                        } else {
+                          message.warning(
+                            unreadable
+                              ? `${unreadable} 个服务读不到前一环境的状态，没有可同步的版本`
+                              : '所选服务已经都是前一环境的版本',
+                          );
+                        }
+                      }}
+                    >
+                      同步版本号
+                    </Button>
+                  </DisabledTip>
+                  <Button size="small" icon={<ReloadOutlined />} onClick={() => void loadRows(envKey)}>
+                    重新读取
+                  </Button>
+                </Space>
               </div>
 
               {env?.needApproval ? (
@@ -1350,6 +1690,8 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
                 dataSource={picked}
                 columns={confirmColumns}
                 pagination={picked.length > 8 ? { pageSize: 8, size: 'small' } : false}
+                // 列宽合计 942 < 弹窗内容区（实测 1057），**不设 x**：让表格宽度自适应，
+                // 各列按比例分配剩余空间，不会在右边留一道空档。
                 scroll={{ y: 280 }}
               />
             </>
