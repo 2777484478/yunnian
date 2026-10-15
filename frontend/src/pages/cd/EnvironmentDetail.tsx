@@ -44,7 +44,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { PageHeader, SectionCard, KVList, StatCard } from '@/components/ui';
+import { PageHeader, SectionCard, StatCard } from '@/components/ui';
 import { UsageBar } from '@/components/charts';
 import { LogPanel } from '@/components/LogPanel';
 import { KVFields } from '@/components/KVFields';
@@ -73,7 +73,7 @@ import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { useApi } from '@/hooks/useApi';
 import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
 import { useLogStream } from '@/hooks/useLogStream';
-import { humanDuration, pad2 } from '@/utils/format';
+import { cores, gib, humanDuration, pad2 } from '@/utils/format';
 import type {
   DeployRecord,
   DeployVersion,
@@ -82,11 +82,6 @@ import type {
   RollbackRecord,
   ServicePod,
 } from '@/types';
-import {
-  OWN_CLUSTER_BADGE,
-  OWN_CLUSTER_HINT,
-  isOwnCluster,
-} from '@/config/topology';
 import {
   isServiceAbnormal,
   liveFallbackText,
@@ -167,6 +162,109 @@ const ServicePodsInline: React.FC<{ serviceId: string; onOpenLogs: () => void }>
   );
 };
 
+// --------------------------------------------------------------------------- 实时负载
+//
+// 服务列表「负载（实时）」列的内容。
+//
+// ⚠️ 它与右边「资源规格（声明）」是**两回事**：这里是容器实际用掉的量（metrics-server），
+// 那里是"声明要多少 / 上限是多少"。平台历史上把声明值当用量展示过
+// （`health.liveness/readiness` 是同一类假信息），所以两者必须分列、各自标明含义。
+//
+// 三种"没有值"要分开说，混起来就是在骗人：
+//   集群没装 metrics-server / 凭据无权读   → "—"（并说明是读不到，不是 0）
+//   集群里压根没有这个工作负载             → "集群中不存在"
+//   有 Pod 但指标还没出来（刚拉起几十秒）   → 照实显示已有部分 + "N/M 个 Pod 有数据"
+const UsageLine: React.FC<{ label: string; used?: string; pct?: number; base?: string }> = ({
+  label,
+  used,
+  pct,
+  base,
+}) => {
+  // -1 / undefined 表示**算不出基准**（既没 limit 也没 request），不是 0%：
+  // 画一根空条会被读成"几乎没用"，所以宁可不画。
+  const has = typeof pct === 'number' && pct >= 0;
+  // ⚠️ 颜色**只在基准是 limit 时才分档**。
+  //
+  // limit 是有约束力的上限（超了会被限流 / OOM Kill），红黄绿三档说得通；
+  // request 只是调度申请量，**超了是常态**（实测这批容器 request 配成 10Mi、
+  // 实际用 617Mi = 6172%）。给它刷红色等于告诉用户"有危险"，而真正的问题是
+  // "request 配得太保守"，不是"内存要爆了"——颜色会把注意力引到错的方向。
+  const color = !has ? undefined : base === 'limit' ? (pct >= 100 ? '#ff4d4f' : pct >= 65 ? '#faad14' : '#52c41a') : '#8c8c8c';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <span style={{ fontSize: 11, color: '#9aa0aa', width: 26, whiteSpace: 'nowrap' }}>{label}</span>
+      <span className="yn-mono" style={{ fontSize: 11.5, width: 50 }}>{used || '—'}</span>
+      <div
+        style={{
+          flex: 1,
+          minWidth: 30,
+          height: 6,
+          borderRadius: 3,
+          background: 'rgba(0,0,0,0.06)',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            // 条**封顶 100%**：6172% 画不出 61 倍宽度，画满即可 ——
+            // 百分比数字本身照实显示，不在这里"抹平"。
+            width: has ? `${Math.min(pct ?? 0, 100)}%` : 0,
+            height: '100%',
+            background: color,
+          }}
+        />
+      </div>
+      <span style={{ fontSize: 11, color: '#8c8c8c', width: 38, textAlign: 'right', whiteSpace: 'nowrap' }}>
+        {has ? `${pct}%` : '—'}
+      </span>
+    </div>
+  );
+};
+
+const ServiceUsage: React.FC<{ s: EnvService }> = ({ s }) => {
+  const lv = liveState(s);
+  if (!lv) return <LiveFallback s={s} />;
+  if (!lv.exists) return <Text type="secondary" style={{ fontSize: 12 }}>集群中不存在</Text>;
+  if (!lv.metricsAvailable) {
+    return (
+      <DisabledTip title="集群未提供 metrics 指标（需安装 metrics-server），或当前凭据无权读取该接口">
+        <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
+      </DisabledTip>
+    );
+  }
+  const total = lv.usagePodTotal ?? 0;
+  if (!total) return <Text type="secondary" style={{ fontSize: 12 }}>无 Pod</Text>;
+
+  // 基准标注：CPU 与内存的基准**可能不同**（一个配了 limit、另一个只有 request）。
+  // 相同就合并成一句，不同就分别写 —— 绝不能含糊成一句"占用率"，
+  // 因为超 limit 会被限流/OOM，超 request 只是调度申请量，两者不是一回事。
+  const cpuBase = lv.cpuUsageBase;
+  const memBase = lv.memUsageBase;
+  const sameBase = cpuBase && cpuBase === memBase;
+  const pods = lv.usagePods ?? 0;
+  // 只有 request 基准时报出来的是"超过申请量多少倍"，那不是占用率。
+  // 这条提示把注意力引到真正该做的事上（补 limit / 调 request），
+  // 而不是让人对着 6172% 猜是不是内存要炸了。
+  const onlyRequest = sameBase && cpuBase === 'request';
+
+  return (
+    <div>
+      <UsageLine label="CPU" used={lv.cpuUsage} pct={lv.cpuUsagePercent} base={cpuBase} />
+      <div style={{ height: 6 }} />
+      <UsageLine label="MEM" used={lv.memUsage} pct={lv.memUsagePercent} base={memBase} />
+      <div style={{ fontSize: 11, color: '#9aa0aa', marginTop: 4 }}>
+        {sameBase ? `占 ${cpuBase} · ` : [cpuBase ? `CPU 占 ${cpuBase}` : '', memBase ? `内存占 ${memBase}` : ''].filter(Boolean).join(' · ') + ' · '}
+        {pods < total ? `${pods}/${total} 个 Pod 有数据` : `${total} 个 Pod`}
+      </div>
+      {onlyRequest ? (
+        <div style={{ fontSize: 11, color: '#9aa0aa', marginTop: 2 }}>
+          容器未设 limit，百分比是「占申请量」而非上限
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
 const EnvironmentDetail: React.FC = () => {
   const { key = '' } = useParams();
   const navigate = useNavigate();
@@ -225,6 +323,19 @@ const EnvironmentDetail: React.FC = () => {
   const res = resApi.data;
   /** 规范化后的实时用量：`metricsAvailable === false`（没装 metrics-server / 无权读）时为 null。 */
   const usage = envUsage(res);
+
+  // 「集群负载」卡上的"已用 / 可分配"：百分比是后端算的，绝对值由可分配总量反推。
+  // 读不到可分配总量（老后端 / 凭据无权列节点）就整句不显示，**不显示成 0** ——
+  // "0 / 8 核"看起来像"完全没用"，与"没读到"是两码事。
+  const cpuCapacityText =
+    res?.cpuCores && usage ? `${cores((res.cpuCores * usage.cpuUsage) / 100)} / ${cores(res.cpuCores)} 核` : '';
+  const memCapacityText =
+    res?.memBytes && usage ? `${gib((res.memBytes * usage.memUsage) / 100)} / ${gib(res.memBytes)}` : '';
+
+  // 本环境实际跑着的 Pod 总数：各服务实时用量里的 Pod 数累加。
+  // 读不到集群状态的服务贡献 0，所以下面的 footer 必须说明有几个没读到 ——
+  // 否则这个数字会被读成"确实只起了这么少实例"。
+  const envPodTotal = services.reduce((n, s) => n + (liveState(s)?.usagePodTotal ?? 0), 0);
 
   const refreshAll = () => {
     envApi.refresh();
@@ -741,7 +852,7 @@ const EnvironmentDetail: React.FC = () => {
     {
       title: '服务 / 项目',
       dataIndex: 'projectName',
-      width: 200,
+      width: 190,
       fixed: 'left',
       render: (v, r) => (
         <div>
@@ -757,7 +868,7 @@ const EnvironmentDetail: React.FC = () => {
     {
       title: '当前镜像版本',
       dataIndex: 'image',
-      width: 320,
+      width: 300,
       render: (v, r) => {
         const lv = liveState(r);
         // 展示**集群里正在跑的**镜像，而不是平台库里记的那个：
@@ -798,6 +909,13 @@ const EnvironmentDetail: React.FC = () => {
       },
     },
     {
+      // 紧跟在「副本」后面：先看有几个实例，紧接着就看这些实例吃了多少资源。
+      title: '负载（实时）',
+      key: 'usage',
+      width: 210,
+      render: (_, r) => <ServiceUsage s={r} />,
+    },
+    {
       title: '状态',
       key: 'status',
       width: 106,
@@ -808,9 +926,12 @@ const EnvironmentDetail: React.FC = () => {
       },
     },
     {
-      title: '资源',
+      // 名字里必须带「声明」：这一列是容器**声明的规格**（request / limit），
+      // 与旁边「负载（实时）」是两回事。平台曾经把声明值当用量展示过 ——
+      // 那种错不会报错，只会让人对着一个"看着很正常"的数字下错结论。
+      title: '资源规格（声明）',
       key: 'res',
-      width: 170,
+      width: 176,
       render: (_, r) => {
         const lv = liveState(r);
         if (!lv) return <LiveFallback s={r} />;
@@ -828,21 +949,17 @@ const EnvironmentDetail: React.FC = () => {
         );
       },
     },
-    {
-      title: 'Pod',
-      key: 'pods',
-      width: 92,
-      render: (_, r) => (
-        <Button type="link" size="small" style={{ paddingInline: 0 }} onClick={() => openLogs(r)}>
-          查看日志
-        </Button>
-      ),
-    },
+    // 这里原有一列「Pod / 查看日志」。它调用的是**同一个** `openLogs(r)`，
+    // 与右边操作列里的「日志」按钮完全重复 —— 一列只为一个按钮存在，
+    // 而展开行里已经有完整的 Pod 明细（ServicePodsInline）。去掉它，
+    // 把宽度让给真正有信息的「负载（实时）」（用户 2026-10-15 要求"完整展示"，
+    // 冗余列占的每一像素都是从信息列里抢来的）。
     {
       title: '操作',
       key: 'action',
       fixed: 'right',
-      width: 150,
+      // 三个动作（部署 / 日志 / 更多）都是 link 按钮，150 放不下会被挤成换行。
+      width: 176,
       render: (_, r) => (
         <Space size={2}>
           {/* 原写法是 <Tooltip><Button disabled/></Tooltip>：disabled 的 button 不派发
@@ -1038,7 +1155,10 @@ const EnvironmentDetail: React.FC = () => {
           { title: env.name },
         ]}
         title={env.name}
-        subTitle={env.key}
+        // key 与 namespace 一起放这儿：右栏「环境信息」取消后，Namespace 是唯一
+        // 没别处可看、又天天要用（部署单、Pod 名、排障）的定位信息。集群名在下面
+        // 「集群负载」卡上，其余（镜像仓库 / 入口域名 / 负责人）在「编辑环境」里。
+        subTitle={`${env.key} · ${env.namespace}`}
         tags={
           <>
             {/* 徽标取**同一页那份实时结果**（`res`），不取 `env.status`：
@@ -1220,25 +1340,91 @@ const EnvironmentDetail: React.FC = () => {
           />
         </Col>
         <Col xs={12} xl={6}>
+          {/* 原来这格是「集群资源 15/93%」。现在下方有了完整的「集群负载」卡
+              （进度条 + 已用/可分配 + 水位提示），再摆一个同样的百分比只是重复。
+              改成本环境实际跑着的 Pod 总数：它是"这个环境到底起了多少实例"的
+              唯一直接答案，也是对照集群内存水位时最需要看的那个数。 */}
           <StatCard
-            title="集群资源"
-            // 读不到就写 '—'，**不退回 `env.cpuUsage / env.memUsage`**：那是上次同步
-            // 留下的旧值，填进来会与下面「集群资源」卡片里那句"读不到集群用量"打架
-            // —— 一张页面同时说"没读到"和"93%"。
-            value={usage ? `${usage.cpuUsage}/${usage.memUsage}` : '—'}
-            unit={usage ? '%' : ''}
-            accent={usage && (usage.cpuUsage > 85 || usage.memUsage > 85) ? '#ff4d4f' : '#faad14'}
+            title="本环境 Pod"
+            value={envPodTotal}
+            unit="个"
+            accent="#13c2c2"
             footer={
               <Text type="secondary" style={{ fontSize: 12 }}>
-                CPU / 内存 使用率
+                {services.length} 个服务合计
+                {liveUnknownCount ? `（${liveUnknownCount} 个读不到集群状态）` : ''}
               </Text>
             }
           />
         </Col>
       </Row>
 
+      {/* ------------------------------------------------------------ 集群负载
+          这一块原是右栏的「集群资源」，现在移到最上面并补上"已用 / 可分配" ——
+          进环境详情第一眼要回答的是"这台集群还撑得住吗"，而不是一堆静态配置。
+          右栏整列因此取消，服务列表拿到整行宽度；环境标识 / 部署方式 / 镜像仓库 /
+          入口域名那些静态字段在页头与「编辑环境」里都有，不该占这块版面。 */}
+      <SectionCard
+        title="集群负载"
+        bodyStyle={{ padding: '16px 20px' }}
+        style={{ marginBottom: 16 }}
+        extra={
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {env.cluster}
+            {res ? ` · ${res.version || env.clusterVersion} · ${res.nodes} 个节点` : ''}
+          </Text>
+        }
+      >
+        {resApi.loading && !res ? (
+          <Text type="secondary" style={{ fontSize: 12.5 }}>
+            正在读取集群资源…
+          </Text>
+        ) : usage ? (
+          <>
+            <Row gutter={[24, 12]}>
+              <Col xs={24} md={9}>
+                <UsageBar label="CPU 使用率" percent={usage.cpuUsage} detail={`${usage.cpuUsage}%`} />
+                {cpuCapacityText ? (
+                  <div style={{ fontSize: 12, color: '#9aa0aa', marginTop: 4 }}>{cpuCapacityText}</div>
+                ) : null}
+              </Col>
+              <Col xs={24} md={9}>
+                <UsageBar label="内存使用率" percent={usage.memUsage} detail={`${usage.memUsage}%`} />
+                {memCapacityText ? (
+                  <div style={{ fontSize: 12, color: '#9aa0aa', marginTop: 4 }}>{memCapacityText}</div>
+                ) : null}
+              </Col>
+              <Col xs={24} md={6}>
+                <Statistic label="节点数（集群实时）" value={res?.nodes ?? env.nodes} />
+              </Col>
+            </Row>
+            {usage.memUsage >= 85 ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 12 }}
+                message="内存水位偏高"
+                description="集群可分配内存已接近上限，新 Pod 可能调度等待或被 OOM Kill。"
+              />
+            ) : null}
+          </>
+        ) : (
+          <Alert
+            type={resApi.error ? 'error' : 'warning'}
+            showIcon
+            message="读不到集群用量"
+            description={
+              resApi.error
+                ? resApi.error.message
+                : '集群未提供 metrics 指标（需安装 metrics-server），或当前凭据无权读取该接口。'
+            }
+          />
+        )}
+      </SectionCard>
+
+
       <Row gutter={[16, 16]}>
-        <Col xs={24} xl={17}>
+        <Col xs={24}>
           <Tabs
             activeKey={activeTab}
             onChange={setTab}
@@ -1254,7 +1440,7 @@ const EnvironmentDetail: React.FC = () => {
                       loading={servicesApi.loading}
                       dataSource={services}
                       columns={serviceColumns}
-                      scroll={{ x: 1180 }}
+                      scroll={{ x: 1270 }}
                       expandable={{
                         expandedRowRender: (r) => {
                           const lv = liveState(r);
@@ -1487,144 +1673,74 @@ const EnvironmentDetail: React.FC = () => {
             ]}
           />
         </Col>
+      </Row>
 
-        <Col xs={24} xl={7}>
-          <Space direction="vertical" size={16} style={{ width: '100%' }}>
-            <SectionCard title="环境信息" bodyStyle={{ padding: 0 }}>
-              <KVList
-                columns={1}
-                data={[
-                  { label: '环境标识 / Namespace', value: <span className="yn-mono">{env.key} / {env.namespace}</span> },
-                  {
-                    label: 'K8s 集群',
-                    value: (
-                      <span>
-                        {env.cluster}
-                        {/* 自带凭据时集群标识只是标签，注册表里同名的记录是另一台机器 */}
-                        {isOwnCluster(env) ? (
-                          <Tooltip title={OWN_CLUSTER_HINT}>
-                            <Tag style={{ marginInlineStart: 6, marginInlineEnd: 0 }}>
-                              {OWN_CLUSTER_BADGE}
-                            </Tag>
-                          </Tooltip>
-                        ) : null}{' '}
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          {res?.version || env.clusterVersion}
-                        </Text>
-                      </span>
-                    ),
-                  },
-                  { label: '部署方式', value: <MethodTag method={env.deployMethod} /> },
-                  { label: '镜像仓库', value: <span className="yn-mono">{env.registry}</span> },
-                  { label: '入口域名', value: <span className="yn-mono">{env.ingressDomain || '—'}</span> },
-                  { label: '负责人', value: env.owner || '—' },
-                  { label: '最近同步', value: <span className="yn-mono">{env.lastSyncAt}</span> },
-                ]}
-              />
-            </SectionCard>
-
-            <SectionCard title="集群资源" bodyStyle={{ padding: '16px 20px' }}>
-              {/* 用量只在**真的读到**时才画进度条。
-                  读不到时不回退到 env.cpuUsage / env.memUsage：那是上次同步留下的旧值，
-                  拿它画一条 60% 的条会让人以为这就是集群当下的水位。 */}
-              {resApi.loading && !res ? (
-                <Text type="secondary" style={{ fontSize: 12.5 }}>
-                  正在读取集群资源…
-                </Text>
-              ) : usage ? (
-                <>
-                  <UsageBar label="CPU 使用率" percent={usage.cpuUsage} detail={`${usage.cpuUsage}%`} />
-                  <UsageBar label="内存使用率" percent={usage.memUsage} detail={`${usage.memUsage}%`} />
-                </>
-              ) : (
-                <Alert
-                  type={resApi.error ? 'error' : 'warning'}
-                  showIcon
-                  style={{ marginBottom: 12 }}
-                  message="读不到集群用量"
-                  description={
-                    resApi.error
-                      ? resApi.error.message
-                      : '集群未提供 metrics 指标（需安装 metrics-server），或当前凭据无权读取该接口。'
-                  }
-                />
-              )}
-              <Divider style={{ margin: '4px 0 12px' }} />
-              <Row gutter={12}>
-                <Col span={12}>
-                  <Statistic
-                    label={res ? '节点数（集群实时）' : '节点数（上次同步）'}
-                    value={res?.nodes ?? env.nodes}
-                  />
-                </Col>
-                <Col span={12}>
-                  <Statistic label="服务数" value={services.length} />
-                </Col>
-              </Row>
-            </SectionCard>
-
-            <SectionCard title="最近部署动态" bodyStyle={{ padding: '8px 8px 12px' }}>
-              {envDeploys.slice(0, 6).map((d) => (
-                <div key={d.id} style={{ padding: '8px 12px', borderRadius: 6 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Space size={8}>
-                      <span style={{ fontSize: 13, fontWeight: 500 }}>{d.projectKey}</span>
-                      <DeployStatusTag status={d.status} showIcon={false} />
-                    </Space>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {(d.startedAt || '').slice(5, 16)}
-                    </Text>
-                  </div>
-                  <div
-                    className="yn-mono"
-                    style={{ fontSize: 11.5, color: '#9aa0aa', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                  >
-                    {d.image.split(':').pop()}
-                  </div>
+      {/* 右栏取消后，这两块挪到列表下方并排 —— 它们不该再占主内容的位置。 */}
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} xl={12}>
+          <SectionCard title="最近部署动态" bodyStyle={{ padding: '8px 8px 12px' }}>
+            {envDeploys.slice(0, 6).map((d) => (
+              <div key={d.id} style={{ padding: '8px 12px', borderRadius: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Space size={8}>
+                    <span style={{ fontSize: 13, fontWeight: 500 }}>{d.projectKey}</span>
+                    <DeployStatusTag status={d.status} showIcon={false} />
+                  </Space>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {(d.startedAt || '').slice(5, 16)}
+                  </Text>
                 </div>
-              ))}
-              {!envDeploys.length ? (
-                <div style={{ padding: '16px 12px', color: '#9aa0aa', fontSize: 13 }}>该环境还没有部署记录</div>
-              ) : null}
-            </SectionCard>
+                <div
+                  className="yn-mono"
+                  style={{ fontSize: 11.5, color: '#9aa0aa', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                >
+                  {d.image.split(':').pop()}
+                </div>
+              </div>
+            ))}
+            {!envDeploys.length ? (
+              <div style={{ padding: '16px 12px', color: '#9aa0aa', fontSize: 13 }}>该环境还没有部署记录</div>
+            ) : null}
+          </SectionCard>
 
-            <SectionCard title="待处理" bodyStyle={{ padding: '8px 8px 12px' }}>
-              {abnormal.length ? (
-                abnormal.map((s) => (
-                  <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px' }}>
-                    <div>
-                      <div style={{ fontSize: 13 }}>{s.projectKey}</div>
-                      <div style={{ fontSize: 12, color: '#9aa0aa' }}>
-                        {/* 就绪数同样只认集群实况：拿平台库的 2/2 去报一个正在掉副本的服务，
-                            比不显示更糟。分母用实例总数（见 liveReplicaTotal）——
-                            滚动卡住时多出来的那个崩溃实例必须在数字里看得见。 */}
-                        {liveState(s)
-                          ? `${liveState(s)!.readyReplicas}/${liveReplicaTotal(liveState(s)!)} 副本就绪`
-                          : liveFallbackText(s)}
-                      </div>
+        </Col>
+        <Col xs={24} xl={12}>
+          <SectionCard title="待处理" bodyStyle={{ padding: '8px 8px 12px' }}>
+            {abnormal.length ? (
+              abnormal.map((s) => (
+                <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px' }}>
+                  <div>
+                    <div style={{ fontSize: 13 }}>{s.projectKey}</div>
+                    <div style={{ fontSize: 12, color: '#9aa0aa' }}>
+                      {/* 就绪数同样只认集群实况：拿平台库的 2/2 去报一个正在掉副本的服务，
+                          比不显示更糟。分母用实例总数（见 liveReplicaTotal）——
+                          滚动卡住时多出来的那个崩溃实例必须在数字里看得见。 */}
+                      {liveState(s)
+                        ? `${liveState(s)!.readyReplicas}/${liveReplicaTotal(liveState(s)!)} 副本就绪`
+                        : liveFallbackText(s)}
                     </div>
-                    <Space size={2}>
-                      <Button size="small" type="link" onClick={() => openLogs(s)} style={{ paddingInline: 4 }}>
-                        日志
-                      </Button>
-                      {/* 后端两把锁：路由 rollback:execute + handler deploy:{env}（见 canRollbackOn）。
-                          权限点表里没有 rollback:{env} 这种形态，不能照 canRollback 反向编一个。 */}
-                      <DisabledTip title={canRollback ? undefined : `需要 rollback:execute 与 deploy:${key} 权限`}>
-                        <Button size="small" type="link" danger disabled={!canRollback} onClick={() => openRollback(s)} style={{ paddingInline: 4 }}>
-                          回滚
-                        </Button>
-                      </DisabledTip>
-                    </Space>
                   </div>
-                ))
-              ) : (
-                <div style={{ padding: '16px 12px', color: '#9aa0aa', fontSize: 13 }}>
-                  暂无待处理事项
-                  {liveUnknownCount ? `（${liveUnknownCount} 个服务的集群状态读取不到，未纳入判断）` : ''}
+                  <Space size={2}>
+                    <Button size="small" type="link" onClick={() => openLogs(s)} style={{ paddingInline: 4 }}>
+                      日志
+                    </Button>
+                    {/* 后端两把锁：路由 rollback:execute + handler deploy:{env}（见 canRollbackOn）。
+                        权限点表里没有 rollback:{env} 这种形态，不能照 canRollback 反向编一个。 */}
+                    <DisabledTip title={canRollback ? undefined : `需要 rollback:execute 与 deploy:${key} 权限`}>
+                      <Button size="small" type="link" danger disabled={!canRollback} onClick={() => openRollback(s)} style={{ paddingInline: 4 }}>
+                        回滚
+                      </Button>
+                    </DisabledTip>
+                  </Space>
                 </div>
-              )}
-            </SectionCard>
-          </Space>
+              ))
+            ) : (
+              <div style={{ padding: '16px 12px', color: '#9aa0aa', fontSize: 13 }}>
+                暂无待处理事项
+                {liveUnknownCount ? `（${liveUnknownCount} 个服务的集群状态读取不到，未纳入判断）` : ''}
+              </div>
+            )}
+          </SectionCard>
         </Col>
       </Row>
 

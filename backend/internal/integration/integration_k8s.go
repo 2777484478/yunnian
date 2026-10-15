@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -525,7 +526,10 @@ func classifyK8sErrText(err error) string {
 // usagePair 一份用量（CPU 核 / 内存字节）。
 type usagePair struct{ cpu, mem float64 }
 
-// podUsage 读命名空间下所有 Pod 的实时用量。
+// podUsageEntry 一个 Pod 的实时用量（**数值**，未格式化）。
+type podUsageEntry struct{ cpuMilli, memBytes int64 }
+
+// podUsageRaw 读命名空间下所有 Pod 的实时用量。
 //
 // ⚠️ Pod 级与节点级的 JSON 形状**不同**：节点级的用量在顶层 `usage`，
 // Pod 级在 `containers[].usage` 里（实测：v1.22 集群返回 `{"containers":[{"name":"master","usage":{...}}]}`）。
@@ -533,15 +537,19 @@ type usagePair struct{ cpu, mem float64 }
 // 很容易被误判成"这个集群没装 metrics-server"——其实装了，是解析写错了。
 //
 // metrics.k8s.io 是 aggregated API，走 discovery 的 RESTClient 直读，
-// 这样不必为它再构造一个 clientset。**整体失败时返回空 map**：
-// 没装 metrics-server 是很常见的情况，不能让"看不了用量"升级成"看不了 Pod 列表"。
-func (k *K8sCluster) podUsage(ctx context.Context, cs kubernetes.Interface, namespace string) map[string]struct{ cpu, mem string } {
-	out := map[string]struct{ cpu, mem string }{}
+// 这样不必为它再构造一个 clientset。
+//
+// 第二个返回值是**这次查询本身成不成功**，与"有没有 Pod"无关：
+// 装了 metrics-server 而命名空间下没有 Pod → `(空 map, true)`；
+// 没装 / 凭据无权读 → `(空 map, false)`。上层必须靠它区分
+// "用量是 0" 与 "读不到用量"——这两个结论对用户正好相反。
+func (k *K8sCluster) podUsageRaw(ctx context.Context, cs kubernetes.Interface, namespace string) (map[string]podUsageEntry, bool) {
+	out := map[string]podUsageEntry{}
 	raw, err := cs.Discovery().RESTClient().Get().
 		AbsPath("/apis/metrics.k8s.io/v1beta1/namespaces/" + namespace + "/pods").
 		DoRaw(ctx)
 	if err != nil {
-		return out
+		return out, false
 	}
 	var parsed struct {
 		Items []struct {
@@ -554,7 +562,7 @@ func (k *K8sCluster) podUsage(ctx context.Context, cs kubernetes.Interface, name
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return out
+		return out, false
 	}
 	for _, it := range parsed.Items {
 		if it.Metadata.Name == "" {
@@ -571,10 +579,121 @@ func (k *K8sCluster) podUsage(ctx context.Context, cs kubernetes.Interface, name
 				memBytes += q.Value()
 			}
 		}
-		out[it.Metadata.Name] = struct{ cpu, mem string }{
-			cpu: formatCPUMilli(cpuMilli),
-			mem: formatMemBytes(memBytes),
+		out[it.Metadata.Name] = podUsageEntry{cpuMilli: cpuMilli, memBytes: memBytes}
+	}
+	return out, true
+}
+
+// podUsage 读命名空间下所有 Pod 的实时用量（**显示形式**，供 Pod 明细逐条查）。
+//
+// 整体失败时返回空 map：没装 metrics-server 是很常见的情况，
+// 不能让"看不了用量"升级成"看不了 Pod 列表"。需要区分
+// "读不到"与"没有 Pod"的地方请直接用 podUsageRaw 的第二个返回值。
+func (k *K8sCluster) podUsage(ctx context.Context, cs kubernetes.Interface, namespace string) map[string]struct{ cpu, mem string } {
+	raw, _ := k.podUsageRaw(ctx, cs, namespace)
+	out := make(map[string]struct{ cpu, mem string }, len(raw))
+	for name, e := range raw {
+		out[name] = struct{ cpu, mem string }{
+			cpu: formatCPUMilli(e.cpuMilli),
+			mem: formatMemBytes(e.memBytes),
 		}
+	}
+	return out
+}
+
+// WorkloadUsages 取**点名的**那几个工作负载的实时用量（一次覆盖整个命名空间）。
+//
+// ⚠️ 这里对命名空间做了 List（Deployments / Pods），但**用法必须守住**：
+// List 的结果**只用于查表**（按 workloads 取 selector、按 selector 把 Pod 归位），
+// 绝不拿 List 到的名字去"发现服务"——环境 default 里躺着几十个与本平台无关的
+// Deployment，一旦把它们当服务就是误报（见本文件开头的铁律 1）。
+// 签名特意要 `workloads` 入参、返回值也**只含点名的那些**，就是为了让这条无法被误用。
+//
+// 为什么必须是批量：环境详情页一次要列 6~20 个服务，逐个查就是 N 倍请求；
+// 而这里要的三份数据（Deployment 的 selector、Pod 的标签、Pod 的用量）
+// **整个命名空间各只需一次**。
+//
+// 归位靠 selector 匹配 Pod 标签，**不靠 Pod 名字猜**：`<deploy>-<rs>-<hash>` 这种拼法
+// 看着能猜，但 StatefulSet、自定义控制器、手工建的 Pod 都不遵守 ——
+// 猜错的结果是把别人的用量算到你头上，而且不会报任何错。
+//
+// 读不到用量时每项 `Available=false`（不是 error）：没装 metrics-server 是常见情况，
+// 不该让"看不了用量"升级成"服务列表打不开"。
+func (k *K8sCluster) WorkloadUsages(ctx context.Context, ref ClusterRef, namespace string, workloads []string) (map[string]WorkloadUsage, error) {
+	out := map[string]WorkloadUsage{}
+	if strings.TrimSpace(namespace) == "" {
+		return out, nil
+	}
+	want := make(map[string]struct{}, len(workloads))
+	for _, w := range workloads {
+		if w = strings.TrimSpace(w); w != "" {
+			want[w] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return out, nil
+	}
+
+	cs, _, err := k.clientset(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	deps, err := cs.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("读取命名空间 %s 的工作负载失败：%w", namespace, err)
+	}
+	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("读取命名空间 %s 的 Pod 失败：%w", namespace, err)
+	}
+	usage, metricsOK := k.podUsageRaw(ctx, cs, namespace)
+
+	return aggregateUsage(deps.Items, pods.Items, usage, want, metricsOK), nil
+}
+
+// aggregateUsage 把「命名空间的工作负载列表 / Pod 列表 + 用量表」归并成
+// 每个工作负载的合计用量。
+//
+// 抽成纯函数是为了**能测**：这段逻辑的正确性全在「归属」上，
+// 而归属错了不会报任何错 —— 只会让两个数字看起来都合理
+// （A 的用量记到 B 头上，两边都不像有问题）。
+func aggregateUsage(
+	deps []appsv1.Deployment,
+	pods []corev1.Pod,
+	usage map[string]podUsageEntry,
+	want map[string]struct{},
+	metricsOK bool,
+) map[string]WorkloadUsage {
+	out := make(map[string]WorkloadUsage, len(want))
+	for i := range deps {
+		d := &deps[i]
+		// 白名单：只处理点名的工作负载。这是"List 只用于查表、不用于发现服务"
+		// 那一条在代码里的落点 —— 命名空间里几十个与本平台无关的对象全部落在这。
+		if _, ok := want[d.Name]; !ok {
+			continue
+		}
+		u := WorkloadUsage{Available: metricsOK}
+		// selector 为空的畸形对象：Pods 保持 0，界面显示"无 Pod"。
+		// **不退回"按名字前缀匹配"去凑一个数** —— 那正是上面说的"看不出错的错"。
+		if d.Spec.Selector != nil {
+			if sel, err := metav1.LabelSelectorAsSelector(d.Spec.Selector); err == nil {
+				for j := range pods {
+					p := &pods[j]
+					if !sel.Matches(labels.Set(p.Labels)) {
+						continue
+					}
+					u.Pods++
+					if e, ok := usage[p.Name]; ok {
+						u.UsagePods++
+						u.CPUMilli += e.cpuMilli
+						u.MemBytes += e.memBytes
+					}
+				}
+			}
+		}
+		u.CPU = formatCPUMilli(u.CPUMilli)
+		u.Mem = formatMemBytes(u.MemBytes)
+		out[d.Name] = u
 	}
 	return out
 }

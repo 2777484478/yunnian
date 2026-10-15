@@ -149,6 +149,34 @@ type WorkloadState struct {
 	Message string `json:"message"`
 }
 
+// WorkloadUsage 一个工作负载在集群里的**实时资源用量**（聚合它名下的所有 Pod）。
+//
+// ⚠️ 与 WorkloadState 里的 CPURequest / CPULimit 是**两回事**：那些是容器**声明的规格**，
+// 这里是容器**实际用掉的量**。判断"要不要扩容、离被限流/OOM 还有多远"看的是这一份。
+// 平台历史上把声明值当用量展示过（`health.liveness/readiness` 是同一类假信息），
+// 所以两者在界面上必须分列，且各自标明含义。
+type WorkloadUsage struct {
+	// Pods 匹配到该工作负载的 Pod 总数。
+	Pods int `json:"pods"`
+	// UsagePods 其中**真的有用量数据**的 Pod 数。
+	//
+	// 刚拉起来的 Pod 在 metrics-server 里通常要等几十秒才有数据，所以
+	// UsagePods < Pods 是常态。这时下面的合计是**偏小**的 —— 界面必须把
+	// "几个 Pod 里有几个算进去了"讲出来，否则它就是一个静默偏小的数字。
+	UsagePods int `json:"usagePods"`
+	// CPUMilli / MemBytes 合计用量（只累加有数据的 Pod）。
+	CPUMilli int64 `json:"cpuMilli"`
+	MemBytes int64 `json:"memBytes"`
+	// CPU / Mem 合计用量的显示形式（CPU 用毫核、内存用 Mi/Gi，与 kubectl 显示口径一致）。
+	CPU string `json:"cpu"`
+	Mem string `json:"mem"`
+	// Available 这次查询**本身**是否成功（集群装了 metrics-server 且凭据读得动）。
+	//
+	// false 时上面的数值恒为 0 —— 那是"没读到"，不是"用量为 0"，界面显示 "—"。
+	// 与 ClusterState.MetricsAvailable 同一口径。
+	Available bool `json:"available"`
+}
+
 // ApplyRequest 一次镜像更新请求。
 type ApplyRequest struct {
 	WorkloadRef
@@ -262,6 +290,19 @@ type Cluster interface {
 	Restart(ctx context.Context, ref WorkloadRef) error
 	// Pods 列出工作负载下的 Pod。
 	Pods(ctx context.Context, ref WorkloadRef) ([]PodInfo, error)
+	// WorkloadUsages 取**点名的**那几个工作负载的实时用量（一次覆盖整个命名空间）。
+	//
+	// 之所以做成"批量"接口：环境详情页一次要列 6~20 个服务，逐个 Describe 已经各是一次
+	// 下游请求；若再在每个 Describe 里各查一次整 namespace 的指标，就是 N 倍的重复请求。
+	// 这里整个命名空间**各只需一次**（Deployment 列表 + Pod 列表 + 用量）。
+	//
+	// `workloads` 是**点名的白名单**，返回值也只含这些：实现内部要对命名空间做 List，
+	// 但绝不拿 List 到的名字去"发现服务"（环境里有几十个与本平台无关的工作负载）。
+	//
+	// key 是工作负载名，value 是它的合计用量。读不到用量时返回的每项 Available=false
+	// （而不是 error）——"集群没装 metrics-server"是常见情况，不该让"看不了用量"
+	// 升级成"服务列表打不开"。
+	WorkloadUsages(ctx context.Context, ref ClusterRef, namespace string, workloads []string) (map[string]WorkloadUsage, error)
 	// PodLogs 读取某个 Pod 的日志（tail 最近 n 行），返回的流由调用方关闭。
 	PodLogs(ctx context.Context, ref WorkloadRef, pod string, tailLines int) (io.ReadCloser, error)
 	// DiagnoseFailure 采集"这个工作负载为什么没起来"的证据（只读）。

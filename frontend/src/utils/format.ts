@@ -66,6 +66,25 @@ export function humanSize(bytes: number | null | undefined): string {
   return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)}${units[i]}`;
 }
 
+/**
+ * 字节 → GiB（集群容量口径）。
+ *
+ * 与 humanSize 的区别是**固定 GiB**：集群可分配内存是 15.6Gi 这种量级，
+ * 自动选单位会一会儿 GB 一会儿 TB，而 K8s 侧（metrics、kubectl）一律说 Gi，
+ * 两边对不上用户会当成两个不同的值。
+ */
+export function gib(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return '-';
+  return `${(bytes / (1 << 30)).toFixed(1)}Gi`;
+}
+
+/** 核数保留一位小数（8 核显示 "8"、1.25 核显示 "1.3"）。 */
+export function cores(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '-';
+  const r = Math.round(n * 10) / 10;
+  return Number.isInteger(r) ? String(r) : r.toFixed(1);
+}
+
 /** 由镜像完整地址推导 tag：`harbor.x/a/b:master-abc-20260923` → `master-abc-20260923` */
 export function tagOf(image: string): string {
   const i = image.lastIndexOf(':');

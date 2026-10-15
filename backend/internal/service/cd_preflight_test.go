@@ -42,6 +42,12 @@ func (c *stubCluster) Describe(context.Context, integration.WorkloadRef) (*integ
 	return &integration.WorkloadState{}, nil
 }
 
+// WorkloadUsages 返回空（不是 nil error 之外的东西）：预检与诊断都不看用量。
+// 返回空 map 而非报错，与真实实现的"读不到用量不算故障"同一口径。
+func (c *stubCluster) WorkloadUsages(context.Context, integration.ClusterRef, string, []string) (map[string]integration.WorkloadUsage, error) {
+	return map[string]integration.WorkloadUsage{}, nil
+}
+
 func (c *stubCluster) ApplyImage(context.Context, integration.ApplyRequest, func(string, uint8) error) error {
 	return nil
 }

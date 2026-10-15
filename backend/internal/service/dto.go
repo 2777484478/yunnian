@@ -2,7 +2,10 @@ package service
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/2777484478/yunnian/internal/httpx"
 	"github.com/2777484478/yunnian/internal/integration"
@@ -379,29 +382,74 @@ type ServiceLiveDTO struct {
 	ReadyReplicas  int    `json:"readyReplicas"`
 	Status         string `json:"status"`
 	Revision       int    `json:"revision"`
-	// 容器声明的资源规格（不是使用量）。空串表示容器没写，界面显示 "—"。
+	// 容器声明的资源规格（**不是使用量**）。空串表示容器没写，界面显示 "—"。
+	// 使用量看下面那组 —— 两者必须分列展示，把声明值当用量看就是编数据。
 	CPURequest string `json:"cpuRequest"`
 	CPULimit   string `json:"cpuLimit"`
 	MemRequest string `json:"memRequest"`
 	MemLimit   string `json:"memLimit"`
-	Message    string `json:"message"`
+
+	// ---------------------------------------------------------------- 实时用量
+	//
+	// MetricsAvailable=false 表示**没读到**用量：集群没装 metrics-server，
+	// 或凭据无权读。此时 CPUUsage/MemUsage 为空串、两个百分比为 -1，界面显示 "—"。
+	// **绝不能显示成 0** —— 那会被读成"这个服务几乎不占资源"，与事实正好相反。
+	MetricsAvailable bool `json:"metricsAvailable"`
+	// CPUUsage / MemUsage 该工作负载名下所有 Pod 的**合计**用量（CPU 毫核、内存 Mi/Gi）。
+	CPUUsage string `json:"cpuUsage"`
+	MemUsage string `json:"memUsage"`
+	// CPUUsagePercent / MemUsagePercent 合计用量占**基准**的百分比（可能 >100）。
+	//
+	// -1 表示**算不出来**（limit 与 request 都没有，或都解析不了）。
+	// 界面据此**不画进度条** —— 画一根 0% 的条会被读成"几乎没用"。
+	CPUUsagePercent int `json:"cpuUsagePercent"`
+	MemUsagePercent int `json:"memUsagePercent"`
+	// CPUUsageBase / MemUsageBase 上面那个百分比**按什么算的**："limit" / "request" / ""。
+	//
+	// 必须跟着百分比一起回给前端，因为两者含义完全不同：
+	//   limit   —— 超了会被限流 / OOM Kill，是"危险线"；
+	//   request —— 只是调度申请量，**超了是常态**，不代表有问题。
+	// 混成一句"占用率"会让人对着一个 400% 的数字去排查不存在的问题。
+	//
+	// 取值规则：优先 limit；没有 limit 退回 request（实测集群里这批容器
+	// **只配了 requests 没配 limits**，只认 limit 的话这一列会全是 "—"）；
+	// 两者都没有才是 ""，此时百分比为 -1。
+	CPUUsageBase string `json:"cpuUsageBase"`
+	MemUsageBase string `json:"memUsageBase"`
+	// UsagePods 真的有用量数据的 Pod 数；UsagePodTotal 匹配到的 Pod 总数。
+	//
+	// 刚拉起来的 Pod 在 metrics-server 里要等几十秒才有数据，所以
+	// UsagePods < UsagePodTotal 是常态 —— 这时上面的合计是**偏小**的，
+	// 界面必须把"几个 Pod 里有几个算进去了"讲出来，否则它是个静默偏小的数字。
+	UsagePods     int    `json:"usagePods"`
+	UsagePodTotal int    `json:"usagePodTotal"`
+	Message       string `json:"message"`
 }
 
 // liveOf 把集群读到的结果转成 DTO。
 //
 // err != nil 表示**没读到**，绝不能落进"不存在"那一支：
 // 前者要说"为什么读不到"，后者要说"集群里确实没有"。
-func liveOf(state *integration.WorkloadState, err error) *ServiceLiveDTO {
+//
+// usage 是**该工作负载的实时用量**（见 integration.WorkloadUsage）。它由调用方
+// 批量取来后按名字取出（列表页一次覆盖整个命名空间；详情页点名单个），
+// 不在这里自己去查 —— 这个函数是纯转换，不该有下游调用。
+func liveOf(state *integration.WorkloadState, usage integration.WorkloadUsage, err error) *ServiceLiveDTO {
 	if err != nil {
-		return &ServiceLiveDTO{Available: false, Message: err.Error()}
+		return &ServiceLiveDTO{Available: false, Message: err.Error(), CPUUsagePercent: -1, MemUsagePercent: -1}
 	}
 	if state == nil {
-		return &ServiceLiveDTO{Available: false, Message: "未取得集群状态"}
+		return &ServiceLiveDTO{Available: false, Message: "未取得集群状态", CPUUsagePercent: -1, MemUsagePercent: -1}
 	}
 	if !state.Exists {
-		return &ServiceLiveDTO{Available: true, Exists: false, Message: stringOr(state.Message, "集群中不存在该工作负载")}
+		// 集群里没有这个工作负载 —— 谈用量没有意义，留 -1 让界面显示 "—"。
+		return &ServiceLiveDTO{
+			Available: true, Exists: false,
+			Message:         stringOr(state.Message, "集群中不存在该工作负载"),
+			CPUUsagePercent: -1, MemUsagePercent: -1,
+		}
 	}
-	return &ServiceLiveDTO{
+	dto := &ServiceLiveDTO{
 		Available: true, Exists: true,
 		Image: state.Image, Tag: state.Tag,
 		Replicas: state.Replicas, ReadyReplicas: state.ReadyReplicas,
@@ -411,6 +459,85 @@ func liveOf(state *integration.WorkloadState, err error) *ServiceLiveDTO {
 		MemRequest: state.MemRequest, MemLimit: state.MemLimit,
 		Message: state.Message,
 	}
+	applyUsage(dto, usage, state.CPURequest, state.CPULimit, state.MemRequest, state.MemLimit)
+	return dto
+}
+
+// applyUsage 把集群读到的用量填进 DTO，并算出占 limit 的百分比。
+//
+// 用量与百分比**必须一起定**，不能各写各的：百分比要有"基准"，基准就是容器声明的 limit。
+func applyUsage(d *ServiceLiveDTO, u integration.WorkloadUsage, cpuReq, cpuLimit, memReq, memLimit string) {
+	if !u.Available {
+		// 没读到：留空 + -1，界面显示 "—"。**不填 0**。
+		d.CPUUsagePercent, d.MemUsagePercent = -1, -1
+		return
+	}
+	d.MetricsAvailable = true
+	d.CPUUsage, d.MemUsage = u.CPU, u.Mem
+	d.UsagePods, d.UsagePodTotal = u.UsagePods, u.Pods
+	d.CPUUsageBase, d.CPUUsagePercent = usageRatioCPU(u.CPUMilli, cpuLimit, cpuReq)
+	d.MemUsageBase, d.MemUsagePercent = usageRatioMem(u.MemBytes, memLimit, memReq)
+}
+
+// usageRatioCPU 选一个可用基准算 CPU 占用率，并**回报用的是哪个基准**。
+//
+// 优先 limit、退回 request：实测这台集群里纳管的容器**只配了 requests 没配 limits**
+// （`{"requests":{"cpu":"10m","memory":"10Mi"}}`），只认 limit 的话百分比永远算不出来，
+// 这一列就废了。但两者不是一回事（超 request 只是调度层面的事，超 limit 才会被限流），
+// 所以基准必须跟着数字一起回给界面，由界面写明，不能合成一句"占用率"。
+func usageRatioCPU(usedMilli int64, limit, request string) (string, int) {
+	if b := cpuQuantityMilli(limit); b > 0 {
+		return "limit", percentOf(usedMilli, b)
+	}
+	if b := cpuQuantityMilli(request); b > 0 {
+		return "request", percentOf(usedMilli, b)
+	}
+	return "", -1
+}
+
+// usageRatioMem 同 usageRatioCPU，内存版（单位是字节）。
+func usageRatioMem(usedBytes int64, limit, request string) (string, int) {
+	if b := memQuantityBytes(limit); b > 0 {
+		return "limit", percentOf(usedBytes, b)
+	}
+	if b := memQuantityBytes(request); b > 0 {
+		return "request", percentOf(usedBytes, b)
+	}
+	return "", -1
+}
+
+// percentOf 算 used 占 base 的百分比（四舍五入，可能 >100）。
+//
+// base <= 0 时返回 **-1**，不是 0：它表示"没有可比的上限"（容器没配 limit 的话，
+// 集群根本不会限制它，谈占用率没有意义），界面据此不画进度条。
+// 给 0 会被画成一根空条，读起来是"几乎没用"，与事实不符。
+func percentOf(used, base int64) int {
+	if base <= 0 {
+		return -1
+	}
+	return int(math.Round(float64(used) / float64(base) * 100))
+}
+
+// cpuQuantityMilli 把资源声明文本（如 "1"、"500m"）解析成毫核；解析不了返回 0。
+//
+// ⚠️ CPU 与内存的解析**必须分开**：`ParseQuantity("1").MilliValue()` = 1000（1 核 = 1000 毫核），
+// 而 `ParseQuantity("1Gi").Value()` = 1073741824（字节）。用错一侧就是差 1000 倍，
+// 而且不会报错 —— 只会给出一个看起来很正常的百分比。
+func cpuQuantityMilli(q string) int64 {
+	v, err := resource.ParseQuantity(strings.TrimSpace(q))
+	if err != nil {
+		return 0
+	}
+	return v.MilliValue()
+}
+
+// memQuantityBytes 把资源声明文本（如 "1Gi"、"512Mi"）解析成字节；解析不了返回 0。
+func memQuantityBytes(q string) int64 {
+	v, err := resource.ParseQuantity(strings.TrimSpace(q))
+	if err != nil {
+		return 0
+	}
+	return v.Value()
 }
 
 // envToDTO 组装环境。projectKeys / vars 由调用方预取（避免 N+1）。

@@ -48,6 +48,14 @@ export interface EnvResources {
    * 界面据此分叉：读不到就别画进度条，更不要回退到环境快照里那个旧值。
    */
   metricsAvailable?: boolean;
+  /**
+   * 集群可分配的 CPU 核数 / 内存字节数（各节点 allocatable 之和）。
+   *
+   * 用 allocatable 而不是 capacity：后者含系统预留，拿它算百分比会系统性偏低、
+   * 看着"很闲"其实已经吃满。配合 cpuUsage / memUsage（百分比）能换算出已用绝对值。
+   */
+  cpuCores?: number;
+  memBytes?: number;
 }
 
 /** 部署单 AI 诊断（GET /deployments/{id}/ai-diagnosis） */

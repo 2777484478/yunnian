@@ -362,11 +362,40 @@ export interface ServiceLive {
   readyReplicas: number;
   status: string;
   revision: number;
-  /** 容器声明的资源规格（不是使用量）。空串表示容器没写，界面显示 "—"。 */
+  /** 容器声明的资源规格（**不是使用量**）。空串表示容器没写，界面显示 "—"。 */
   cpuRequest: string;
   cpuLimit: string;
   memRequest: string;
   memLimit: string;
+
+  // ---------------------------------------------------------------- 实时用量
+  /**
+   * 是否读到了用量（集群装了 metrics-server 且凭据可读）。
+   *
+   * false 时下面的用量字段是空的、百分比是 -1 —— 界面显示 "—"，
+   * **不能当 0**：那会被读成"这个服务几乎不占资源"，与事实正好相反。
+   */
+  metricsAvailable?: boolean;
+  /** 该服务名下所有 Pod 的**合计**用量（CPU 毫核口径、内存 Mi/Gi） */
+  cpuUsage?: string;
+  memUsage?: string;
+  /**
+   * 合计用量占**基准**的百分比（可能 >100）。-1 表示算不出来（没有基准），
+   * 此时不画进度条 —— 画一根 0% 的条会被读成"几乎没用"。
+   */
+  cpuUsagePercent?: number;
+  memUsagePercent?: number;
+  /**
+   * 上面百分比按什么算的：`limit` / `request` / `''`。
+   *
+   * 两者含义**完全不同**：超 limit 会被限流/OOM Kill，超 request 只是调度层面的事、
+   * 很常见。所以基准必须跟着数字一起显示，不能合成一句"占用率"。
+   */
+  cpuUsageBase?: 'limit' | 'request' | '';
+  memUsageBase?: 'limit' | 'request' | '';
+  /** 真的有用量数据的 Pod 数 / 匹配到的 Pod 总数（刚起的 Pod 要等几十秒才有数据） */
+  usagePods?: number;
+  usagePodTotal?: number;
   message: string;
 }
 

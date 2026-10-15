@@ -166,6 +166,14 @@ func (l *LocalCluster) Describe(context.Context, WorkloadRef) (*WorkloadState, e
 	return nil, errors.New(localClusterHint)
 }
 
+// WorkloadUsages 同 Describe：本地实现没有集群可读，明确拒绝。
+//
+// ⚠️ 这里**不能返回空 map + nil**：那会被上层读成"这些服务都不占资源"，
+// 而事实是"根本读不到"。用量这种数字宁可显示不出来，也不能给个 0。
+func (l *LocalCluster) WorkloadUsages(context.Context, ClusterRef, string, []string) (map[string]WorkloadUsage, error) {
+	return nil, errors.New(localClusterHint)
+}
+
 // ApplyImage 明确拒绝，不假装成功。
 func (l *LocalCluster) ApplyImage(context.Context, ApplyRequest, func(string, uint8) error) error {
 	return errors.New(localClusterHint)

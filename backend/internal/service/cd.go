@@ -816,6 +816,23 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 
+	// 用量**先批量取一次**：整个命名空间的 Deployment / Pod / 指标各查一遍，
+	// 然后在下面的并发循环里按名字取用。绝不能改成在循环里各查一次 ——
+	// 那会变成 N 倍的下游请求，而这几个列表本来就是整个命名空间一份。
+	//
+	// 取不到就当没有（每项 Available=false，界面显示 "—"），不让它把"状态"一起拖坏：
+	// 负载列看不到是遗憾，状态看不到是故障。
+	names := make([]string, 0, len(svcs))
+	for i := range svcs {
+		if w := strings.TrimSpace(svcs[i].WorkloadName); w != "" {
+			names = append(names, w)
+		}
+	}
+	usages, uerr := s.deps.Up.Cluster.WorkloadUsages(ctx, clusterRefOf(env), env.Namespace, names)
+	if uerr != nil {
+		s.log("cd").Warn("读取服务实时用量失败，负载列将显示为 —", "env", env.EnvKey, "err", uerr)
+	}
+
 	var (
 		mu  sync.Mutex
 		wg  sync.WaitGroup
@@ -828,7 +845,7 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			state, err := s.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, svc.WorkloadName))
-			dto := liveOf(state, err)
+			dto := liveOf(state, usages[svc.WorkloadName], err)
 			mu.Lock()
 			out[svc.ID] = dto
 			mu.Unlock()
@@ -1047,7 +1064,16 @@ func (s *CDService) GetService(ctx context.Context, id uint64) (*EnvServiceDTO, 
 		return nil, err
 	}
 	state, derr := s.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, svc.WorkloadName))
-	dto := serviceToDTO(svc, projs[svc.ProjectKey], updaterNames[derefUint64(svc.UpdatedBy)], pods, history, liveOf(state, derr))
+	// 详情页也带上实时用量：点名单个调**同一个**批量方法，而不是从上面那份
+	// pods 列表的字符串里再解析回来 —— 口径只有一份，不会出现
+	// "列表页和详情页把同一个服务算成两个数"。
+	var usage integration.WorkloadUsage
+	if us, uerr := s.deps.Up.Cluster.WorkloadUsages(ctx, clusterRefOf(env), env.Namespace, []string{svc.WorkloadName}); uerr != nil {
+		s.log("cd").Warn("读取服务实时用量失败，负载列将显示为 —", "serviceId", id, "err", uerr)
+	} else {
+		usage = us[svc.WorkloadName]
+	}
+	dto := serviceToDTO(svc, projs[svc.ProjectKey], updaterNames[derefUint64(svc.UpdatedBy)], pods, history, liveOf(state, usage, derr))
 	return &dto, nil
 }
 
