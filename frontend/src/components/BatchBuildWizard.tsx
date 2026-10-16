@@ -35,6 +35,7 @@ import { useNavigate } from 'react-router-dom';
 // （那套串行编排是"关页面后只构建一个"的根因，见 submit 的注释）。
 import type { BatchResult } from './BatchRunner';
 import { KVFields } from './KVFields';
+import { PickedStrip } from './PickedStrip';
 import { BuildStatusTag, MethodTag, ProjectTypeTag } from './StatusTag';
 import { ApiError, buildApi, isGitParam, jenkinsApi, projectApi } from '@/api';
 import type { BuildStatus, Project } from '@/types';
@@ -1184,6 +1185,13 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
               </Text>
             </Space>
           </div>
+
+          {/* 已勾选的灰色清单 —— 搜索时看不到全部已选，这里随时能核对；
+              点一下可直接移出，不用回去搜索定位再取消勾选。 */}
+          <PickedStrip
+            items={selected.map((p) => ({ key: p.key, name: p.name }))}
+            onRemove={(k) => toggle(k, false)}
+          />
         </div>
       ) : null}
 

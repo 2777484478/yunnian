@@ -34,6 +34,7 @@ import { useNavigate } from 'react-router-dom';
 import type { BatchResult } from './BatchRunner';
 import { DeployStatusTag, ProjectTypeTag, ServiceStatusTag } from './StatusTag';
 import { DisabledTip } from '@/components/DisabledTip';
+import { PickedStrip } from '@/components/PickedStrip';
 import { sortByStage, stageOf } from '@/config/topology';
 import { ApiError, deployApi, environmentApi, imageApi, registryApi, systemApi } from '@/api';
 import type { RegistryTags } from '@/api/registry';
@@ -1769,6 +1770,13 @@ const submitAtRef = useRef(Date.now());
               ) : null}
             </Space>
           </div>
+
+          {/* 已勾选的灰色清单 —— 列表带搜索时看不到全部已选，这里随时能核对；
+              点一下可直接移出（不必回去搜索定位再取消勾选）。 */}
+          <PickedStrip
+            items={picked.map((r) => ({ key: r.projectKey, name: r.projectName }))}
+            onRemove={(k) => setKeys((prev) => prev.filter((x) => x !== k))}
+          />
         </div>
       ) : null}
 

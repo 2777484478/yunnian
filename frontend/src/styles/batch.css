@@ -197,6 +197,55 @@
   overflow: hidden;
 }
 
+/* --------------------------------------------------------------------------- 已勾选清单（灰色回显）
+
+   列表带搜索时，"已选 N 个"只是个数字 —— 搜 A 的时候看不见上一轮搜 B 勾的那个。
+   这块把已选的原样列出来。用**虚线框 + 浅灰底**：它是回显，不是主体内容，
+   边框用虚线的意思是"这是一个清单，不是一块面板"。 */
+
+.yn-picked-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--yn-border-strong);
+  border-radius: 8px;
+  background: #fafbfd;
+  /* 勾几十个时不能把弹窗撑高 —— 限高滚动，底部那句话始终可见 */
+  max-height: 86px;
+  overflow-y: auto;
+}
+
+.yn-picked-strip__item {
+  display: inline-block;
+  max-width: 200px;
+  padding: 1px 8px;
+  border: 1px solid #e6e9ef;
+  border-radius: 4px;
+  background: #f2f4f7;
+  color: #8c8c95;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 可移除时给足反馈：hover 变色 + 手型。不给的话它"看起来不能点、其实能点"，
+   比不能点更糟 —— 用户会去搜索里找它、取消勾选，白绕一圈。 */
+.yn-picked-strip__item.is-removable {
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.yn-picked-strip__item.is-removable:hover {
+  color: #ff4d4f;
+  border-color: #ffccc7;
+  background: #fff1f0;
+}
+
 .yn-pick__table .ant-table-thead > tr > th {
   background: #f7f9fc;
 }
