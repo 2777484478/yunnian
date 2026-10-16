@@ -643,7 +643,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     {
       title: '项目',
       key: 'project',
-      width: 300,
+      width: 288,
       render: (_, p) => (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           <span style={{ display: 'inline-flex', flex: 'none' }}>
@@ -827,7 +827,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     {
       title: '项目',
       key: 'project',
-      width: 190,
+      width: 300,
       render: (_, r) => (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           <span style={{ display: 'inline-flex', flex: 'none' }}>
@@ -845,7 +845,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     {
       title: '构建分支',
       key: 'branch',
-      width: 186,
+      width: 250,
       // 每个项目一个下拉、**各选各的**。
       //
       // 原来这一列是只读的，渲染 `startPayloadRef.current.branch` —— 全局同一个值，
@@ -901,17 +901,13 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       // 只能凭记忆。
       title: '最近构建分支',
       key: 'lastBranch',
-      width: 148,
+      width: 224,
       render: (_, r) =>
         r.lastBuild?.branch ? (
           <Space size={6}>
-            {/* 分支名往往很长（`origin/Release_aiops_dcdp_1.42_2.10.0`），
-                窄列里必然被截断 —— tag 补全，别让用户对着省略号猜。 */}
+            {/* 列宽足够时就不用截断；仍留 tooltip 兜极长分支名。 */}
             <Tooltip title={r.lastBuild.branch}>
-              <span
-                className="yn-mono yn-ellipsis"
-                style={{ fontSize: 12.5, color: '#8c8c95', display: 'inline-block', maxWidth: 96 }}
-              >
+              <span className="yn-mono yn-ellipsis" style={{ fontSize: 12.5, color: '#8c8c95' }}>
                 {r.lastBuild.branch}
               </span>
             </Tooltip>
@@ -928,21 +924,17 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       title: '产物来源',
       key: 'tag',
       // 明确给宽度：不给的话它会分到剩余空间，列一多就被挤到**表头竖排**。
-      width: 150,
+      width: 210,
       // 两类项目的产物来源完全不同，必须分开写：
       // Jenkins 项目的镜像由 Job 自己构建推送，平台给的 tagPattern 对它没有意义。
       render: (_, r) =>
         r.buildMethod === 'jenkins' ? (
-          <Tooltip title="镜像的构建与推送由该 Jenkins Job 自己完成，平台只把版本参数传给它">
-            <span className="yn-mono yn-ellipsis" style={{ display: 'block', color: '#d46b08' }}>
-              {r.jenkinsJob || '（未绑定 Jenkins Job）'}
-            </span>
+          <Tooltip title={`镜像的构建与推送由该 Jenkins Job 自己完成，平台只把分支参数传给它\nJob：${r.jenkinsJob || '（未绑定）'}`}>
+            <span className="yn-src-badge yn-src-badge--jenkins">{r.jenkinsJob || '未绑定 Job'}</span>
           </Tooltip>
         ) : (
           <Tooltip title={`镜像地址：${r.registry}/${r.imageName}`}>
-            <span className="yn-mono yn-ellipsis" style={{ color: '#1677ff', display: 'block' }}>
-              {r.tagPattern}
-            </span>
+            <span className="yn-src-badge">{r.tagPattern}</span>
           </Tooltip>
         ),
     },
@@ -1131,100 +1123,46 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
             buildParams: [],
           }}
         >
-          <Row gutter={20}>
-            <Col span={5}>
+          <Row>
+            <Col span={24}>
+              {/* 这里只留**状态与处置**，不再放"说明性"的两块（并发由谁决定 / Tag 由谁生成）——
+                  那两块常驻在左边占掉近半宽度，而清单因此被挤到每列都截断。
+                  分支读不到时的指引必须留着：它是"该怎么办"，不是背景知识。 */}
               {branchLoading ? (
                 <Alert
                   type="info"
                   showIcon
-                  style={{ marginBottom: 12 }}
+                  style={{ marginBottom: 10 }}
                   message="正在读取各项目的分支…"
-                  description="每个项目会各自拉一次自己的分支列表。"
+                  description="每个项目各自拉一次自己的分支列表。"
                 />
               ) : unreadableProjects.length ? (
-                // 读不到**如实说**，并说明怎么办（可以直接在分支框里手打）。
-                // 静默留空会被读成"这些项目没有分支" —— 那是另一个结论。
                 <Alert
                   type="warning"
                   showIcon
-                  style={{ marginBottom: 12 }}
-                  message={`${unreadableProjects.length} 个项目的分支没读到`}
-                  description={
-                    <span style={{ fontSize: 12 }}>
-                      {unreadableProjects.join('、')}
-                      。候选里只有各自配置里的默认分支，可以**在右侧分支框里直接输入**要构建的分支名。
-                    </span>
-                  }
+                  style={{ marginBottom: 10 }}
+                  message={`${unreadableProjects.length} 个项目的分支没读到：${unreadableProjects.join('、')}`}
+                  description="候选里只有各自配置里的默认分支，可以直接在下方分支框里输入要构建的分支名。"
                 />
               ) : null}
 
-              {/* 「并发任务数」原来是前端编排用的（BatchRunner 按它领任务）。
-                  现在由平台构建池调度，前端不再编排 —— 留一个可调的下拉就成了假选项，
-                  所以换成一句如实说明。 */}
-              <Alert
-                type="info"
-                showIcon
-                style={{ marginBottom: 12 }}
-                message="并发由平台构建池决定"
-                description={
-                  <span style={{ fontSize: 12 }}>
-                    提交后所有构建单立即入队，由平台按构建池的并发上限自动调度、依次执行。
-                    这里的顺序不影响后端排队。
-                  </span>
-                }
-              />
-
-              <Form.Item label="镜像 Tag 由谁生成">
-                {selected.some((p) => p.buildMethod === 'jenkins') ? (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    message="本批含 Jenkins 项目：它们的镜像 Tag 由各自的 Job 决定"
-                    description={
-                      <span style={{ fontSize: 12 }}>
-                        平台只把所选版本传给 Job 的 git 参数，
-                        <b>不代为生成 tag、也不登记镜像版本</b>
-                        （Jenkins 侧推了什么 tag，平台读构建日志才知道）。
-                        {selected.some((p) => p.buildMethod !== 'jenkins')
-                          ? ' 平台构建的项目仍按各项目的 Tag 规则 + 提交号 + 时间戳生成。'
-                          : ''}
-                      </span>
-                    }
-                  />
-                ) : (
-                  <Alert
-                    type="info"
-                    showIcon
-                    message="镜像 Tag 由平台按项目规则生成"
-                    description={
-                      <span style={{ fontSize: 12 }}>
-                        后端按各项目的 Tag 规则 + 提交号 + 时间戳生成，本次构建无法在前端指定统一版本号。
-                        「一次发版统一 Tag」需要后端支持 tag 覆盖，已列入二期。
-                      </span>
-                    }
-                  />
-                )}
-              </Form.Item>
-            </Col>
-
-            <Col span={19}>
               <div className="yn-plan">
                 <div className="yn-plan__head">
                   <Space size={8}>
                     <InfoCircleOutlined style={{ color: '#1677ff' }} />
                     <b>构建清单（{selected.length}）</b>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      提交前请核对分支与各项目的 Tag 规则
+                      每个项目按各自的分支构建；提交后立即入队，由平台构建池依次执行
                     </Text>
                   </Space>
                 </div>
-                <Table
+                <Table<Project>
                   rowKey={(r) => r.key}
-                  size="small"
+                  size="middle"
                   dataSource={selected}
                   columns={planColumns}
                   pagination={selected.length > 8 ? { pageSize: 8, size: 'small' } : false}
-                  scroll={{ y: 300 }}
+                  scroll={{ y: 320 }}
                 />
               </div>
             </Col>

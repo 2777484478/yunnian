@@ -355,6 +355,42 @@
   border-color: #e8e8e8;
 }
 
+/* Jenkins 来源的徽标：橙色。与"平台 Tag 规则"必须**看得出区别** ——
+   前者是"镜像由那个 Job 自己构建推送、平台不登记版本"，
+   后者是"平台按规则生成 tag"，做成同一种颜色就抹掉了这个关键差异。 */
+.yn-src-badge--jenkins {
+  color: #d46b08;
+  background: #fff7e6;
+  border-color: #ffd591;
+}
+
+/* --------------------------------------------------------------------------- 构建清单 */
+
+/*  一行 = 一个项目 + 它自己的分支 + 它的上次分支 + 产物来源。
+    表头压一档（它是稳定标签，不该和内容抢注意力）；
+    行分隔线调浅（否则四列信息被横线切成一条条，读不出"这是一组"）。 */
+.yn-plan .ant-table-thead > tr > th {
+  background: #f7f9fc;
+  color: var(--yn-text-2);
+  font-weight: 500;
+}
+
+.yn-plan .ant-table-tbody > tr > td {
+  border-bottom: 1px solid #f2f4f7;
+}
+
+/* 分支输入框：圆角与表格同一档；底色用白，和浅灰的表头区分开，
+   让它读起来像"可以动的地方"。 */
+.yn-plan .ant-select-selector {
+  border-radius: 6px !important;
+  background: #fff !important;
+}
+
+.yn-plan .ant-select-focused .ant-select-selector,
+.yn-plan .ant-select:hover .ant-select-selector {
+  border-color: var(--yn-primary) !important;
+}
+
 /* --------------------------------------------------------------------------- 目标环境选择 */
 
 .yn-envpick {
