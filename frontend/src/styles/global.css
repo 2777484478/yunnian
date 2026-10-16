@@ -1349,3 +1349,70 @@ body {
 .yn-search-pop__foot--link:hover {
   text-decoration: underline;
 }
+
+
+/* --------------------------------------------------------------------------- 系统配置项网格
+
+   为什么不用 antd 的 `Descriptions`：它是**左右布局**，而这里每一项的说明是一整句话
+   （"同时执行的部署任务数上限（超出排队的等待）。1 = 逐服务串行发布，避免…"）。
+   超长 label 会把 content 一路往右挤，输入框被推到容器外、右侧露出一片空白 ——
+   用户看到的就是"好多框都出来了"。
+
+   改成上下布局：标签自己换行，控件另起一行，谁也不挤谁。 */
+
+.yn-cfg-grid {
+  display: grid;
+  /* auto-fill + 最小宽度：容器变窄时自动少放几列，不会像固定列数那样溢出 */
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 16px 24px;
+}
+
+.yn-cfg-item {
+  min-width: 0;
+}
+
+.yn-cfg-item__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.yn-cfg-item__label {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--yn-text-2);
+  /* 悬停看完整键名：标签是给人读的，键名是给排查用的，两者不必挤在一行 */
+  cursor: help;
+}
+
+/* 「未保存」标记：改了值但还没提交，得让人一眼看到改了哪些 */
+.yn-cfg-item__dirty {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #d46b08;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+}
+
+.yn-cfg-item__ctrl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 补充说明：比标签再弱一档，不跟控件抢注意力 */
+.yn-cfg-item__desc {
+  margin-top: 5px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: #9aa0aa;
+}

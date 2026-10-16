@@ -6,7 +6,6 @@ import {
   Button,
   Card,
   Col,
-  Descriptions,
   Divider,
   Input,
   InputNumber,
@@ -512,39 +511,55 @@ const SystemIntegrations: React.FC = () => {
                 }
               />
             ) : null}
-            <Descriptions
-              column={{ xs: 1, sm: 2, xl: 3 }}
-              size="small"
-              items={items.map((item) => ({
-                key: item.configKey,
-                label: (
-                  <Tooltip title={item.configKey}>
-                    <Space size={4}>
-                      <span>{item.description || item.configKey}</span>
+            {/*
+              自定义网格而不是 `Descriptions`。
+              
+              ⚠️ 原来这里用 `label={item.description}`，而 description 是一整句
+              （"同时执行的部署任务数上限（超出排队的等待）。1 = 逐服务串行发布，避免…"）。
+              Descriptions 是**左右布局**：超长 label 把 content 一路往右挤，
+              于是输入框被推到容器外，右侧露出一片空白 —— 用户看到的就是"好多框都出来了"。
+              而且 3 列布局下每列更窄，长 label 还要换行，整页显得乱。
+              
+              改成**上下布局**（标签一行、控件一行），标签再长也只是自己换行、
+              不会去挤控件；同时把 description 按第一个句号拆成"短标签 + 说明小字"，
+              正文降到 11.5px 次要色。
+            */}
+            <div className="yn-cfg-grid">
+              {items.map((item) => {
+                // 拆成短标签 + 说明：description 的第一句当标签，其余当补充说明。
+                // 拆不开就用整句当标签（不会因此丢信息）。
+                const parts = (item.description || item.configKey).split('。');
+                const shortLabel = parts[0];
+                const longDesc = parts.slice(1).join('。').trim();
+                return (
+                  <div className="yn-cfg-item" key={item.configKey}>
+                    <div className="yn-cfg-item__head">
+                      <Tooltip title={item.configKey}>
+                        <span className="yn-cfg-item__label">{shortLabel}</span>
+                      </Tooltip>
                       {draft[item.configKey] !== undefined &&
                       draft[item.configKey] !== item.configValue ? (
-                        <WarningOutlined style={{ color: '#faad14' }} />
+                        <span className="yn-cfg-item__dirty">未保存</span>
                       ) : null}
-                    </Space>
-                  </Tooltip>
-                ),
-                children: (
-                  <Space size={8} wrap>
-                    <ConfigEditor
-                      item={item}
-                      value={valueOf(item)}
-                      disabled={!canWrite}
-                      onChange={(v) => setDraft((d) => ({ ...d, [item.configKey]: v }))}
-                    />
-                    {readableValue(item) ? (
-                      <Text type="secondary" style={{ fontSize: 11.5 }}>
-                        ≈ {readableValue(item)}
-                      </Text>
-                    ) : null}
-                  </Space>
-                ),
-              }))}
-            />
+                    </div>
+                    <div className="yn-cfg-item__ctrl">
+                      <ConfigEditor
+                        item={item}
+                        value={valueOf(item)}
+                        disabled={!canWrite}
+                        onChange={(v) => setDraft((d) => ({ ...d, [item.configKey]: v }))}
+                      />
+                      {readableValue(item) ? (
+                        <Text type="secondary" style={{ fontSize: 11.5 }}>
+                          ≈ {readableValue(item)}
+                        </Text>
+                      ) : null}
+                    </div>
+                    {longDesc ? <div className="yn-cfg-item__desc">{longDesc}</div> : null}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         ))}
 
