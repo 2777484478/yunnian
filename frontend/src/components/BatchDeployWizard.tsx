@@ -4,6 +4,7 @@ import {
   App as AntApp,
   Button,
   Input,
+  InputNumber,
   Modal,
   Segmented,
   Select,
@@ -250,6 +251,17 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   /** 逐服务的目标版本（默认 = 仓库最新，值形如 `r:1.2.3` / `p:1.2.3`，见 SRC_*） */
   const [targets, setTargets] = useState<Record<string, string>>({});
   const [skipped, setSkipped] = useState<string[]>([]);
+  /**
+   * 逐服务**要改成的**副本数。
+   *
+   * 只在用户真的动过这一行时才写入 —— 没动过的行用集群实况作默认值，
+   * 所以"界面显示什么就发什么"，不必去猜平台库里记的是几。
+   * `null` = 用户清空了输入框，提交时**不传** replicas（让后端按现有配置执行）。
+   *
+   * 为什么这个入口必须存在：发布时才发现副本数不对（比如纳管时给的初值不合意），
+   * 用户只能先取消、去服务页改完、再回来重发一遍。多一个来回就多一次线上窗口。
+   */
+  const [repOverride, setRepOverride] = useState<Record<string, number | null>>({});
   /** 读仓库标签的进行中状态（每个服务一次 Harbor 请求）。 */
   const [regLoading, setRegLoading] = useState(false);
   /** 已经查过仓库的项目 —— 来回切步骤不重复请求。 */
@@ -352,6 +364,9 @@ const submitAtRef = useRef(Date.now());
       // 连"用户改过哪些行"也一并忘掉：这是一次彻底重来，不是增量刷新。
       regLoadedRef.current = new Set();
       targetTouchedRef.current = new Set();
+      // 副本覆盖一并清掉：重新读取后 rows 会换成新的集群实况，
+      // 留着旧的覆盖值会让输入框显示一个与当前集群对不上的数字。
+      setRepOverride({});
       setScanNote('读取仓库镜像…');
       try {
         // 1) 仓库镜像：一次取回全平台镜像（一期总量在 200 以内），
@@ -866,6 +881,18 @@ const submitAtRef = useRef(Date.now());
         const pick: DeployPick = v?.startsWith(SRC_REGISTRY)
           ? { registryTag: base.tag }
           : { platformTag: base.tag };
+        /**
+         * 副本数：用户改过就用改的，没改过用**集群实况**，都拿不到就干脆不传。
+         *
+         * 三种取值对应三种明确语义，不能混成一种：
+         *   用户填了数字        → 传它（这次发布会把副本数改成这个值）
+         *   用户清空 / 没改且读不到集群 → **不传**（后端按现有配置执行）
+         *   没改且读得到集群    → 传集群实况（等于"保持现状"，所见即所得）
+         * 最后一种尤其要紧：不传的话后端会取 `service_instances.replicas` 那个库值，
+         * 而它可能和集群里实际跑着的不是一回事（纳管初值就出过这个问题）。
+         */
+        const rep = repOverride[r.projectKey];
+        const wantRep = rep !== undefined ? rep : r.replicas;
         try {
           const d = await deployApi.create({
             envKey,
@@ -876,6 +903,7 @@ const submitAtRef = useRef(Date.now());
             ...('registryTag' in pick
               ? { imageSource: 'registry' as const, registryTag: pick.registryTag }
               : { imageSource: 'platform' as const, tag: pick.platformTag }),
+            ...(typeof wantRep === 'number' && wantRep > 0 ? { replicas: wantRep } : {}),
             strategy: 'RollingUpdate',
             remark: `批量发布（界面批次 ${no}）`,
             idempotencyKey: `${no}:${envKey}:${r.projectKey}`,
@@ -1475,19 +1503,45 @@ const submitAtRef = useRef(Date.now());
     {
       title: '副本',
       key: 'replicas',
-      width: 70,
-      // 副本数是集群里实跑的个数；读不到就留白，不拿平台库的记录充数。
-      // 本次提交也不带 replicas（后端按现有配置执行），所以这一列纯属核对用。
-      render: (_, r) =>
-        r.replicas === undefined ? (
-          <Tooltip title="读取不到集群，无法取得当前副本数">
-            <Text type="secondary" style={{ cursor: 'help' }}>
-              —
-            </Text>
-          </Tooltip>
-        ) : (
-          <span>{r.replicas}</span>
-        ),
+      // 96：从只读文本变成输入框，需要多一点空间（含"改过"标记）。
+      width: 96,
+      /**
+       * 可编辑 —— 发布前发现副本数不合适时当场改，不用退出去服务页改完再重发。
+       *
+       * 默认值取**集群里实跑的个数**（`r.replicas`），不是平台库的记录：
+       * 界面显示什么就发什么，用户不必猜"库里记的是几"。
+       * 读不到集群时留空并提示 —— 那一行提交时**不带** replicas，
+       * 由后端按现有配置执行（读不到就编一个数字出来才是更坏的选择）。
+       */
+      render: (_, r) => {
+        const cur = repOverride[r.projectKey];
+        const shown = cur !== undefined ? cur : (r.replicas ?? null);
+        const changed = cur !== undefined && cur !== null && cur !== r.replicas;
+        return (
+          <Space size={4}>
+            <InputNumber
+              size="small"
+              min={1}
+              max={99}
+              style={{ width: 58 }}
+              value={shown}
+              placeholder={r.replicas === undefined ? '读不到' : String(r.replicas)}
+              onChange={(v) =>
+                // 清空（null）也要记下来：那表示"这次别动副本数"，
+                // 与"没碰过"（undefined，沿用集群实况）是两回事。
+                setRepOverride((prev) => ({ ...prev, [r.projectKey]: (v as number | null) ?? null }))
+              }
+            />
+            {changed ? (
+              <Tooltip
+                title={`本次发布会把副本数从 ${r.replicas ?? '未知'} 改成 ${cur}（集群里实跑 ${r.replicas ?? '未知'} 个）`}
+              >
+                <span className="yn-rep-changed">改</span>
+              </Tooltip>
+            ) : null}
+          </Space>
+        );
+      },
     },
     {
       title: '操作',
@@ -2045,6 +2099,14 @@ const submitAtRef = useRef(Date.now());
               <span className="yn-mono" style={{ color: '#1677ff' }}>
                 {bareTagOf(targets[r.projectKey])}
               </span>
+              {/* 副本变更是**不可忽视**的一类改动（会改变实例数），
+                  必须在最后这一步看得见 —— 否则用户确认的是版本，改掉的却是副本。 */}
+              {repOverride[r.projectKey] !== undefined &&
+              repOverride[r.projectKey] !== r.replicas ? (
+                <span className="yn-mono" style={{ color: '#fa8c16' }}>
+                  副本 {r.replicas ?? '?'} → {repOverride[r.projectKey] ?? '不变'}
+                </span>
+              ) : null}
               {/* 来源必须显示出来：同名的 tag 在"平台构建"和"仓库标签"下走的是两条
                   不同的取镜像链路，事后查"这次发的是哪一份"时它是关键线索。 */}
               {targets[r.projectKey]?.startsWith(SRC_REGISTRY) ? (

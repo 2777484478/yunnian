@@ -230,6 +230,21 @@
 
 /* 结果表里"部署单号"要能被一眼抄下来（用户会拿去记录页搜），
    所以等宽 + 主色，且不做截断省略。 */
+/* 「副本」列里"这一行被改过"的标记。
+   发布单里带副本数 = 会改变实例数，比换版本更"重"，值得一个显眼但与状态标签不冲突的记号：
+   用文字「改」而不是一个小圆点 —— 圆点在一屏文字里太容易被忽略过去。 */
+.yn-rep-changed {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 5px;
+  border-radius: 4px;
+  color: #fa8c16;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  cursor: default;
+}
+
 .yn-submitted .yn-ver__tag {
   font-variant-numeric: tabular-nums;
 }
