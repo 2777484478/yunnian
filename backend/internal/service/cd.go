@@ -1565,13 +1565,7 @@ func (s *CDService) CreateDeployment(ctx context.Context, in CreateDeploymentInp
 		status = "pending_approval"
 	}
 
-	deployNo, err := s.nextDeployNo(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	rec := model.DeployRecord{
-		DeployNo:     deployNo,
 		EnvID:        env.ID,
 		EnvKey:       env.EnvKey,
 		ProjectID:    proj.ID,
@@ -1593,8 +1587,45 @@ func (s *CDService) CreateDeployment(ctx context.Context, in CreateDeploymentInp
 	if k := strings.TrimSpace(in.IdempotencyKey); k != "" {
 		rec.IdempotencyKey = &k
 	}
-	if err := s.db(ctx).Create(&rec).Error; err != nil {
-		return nil, errs.Internalf(err, "创建部署单失败")
+
+	/**
+	 * **算号与插入放在同一个临界区里**（deployNoMu 由外层持有）。
+	 *
+	 * 部署单号是"查当天最大号 + 1"，而号要 INSERT 时才落库 —— 中间留窗口的话，
+	 * 并发请求会先后拿到同一个号，由唯一索引 `uk_deploy_no` 拒掉其中一个，
+	 * 而用户看到的是一句"创建部署单失败"：既没有信息量、又指向错误方向的 500。
+	 * （2026-10-16 批量发布改成并发建单后实测撞到：6 个服务挂掉 2 个。）
+	 *
+	 * 这里的**重试**是兜底（跨实例、或锁外的其他意外），主要防线是那把锁 ——
+	 * 让撞号一开始就不发生，而不是撞了再补救。
+	 */
+	deployNoMu.Lock()
+	defer deployNoMu.Unlock()
+	for attempt := 0; ; attempt++ {
+		no, err := s.nextDeployNoLocked(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rec.DeployNo = no
+		// 上一次失败可能给模型留了主键，清掉再插。
+		rec.ID = 0
+		err = s.db(ctx).Create(&rec).Error
+		if err == nil {
+			break
+		}
+		// 幂等键撞了：另一笔同键请求已经建好了 —— 那正是"幂等"想要的结果。
+		// 并发双击、客户端重试都会走到这里，直接把已存在那一单返回，不是报错。
+		if rec.IdempotencyKey != nil && isDupKeyOn(err, "uk_idempotency_key") {
+			var exist model.DeployRecord
+			if e := s.db(ctx).Where("idempotency_key = ?", *rec.IdempotencyKey).First(&exist).Error; e == nil {
+				return s.GetDeployment(ctx, exist.ID)
+			}
+		}
+		if !isDupKeyOn(err, "uk_deploy_no") || attempt >= 5 {
+			return nil, errs.Internalf(err, "创建部署单失败")
+		}
+		// 撞号：重算再试。（同实例下有了上面那把锁基本不会走到这里。）
+		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
 	}
 	if err := s.initDeploySteps(ctx, rec.ID); err != nil {
 		return nil, err
@@ -1604,7 +1635,7 @@ func (s *CDService) CreateDeployment(ctx context.Context, in CreateDeploymentInp
 		Module: "CD", Action: "deploy:create", TargetType: "deployment",
 		TargetID: &rec.ID, TargetName: rec.DeployNo,
 		Detail: fmt.Sprintf("创建部署单 %s：%s/%s → %s（副本 %d，%s）",
-			deployNo, env.EnvKey, proj.ProjectKey, img.Tag, replicas, statusWordDeploy(status)),
+			rec.DeployNo, env.EnvKey, proj.ProjectKey, img.Tag, replicas, statusWordDeploy(status)),
 	})
 
 	if status == "pending_approval" {
@@ -2914,9 +2945,46 @@ func (s *CDService) resolveRollbackTarget(ctx context.Context, svc *model.Servic
 	return &img, nil
 }
 
+// isDupKeyOn 判断这个错误是不是**某个具名唯一索引**的冲突（MySQL 1062）。
+//
+// 为什么不用 `gorm.ErrDuplicatedKey`：它需要开启 `TranslateError`，而本项目没开 ——
+// 用一个恒为 false 的判断当守卫，比不判断更危险（错误会被静默地归到"别的原因"）。
+// 这里按错误文本判，同时要求出现索引名，避免把"幂等键冲突"与"单号冲突"混为一谈
+//（两者的处置完全不同：前者返回已有单，后者重算重试）。
+func isDupKeyOn(err error, index string) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "Error 1062") && strings.Contains(s, index)
+}
+
+// deployNoMu 串行化"**算号 + 落库**"这一整段。
+//
+// ⚠️ 必须包住**两者**，只包住"算号"是没用的：号要 INSERT 时才落库，
+// 中间留窗口的话两个并发请求会先后拿到同一个号。实测（2026-10-16）：
+// 只锁算号时，一次 6 并发的批量发布仍有 2 笔撞号 —— 虽然重试把它们兜住了，
+// 但每次并发都撞几下是长期的日志噪音，而且重试有次数上限。
+//
+// 代价是"建单"这一段串行化：一次 INSERT 几毫秒，而部署单本来就按
+// `DeployConcurrency` 串行执行，所以这点串行对整体吞吐没有影响。
+//
+// 跨实例（多副本部署）时锁各管各的，那时仍然靠调用处的重试兜底。
+var deployNoMu sync.Mutex
+
 // nextDeployNo 生成部署单号：DP + 日期 + 当日序号。
 // 可读性优先于实现复杂度——运维在群里沟通时说的就是这个号。
+//
+// 它自己持锁，供"只想要个号"的调用方使用。**要在同一临界区里插入时**
+// （如 CreateDeployment），请用 nextDeployNoLocked 自己持锁包住两段。
 func (s *CDService) nextDeployNo(ctx context.Context) (string, error) {
+	deployNoMu.Lock()
+	defer deployNoMu.Unlock()
+	return s.nextDeployNoLocked(ctx)
+}
+
+// nextDeployNoLocked 与 nextDeployNo 同逻辑，但**不加锁**：调用方必须已持有 deployNoMu。
+func (s *CDService) nextDeployNoLocked(ctx context.Context) (string, error) {
 	day := now().Format("20060102")
 	prefix := "DP" + day
 	var last model.DeployRecord
