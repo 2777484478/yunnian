@@ -38,7 +38,9 @@ import FailureReason from '@/components/FailureReason';
 import { DeployStatusTag, ImageText } from '@/components/StatusTag';
 import { deployApi, environmentApi, rollbackApi, systemApi } from '@/api';
 import { canDeployOn, hasPerm } from '@/auth';
+import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { useApi } from '@/hooks/useApi';
+import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
 import { useJobLogs } from '@/hooks/useJobLogs';
 import { humanDuration } from '@/utils/format';
 import type { DeployRecord, DeployStatus } from '@/types';
@@ -111,6 +113,36 @@ const DeployList: React.FC = () => {
     successApi.refresh();
     failedApi.refresh();
   };
+
+  /**
+   * 自动刷新 —— 部署单的状态是**别处**在改的（后端队列那一拍一拍地往下发）。
+   *
+   * 不加之前的实际体验：用户在批量发布后盯着这一页等，必须自己按 F5，
+   * 而队列其实一直在动 —— "页面没变"和"部署卡住了"看起来一模一样。
+   *
+   * ⚠️ 用**独立 scope**（不沿用全局键）：别的页面把自动刷新关掉过的人，
+   * 进到这一页不能连开关都是关的 —— 那看着跟"这页根本没做自动刷新"一模一样。
+   */
+  const [autoRefreshMs, setAutoRefreshMs] = useAutoRefreshPref(5000, 'cd-deploys');
+  useAutoRefresh({
+    enabled: autoRefreshMs !== null,
+    intervalMs: autoRefreshMs ?? 5000,
+    // 走**静默**刷新：每 5 秒闪一次加载遮罩比不刷新更难受；后台那一拍失败也不该
+    // 把整页打成错误态（"网络抖一下，列表没了"）—— 手上那份数据其实还是对的。
+    onTick: () => {
+      deploysApi.refreshSilent();
+      statsApi.refreshSilent();
+      successApi.refreshSilent();
+      failedApi.refreshSilent();
+    },
+    // ⚠️ **不含 `envsApi`**：那是环境纳管清单，用户不操作它就不会变。
+    // 把它也塞进来，等于每 5 秒为一份静态数据多打一次后端。
+    isBusy: () =>
+      deploysApi.pendingRef.current ||
+      statsApi.pendingRef.current ||
+      successApi.pendingRef.current ||
+      failedApi.pendingRef.current,
+  });
 
   // ------------------------------------------------------------ 日志抽屉
   const [logTarget, setLogTarget] = useState<DeployRecord | null>(null);
@@ -405,6 +437,21 @@ const DeployList: React.FC = () => {
         extra={
           <Space>
             <Button icon={<ReloadOutlined />} loading={deploysApi.loading} onClick={refreshAll} />
+            {/* 自动刷新：默认 5 秒，可切间隔 / 关闭，并显示"上次刷新时间"。
+                失败只在这个控件里说一句，不把整页打成错误态。 */}
+            <AutoRefreshButton
+              value={autoRefreshMs}
+              onChange={setAutoRefreshMs}
+              updatedAt={deploysApi.updatedAt}
+              // 四个接口任一失败都要说出来：只说主列表的话，"统计拉挂了"
+              // 会被这行字掩盖成"一切正常"，而那正是用户扫一眼时会信的东西。
+              errorText={
+                deploysApi.silentError?.message ||
+                statsApi.silentError?.message ||
+                successApi.silentError?.message ||
+                failedApi.silentError?.message
+              }
+            />
             {/* 「新建部署」原来只弹一句提示、什么都不做，是个死入口。
                 部署必须在某个环境里选服务发起，这里直接跳到环境管理列表。 */}
             <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => navigate('/cd/environments')}>
