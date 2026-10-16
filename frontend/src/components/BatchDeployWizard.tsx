@@ -28,9 +28,10 @@ import {
   SwapOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { BatchRunner } from './BatchRunner';
-import type { BatchResult, BatchTaskDef, BatchTaskHandle, BatchTaskOutcome } from './BatchRunner';
-import { ProjectTypeTag, ServiceStatusTag } from './StatusTag';
+// 只借用它的结果类型：本向导已不再用 BatchRunner 驱动执行
+// （那套串行编排是"关页面就不发了"的根因，见 submit 的注释）。
+import type { BatchResult } from './BatchRunner';
+import { DeployStatusTag, ProjectTypeTag, ServiceStatusTag } from './StatusTag';
 import { DisabledTip } from '@/components/DisabledTip';
 import { sortByStage, stageOf } from '@/config/topology';
 import { ApiError, deployApi, environmentApi, imageApi, registryApi, systemApi } from '@/api';
@@ -211,11 +212,6 @@ function bareTagOf(v: string | undefined): string {
  */
 type DeployPick = { registryTag: string } | { platformTag: string };
 
-/** 取出 DeployPick 里那个 tag（两种来源的字段名不同，只有这里知道怎么取）。 */
-function pickTagOf(p: DeployPick | undefined): string {
-  if (!p) return '';
-  return 'registryTag' in p ? p.registryTag : p.platformTag;
-}
 
 /** 仓库标签的时间口径说明：Harbor v1 只能给构建时间，v2 才有推送时间。 */
 function regTimeText(t: { time: string; timeKind: string }): string {
@@ -261,11 +257,44 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   /** 用户手动改过目标版本的项目：仓库标签回来时**不许**覆盖他的选择。 */
   const targetTouchedRef = useRef<Set<string>>(new Set());
 
-  const [tasks, setTasks] = useState<BatchTaskDef[]>([]);
-  const [batchNo, setBatchNo] = useState('');
-  const [round, setRound] = useState(0);
-  const [result, setResult] = useState<BatchResult | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  /**
+ * 已提交的一个部署单。
+ *
+ * ⚠️ 注意这是**建单结果**，不是执行结果 —— 两者必须分开：
+ * 建单失败（校验不过 / 队列满 / 网络错）是**这次点击**的问题，用户当场得改；
+ * 执行失败是**发布过程**的问题，去「部署记录」看日志与 AI 诊断。
+ * 混成一个"失败"，用户分不清该重试还是该改参数。
+ */
+interface SubmittedItem {
+  projectKey: string;
+  projectName: string;
+  tag: string;
+  /** 建单成功：后端返回的部署单 */
+  deployNo?: string;
+  /** DeployCreated.id 是字符串（后端 JSON 里就是 string），不要转成 number */
+  deployId?: string;
+  /** 建单成功时的初始状态（queued / pending_approval） */
+  status?: DeployStatus;
+  /** 建单失败的真因（原样透出后端文案） */
+  error?: string;
+}
+
+/** 这些状态表示"平台还在推进它"，轮询要盯着；其余都是停住的状态。 */
+const RUNNING_STATUS: DeployStatus[] = ['queued', 'progressing'];
+
+/** 全部单据都离开"进行中"后就不再轮询（含被拒 / 待审批 / 已终止）。 */
+const isSettled = (s?: DeployStatus) => !!s && !RUNNING_STATUS.includes(s);
+
+const [batchNo, setBatchNo] = useState('');
+const [submitting, setSubmitting] = useState(false);
+const [submitted, setSubmitted] = useState<SubmittedItem[]>([]);
+const [confirmOpen, setConfirmOpen] = useState(false);
+/** 已经就"某个单发布成功"通知过父组件（拓扑节点回写）的项目，避免轮询重复回调。 */
+const notifiedRef = useRef<Set<string>>(new Set());
+/** 是否已经报过"本批结束"，保证 onCompleted 只调一次。 */
+const finishedRef = useRef(false);
+/** 点「确认发布」的时刻，用来算整批墙钟耗时。 */
+const submitAtRef = useRef(Date.now());
 
   const env = useMemo(() => envs.find((e) => e.key === envKey), [envs, envKey]);
 
@@ -302,8 +331,10 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
     setSkipped([]);
     setImageCount(0);
     setScanNote('');
-    setTasks([]);
-    setResult(null);
+    setSubmitted([]);
+    setSubmitting(false);
+    finishedRef.current = false;
+    notifiedRef.current = new Set();
     setLoadError('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -757,15 +788,6 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
       ? undefined
       : `当前账号缺少权限点 deploy:${envKey}，无法向「${env?.name ?? envKey}」发起部署；请联系管理员授予该环境的部署权限`;
 
-  /**
-   * 批次号的**展示形态**。
-   *
-   * BatchRunner 头部把它渲染成等宽蓝底 chip（styles/batch.css 的 `.yn-batch__no`），
-   * 原生形态 `DP260929-123456` 与后端部署单号 `DP202609230013` 极像，会被
-   * 误当成能在「部署记录」里检索的单号。这里前置定性文案，明确它只是本次界面标识。
-   */
-  const batchNoLabel = batchNo ? `本次批次（界面标识）${batchNo}` : '';
-
   // ------------------------------------------------------------------ 发布
 
   /**
@@ -781,170 +803,303 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   const runtimeApi = useApi(() => systemApi.runtime(), []);
   const deployConcurrency = Math.max(1, runtimeApi.data?.deployConcurrency ?? 1);
 
-  /** 本批次的公共提交参数 */
-  const startPayloadRef = useRef<{
-    envKey: string;
-    /** 每个项目最终提交什么（平台 tag 或仓库 tag，二选一，见 DeployPick） */
-    pickOf: Record<string, DeployPick>;
-    /** 该环境配置的审批人（来自环境 DTO，见下方 startTask 注释） */
-    approvers: string[];
-  }>({
-    envKey: '',
-    pickOf: {},
-    approvers: [],
-  });
-  const lastOkRef = useRef<Set<string>>(new Set());
-  const batchNoRef = useRef('');
-  batchNoRef.current = batchNo;
-
-  const start = () => {
+  /**
+   * 「确认发布」= **一次性把全部部署单建出来**，然后就不管了。
+   *
+   * 这是本次修复的核心。改之前是"前端逐个建单、等前一个跑完再建下一个"
+   * （BatchRunner 那套串行编排），后果很具体：**关掉页面，后面的服务根本没被创建过**
+   * —— 用户报的"只发布了第一个项目"就是这么来的。取消其中一个服务同理：
+   * 编排在前端，那一步断了，队列后面就没有单可跑。
+   *
+   * 而后端**本来就具备**这个能力：`POST /deployments` 建单即入队
+   * （`submitDeploy` → `deps.Deploys.Submit`），队列按 `DeployConcurrency` 调度，
+   * 平台默认就是 **1（串行）**。也就是说：单子一旦建出来，就由平台负责依次下发，
+   * 与浏览器在不在、页面关没关**完全无关**。
+   */
+  const submit = async () => {
     /**
      * **前端本次批次标识，不是后端单据号。**
      *
      * 后端没有"批次"实体：批量发布产生的是一批各自独立的部署单，每单有自己的
-     * 部署单号（形如 DP202609230013）。这个 `DP…` 编号只存在于本次界面会话，
-     * 唯一用途是拼幂等键保证「同一次点击不重复建单」。它**不可在「部署记录」里检索**，
-     * 所以对外展示时必须写明是界面标识（见下方 batchNoLabel 与结束通知），
-     * 否则它的形态会冒充后端部署单号。
+     * 部署单号（形如 DP202609160008）。这个 `DP…-时间戳` 只存在于本次界面会话，
+     * 用途有二：拼幂等键保证「同一次点击不重复建单」；写进 remark 当作
+     * "这几张单是一起提交的"线索。它**不可在「部署记录」里检索**，
+     * 所以对外展示必须写明是界面标识，否则它的形态会冒充后端部署单号。
      */
     const no = `DP${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Date.now()
       .toString()
       .slice(-6)}`;
-    const pickOf: Record<string, DeployPick> = {};
-    picked.forEach((r) => {
+    setBatchNo(no);
+    notifiedRef.current = new Set();
+    finishedRef.current = false;
+    submitAtRef.current = Date.now();
+    setConfirmOpen(false);
+    setStep(2);
+    setSubmitting(true);
+
+    // 先把"要提交什么"算齐（纯计算，不发请求），这样失败项也能原位显示出来。
+    const pending: SubmittedItem[] = picked.map((r) => {
       const v = targets[r.projectKey];
       // 兜底顺序：用户没选 → 平台最新 → 平台库里的 tag。
       // 兜底用 `platformTag` 而不是集群实况：后端是按 tag 去平台镜像记录里找版本的，
       // 集群里跑着什么对这次提交没有影响。
       const tag = bareTagOf(v) || r.latest?.tag || r.platformTag || '';
-      // 按**选择的来源**分流，绝不同时带上两个字段（后端会拒）。
-      pickOf[r.projectKey] = v?.startsWith(SRC_REGISTRY)
-        ? { registryTag: tag }
-        : { platformTag: tag };
+      return { projectKey: r.projectKey, projectName: r.projectName, tag };
     });
+    setSubmitted(pending);
 
-    startPayloadRef.current = { envKey, pickOf, approvers: env?.approvers ?? [] };
-    lastOkRef.current = new Set();
-
-    setBatchNo(no);
-    setTasks(
-      picked.map((r) => ({
-        id: `bd_${r.projectKey}`,
-        title: r.projectName,
-        subtitle: `${r.projectKey} → ${env?.name ?? envKey}`,
-        short: r.projectKey,
-        projectKey: r.projectKey,
-        imageHint: bareTagOf(targets[r.projectKey]) || r.latest?.tag || r.platformTag,
-      })),
+    /**
+     * 并发建单，而不是串行。
+     *
+     * 串行唯一的"优势"是前面的失败就不建后面的 —— 但那恰恰是不好的语义：
+     * 用户勾了 6 个服务，凭什么因为第 2 个参数不对就放弃后面 4 个？
+     * 每个单独立建、独立成败，失败项原位标出来让用户单独处理。
+     *
+     * ⚠️ 要留意的边界：后端等待队列有上限（`size × 20`，部署池 size 默认 1 → 20 个）。
+     * 一次提交超过它就是**真会被拒**——那时后端返回 `QUEUE_REJECTED`，
+     * 我们原样透出这句原因，而不是笼统报一句"提交失败"。
+     */
+    const results = await Promise.all(
+      picked.map(async (r, i): Promise<SubmittedItem> => {
+        const base = pending[i];
+        const v = targets[r.projectKey];
+        const pick: DeployPick = v?.startsWith(SRC_REGISTRY)
+          ? { registryTag: base.tag }
+          : { platformTag: base.tag };
+        try {
+          const d = await deployApi.create({
+            envKey,
+            projectKey: r.projectKey,
+            // 二选一（DeployPick 就是联合类型）：选仓库时**不带 tag** ——
+            // 两个都给会被后端 `checkImageSource` 拒成 400，而那条错误会伪装成
+            // "某个服务发布失败"，与真实原因（参数冲突）对不上。
+            ...('registryTag' in pick
+              ? { imageSource: 'registry' as const, registryTag: pick.registryTag }
+              : { imageSource: 'platform' as const, tag: pick.platformTag }),
+            strategy: 'RollingUpdate',
+            remark: `批量发布（界面批次 ${no}）`,
+            idempotencyKey: `${no}:${envKey}:${r.projectKey}`,
+          });
+          return { ...base, deployNo: d.deployNo, deployId: d.id, status: d.status };
+        } catch (e) {
+          // 建单失败必须给**真因**：后端把"队列满 / 重复提交 / 镜像不存在"分得很清楚，
+          // 压成一句"提交失败"会让用户把参数问题当成系统故障去排查。
+          return { ...base, error: e instanceof ApiError ? e.message : '提交失败' };
+        }
+      }),
     );
-    setResult(null);
-    setRound((n) => n + 1);
-    setConfirmOpen(false);
-    setStep(2);
+
+    setSubmitted(results);
+    setSubmitting(false);
+
+    const ok = results.filter((x) => !x.error);
+    const bad = results.filter((x) => x.error);
+    if (bad.length) {
+      notification.warning({
+        message: `已提交 ${ok.length} 个，${bad.length} 个未能建单`,
+        description: `${bad.map((x) => x.projectKey).join('、')} 没有进入队列，原因见下方列表。其余服务已交给平台依次下发，与是否关闭本页面无关。`,
+        duration: 8,
+      });
+    } else {
+      notification.success({
+        message: `已提交 ${ok.length} 个部署单`,
+        description: `平台会依次下发（同一时刻最多 ${
+          runtimeApi.data?.deployConcurrency ?? 1
+        } 个）。现在就可以关闭本页面，发布不会中断。`,
+        duration: 6,
+      });
+    }
   };
 
   /**
-   * 提交单个服务发布。
+   * 轮询这批单的状态 —— **只为给人看**，不驱动任何执行。
    *
-   * 幂等键按「批次 + 环境 + 项目」生成 —— 同一次点击只落一个部署单。
-   * 注意 **不传 replicas**：副本数由平台按环境与服务的现有配置决定，
-   * 发布会把它当成"改副本"的操作（那属于服务参数变更，走另一个接口）。
+   * 与改造前的本质区别：这里即使一次都不跑（用户把页面关了），平台该发的还是会发完。
+   * 轮询不承担编排职责，所以它失败也无所谓。
+   *
+   * 停的条件是"全部离开 queued / progressing"：待审批的单不会自己动，
+   * 继续轮询只是白费请求，用户该做的是去审批。
    */
-  const startTask = useCallback(async (task: BatchTaskDef): Promise<BatchTaskHandle> => {
-    const { envKey: ek, pickOf, approvers } = startPayloadRef.current;
-    const pick: DeployPick = pickOf[task.projectKey] ?? { platformTag: '' };
-    const d = await deployApi.create({
-      envKey: ek,
-      projectKey: task.projectKey,
-      // 二选一（DeployPick 就是联合类型）：选仓库时**不带 tag** ——
-      // 两个都给会被后端 `checkImageSource` 拒成 400，而那条错误到第 3 步才出现，
-      // 用户看到的会是"某个服务发布失败"，与真实原因（参数冲突）对不上。
-      ...('registryTag' in pick
-        ? { imageSource: 'registry' as const, registryTag: pick.registryTag }
-        : { imageSource: 'platform' as const, tag: pick.platformTag }),
-      strategy: 'RollingUpdate',
-      // remark 会落到每张部署单上、在「部署记录」里可见，是各单与该次点击之间的关联线索，
-      // 故这里写明是「界面批次」而不是后端批次单号
-      remark: `批量发布（界面批次 ${batchNoRef.current}）`,
-      idempotencyKey: `${batchNoRef.current}:${ek}:${task.projectKey}`,
-    });
-    return {
-      runId: String(d.id),
-      // 不用响应里的 logStreamUrl：相对路径，必须经 streamUrl() 拼令牌
-      stream: deployStatusStream(d.id, d.status),
-      runNo: d.deployNo,
-      awaitingApproval: d.status === 'pending_approval',
-      /**
-       * 审批人优先用响应里的；响应里没有就退回环境配置的审批人。
-       *
-       * 后端 `createDeployPayload` 只在 `d.Approver != ""` 时才下发 `approvers`，
-       * 而 `DeployDTO.Approver` 唯一的数据源是 `DeployRecord.ApproverName`——
-       * 那个字段只在**审批通过**时才写（`approveDeployment`），建单时为空的。
-       * 所以待审批单永远拿不到审批人，面板上只能写"等待审批"。
-       * 环境 DTO 的 `approvers` 是同一份配置的权威来源，用它兜底，
-       * 面板就能写出"等待 运维示例、林曦 审批"而不是一句没有主语的"等待审批"。
-       */
-      approvers: d.approvers?.length ? d.approvers : approvers.length ? approvers : undefined,
-    };
-  }, []);
+  /**
+   * 拉一次这批单的最新状态。
+   *
+   * 抽出来是为了让「自动轮询」与「手动刷新」共用**同一份**取数逻辑 ——
+   * 两处各写一份的话，迟早会出现"自动刷出来的状态"和"点刷新看到的状态"不一致。
+   *
+   * 只依赖 envKey：靠 setSubmitted 的函数式更新读旧值，所以这个回调是稳定的，
+   * 放进 effect 依赖不会把定时器反复重建。
+   */
+  const refreshSubmitted = useCallback(async () => {
+    try {
+      const page = await deployApi.list({ envKey, pageSize: 100 });
+      const byNo = new Map(page.list.map((d) => [d.deployNo, d]));
+      setSubmitted((prev) =>
+        prev.map((x) => {
+          if (!x.deployNo) return x;
+          const d = byNo.get(x.deployNo);
+          return d ? { ...x, status: d.status } : x;
+        }),
+      );
+    } catch {
+      // 读不到**不改动任何状态**：这里只是显示层。
+      // 把界面改成"失败"等于把"我没读到"说成"发布失败了"，两者处置完全不同，
+      // 而且会让用户以为发布中断 —— 而实际上平台那边跟本页面毫无关系。
+    }
+  }, [envKey]);
 
-  const fetchOutcome = useCallback(async (runId: string): Promise<BatchTaskOutcome> => {
-    const d = await deployApi.get(runId);
-    // rolled_back 也是"这次发布把环境改成了目标版本，只是标记为回滚来源"，
-    // 对批量发布来说它是成功的；真正失败的是 failed / canceled。
-    const ok = d.status === 'success' || d.status === 'rolled_back';
-    return {
-      ok,
-      status: d.status,
-      detail: ok
-        ? `${d.deployNo} 已更新为 ${d.image.split(':').pop()}`
-        : d.status === 'interrupted'
-          ? // 中断的**不能**混进"部署失败"：没有任何失败原因可归因，
-            // 这句话要能直接回答"那我现在该干什么"。
-            `${d.deployNo} 因平台重启中断，未更新到目标版本；需重新发起`
-          : d.aiDiagnosis?.reason || `部署${d.status === 'canceled' ? '已取消' : '失败'}`,
-    };
-  }, []);
+  /**
+   * 自动轮询 —— **只为给人看**，不驱动任何执行。
+   *
+   * 与改造前的本质区别：这里即使一次都不跑（用户把页面关了），平台该发的还是会发完。
+   * 轮询不承担编排职责，所以它失败也无所谓。
+   *
+   * 停的条件是"全部离开 queued / progressing"：待审批的单不会自己动，
+   * 继续轮询只是白费请求，用户该做的是去审批。
+   */
+  useEffect(() => {
+    if (!open || step !== 2 || submitting) return;
+    if (!submitted.some((x) => x.deployId)) return;
+    const timer = window.setInterval(() => void refreshSubmitted(), 4000);
+    void refreshSubmitted();
+    return () => window.clearInterval(timer);
+    // 依赖里**故意只有这几个**：submitted 不放进来，否则每轮询一次就重建定时器，
+    // 4 秒的间隔会被"每次 tick 都重置"搅成不等间隔。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, step, submitting, refreshSubmitted]);
 
-  const cancelRun = useCallback(async (runId: string) => {
-    await deployApi.cancel(runId, '用户在批量发布中取消');
-  }, []);
+  /** 本批概览（底部与顶部共用同一份数字，避免两处各算一次而分家）。 */
+  const okCount = submitted.filter((x) => !x.error).length;
+  const badCount = submitted.filter((x) => !!x.error).length;
+  const runningCount = submitted.filter((x) => !x.error && !isSettled(x.status)).length;
+  const successCount = submitted.filter((x) => x.status === 'success' || x.status === 'rolled_back').length;
+  const failedCount = submitted.filter((x) => x.status === 'failed' || !!x.error).length;
+  const canceledCount = submitted.filter((x) => x.status === 'canceled').length;
+  const pendingCount = submitted.filter((x) => x.status === 'pending_approval').length;
+  const interruptedCount = submitted.filter((x) => x.status === 'interrupted').length;
 
-  const handleFinish = (r: BatchResult) => {
-    setResult(r);
-    onCompleted?.(r);
-    // interrupted 也算"未成功"：平台重启打断的服务**没有**变成目标版本，
-    // 漏掉它会让一批跑了一半的发布弹出绿色的「批量发布完成」。
-    const allOk = !r.failed && !r.canceled && !r.interrupted;
-    notification[allOk ? 'success' : 'warning']({
-      message: allOk ? '批量发布完成' : '批量发布结束（存在未成功项）',
-      description: (
-        <span>
-          已向 <b>{env?.name ?? envKey}</b> 提交 <b>{r.total}</b> 个服务：成功{' '}
-          <b style={{ color: '#52c41a' }}>{r.success}</b>
-          {r.failed ? (
-            <>
-              ，失败 <b style={{ color: '#ff4d4f' }}>{r.failed}</b>（失败的服务保留旧版本）
-            </>
-          ) : null}
-          {r.interrupted ? (
-            <>
-              ，已中断 <b style={{ color: '#fa8c16' }}>{r.interrupted}</b>（平台重启打断，未更新到目标版本，需重新发布）
-            </>
-          ) : null}
-          {r.pending ? (
-            <>
-              ，待审批 <b style={{ color: '#fa8c16' }}>{r.pending}</b>
-            </>
-          ) : null}
-          {r.canceled ? `，取消 ${r.canceled}` : null}。本次批次（界面标识）<b>{batchNo}</b>
-          ——它只在本次界面内有效，不是后端部署单号；各服务的部署单号可在「部署记录」里对号查看。
-        </span>
+  const submittedColumns: ColumnsType<SubmittedItem> = [
+    {
+      title: '服务',
+      key: 'svc',
+      width: 240,
+      render: (_, r) => (
+        <Space size={6}>
+          <span style={{ fontWeight: 500 }}>{r.projectName}</span>
+          <Text className="yn-mono" type="secondary" style={{ fontSize: 11 }}>
+            {r.projectKey}
+          </Text>
+        </Space>
       ),
-      placement: 'topRight',
-      duration: 8,
+    },
+    {
+      title: '目标版本',
+      key: 'tag',
+      width: 150,
+      render: (_, r) => <TagText value={r.tag} variant="pick" />,
+    },
+    {
+      title: '部署单号',
+      key: 'no',
+      width: 172,
+      render: (_, r) =>
+        r.deployNo ? (
+          <span className="yn-ver__tag" style={{ color: '#1677ff' }}>
+            {r.deployNo}
+          </span>
+        ) : (
+          // 没建单就没有单号 —— 这里**不能**给个占位单号，那会让人去记录里搜一个不存在的号。
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            —
+          </Text>
+        ),
+    },
+    {
+      title: '状态',
+      key: 'status',
+      width: 120,
+      render: (_, r) =>
+        r.error ? (
+          <Tag color="error" style={{ marginInlineEnd: 0 }}>
+            未建单
+          </Tag>
+        ) : r.status ? (
+          <DeployStatusTag status={r.status} />
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            —
+          </Text>
+        ),
+    },
+    {
+      title: '说明',
+      key: 'note',
+      render: (_, r) =>
+        r.error ? (
+          // 建单失败必须原样给出后端文案（队列满 / 重复提交 / 镜像不存在各不一样），
+          // 压成一句"失败"会让用户拿参数问题当系统故障去排查。
+          <Text type={r.error ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
+            {r.error}
+          </Text>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {r.status === 'queued'
+              ? '排队中，前面的单跑完就轮到它'
+              : r.status === 'progressing'
+                ? '正在滚动更新，详情见「部署记录」'
+                : r.status === 'pending_approval'
+                  ? `等待审批：${env?.approvers?.join('、') || '见环境配置'}`
+                  : r.status === 'success' || r.status === 'rolled_back'
+                    ? '已更新到目标版本'
+                    : r.status === 'interrupted'
+                      ? '平台重启打断，未更新到目标版本，需重新发布'
+                      : r.status === 'canceled'
+                        ? '已取消，服务保持原版本'
+                        : '未发布到目标版本，原因见该单日志与 AI 诊断'}
+          </Text>
+        ),
+    },
+  ];
+
+
+  /**
+   * 有单变成成功时回写拓扑页节点状态。
+   *
+   * ⚠️ 用 ref 去重：轮询每 4 秒看一次，同一个单会被反复读到 success，
+   * 不去重就会把父组件的回调打成轰炸（拓扑页每收到一次都要重渲染）。
+   */
+  useEffect(() => {
+    submitted.forEach((x) => {
+      if (x.status !== 'success' && x.status !== 'rolled_back') return;
+      if (notifiedRef.current.has(x.projectKey)) return;
+      notifiedRef.current.add(x.projectKey);
+      onServiceDeployed?.(envKey, x.projectKey, x.tag);
     });
-  };
+  }, [submitted, envKey, onServiceDeployed]);
+
+  /**
+   * 全部停住后向父组件报一次结果。
+   *
+   * ⚠️ 口径：建单失败也算 failed（它确实没发出去）；`rolled_back` 对一次发布是成功的；
+   * `interrupted` 单列 —— 它没有任何失败原因可归因，但**绝不能**算进成功，
+   * 否则一批跑了一半的发布会弹出绿色的"完成"。
+   */
+  useEffect(() => {
+    if (step !== 2 || submitting || !submitted.length || finishedRef.current) return;
+    if (!submitted.every((x) => !x.deployId || isSettled(x.status))) return;
+    finishedRef.current = true;
+    onCompleted?.({
+      total: submitted.length,
+      success: submitted.filter((x) => x.status === 'success' || x.status === 'rolled_back').length,
+      failed: submitted.filter((x) => x.status === 'failed' || !!x.error).length,
+      canceled: submitted.filter((x) => x.status === 'canceled').length,
+      // 待审批既不算成功也不算失败：它会一直停在 pending_approval 等审批人去点。
+      pending: submitted.filter((x) => x.status === 'pending_approval').length,
+      interrupted: submitted.filter((x) => x.status === 'interrupted').length,
+      // 从"点确认"到全部停住的墙钟时长。注意它包含排队等待 ——
+      // 这正是用户关心的那个数（"我这批多久跑完"），不是单次发布的耗时。
+      ms: Date.now() - submitAtRef.current,
+    });
+  }, [step, submitting, submitted, onCompleted]);
 
   // ------------------------------------------------------------------ 列定义
 
@@ -1699,41 +1854,52 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
         </div>
       ) : null}
 
-      {/* ---------------------------------------------------------- 步骤 3 */}
+      {/* ---------------------------------------------------------- 步骤 3
+          这一步**只读**：不再驱动任何执行。部署单在点「确认发布」时就全部建出来了，
+          由平台队列依次下发 —— 关掉页面、关掉浏览器都照常跑完。
+          所以这里的轮询纯粹是为了让人看见进展，它挂了也不影响发布。 */}
       {step === 2 ? (
-        <div className="yn-batch__stage">
-          <BatchRunner
-            key={round}
-            kind="cd"
-            batchNo={batchNoLabel}
-            tasks={tasks}
-            concurrency={deployConcurrency}
-            envLabel={env?.name ?? envKey}
-            startTask={startTask}
-            fetchOutcome={fetchOutcome}
-            cancelRun={cancelRun}
-            height={330}
-            onTaskDone={(task, outcome) => {
-              if (outcome.ok) {
-                lastOkRef.current.add(task.id);
-                const tag = pickTagOf(startPayloadRef.current.pickOf[task.projectKey]);
-                if (tag) onServiceDeployed?.(startPayloadRef.current.envKey, task.projectKey, tag);
-              } else {
-                lastOkRef.current.delete(task.id);
-              }
-            }}
-            onFinish={handleFinish}
-            onOpenRecords={() => {
-              onClose();
-              navigate('/cd/deploys');
-            }}
-            onRetryFailed={() => {
-              setKeys(picked.filter((r) => !lastOkRef.current.has(`bd_${r.projectKey}`)).map((r) => r.projectKey));
-              setSkipped([]);
-              setStep(1);
-              setResult(null);
-              message.info('已带出未成功的服务，核对版本后可重新提交');
-            }}
+        <div className="yn-batch__stage yn-submitted">
+          <div className="yn-submitted__head">
+            <Space size={[10, 6]} wrap>
+              <span className="yn-submitted__title">
+                已提交 <b>{okCount}</b> 个部署单
+              </span>
+              {runningCount ? <Tag color="processing">进行中 {runningCount}</Tag> : null}
+              {successCount ? <Tag color="success">成功 {successCount}</Tag> : null}
+              {failedCount ? <Tag color="error">失败 {failedCount}</Tag> : null}
+              {pendingCount ? <Tag color="warning">待审批 {pendingCount}</Tag> : null}
+              {canceledCount ? <Tag>已取消 {canceledCount}</Tag> : null}
+              {badCount ? <Tag color="error">未建单 {badCount}</Tag> : null}
+              {submitting ? <Tag color="processing">正在建单…</Tag> : null}
+            </Space>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshSubmitted()}>
+              刷新
+            </Button>
+          </div>
+
+          {/* 这句是这一步存在的理由：告诉用户"可以走了，不会断"。
+              改之前做不到 —— 那时关页面就是真的不发。 */}
+          <Alert
+            type={badCount ? 'warning' : 'success'}
+            showIcon
+            style={{ marginBottom: 10 }}
+            message={badCount ? '部分服务未能建单，其余已进入队列' : '已进入平台队列，可以关闭本页面'}
+            description={
+              <span style={{ fontSize: 12 }}>
+                部署单已落库并排队，平台会依次下发（同一时刻最多 {deployConcurrency} 个）。
+                关闭弹窗、关闭浏览器都不会中断发布；进度可随时在「部署记录」里查看。
+              </span>
+            }
+          />
+
+          <Table<SubmittedItem>
+            rowKey="projectKey"
+            size="small"
+            dataSource={submitted}
+            columns={submittedColumns}
+            pagination={submitted.length > 8 ? { pageSize: 8, size: 'small' } : false}
+            scroll={{ y: 260 }}
           />
         </div>
       ) : null}
@@ -1759,32 +1925,16 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
               </Text>
             </Space>
           ) : null}
-          {step === 2 && result ? (
+          {step === 2 ? (
             <Space size={8}>
-              <CheckCircleFilled
-                style={{ color: result.failed || result.interrupted ? '#faad14' : '#52c41a' }}
-              />
+              <CheckCircleFilled style={{ color: failedCount || interruptedCount ? '#faad14' : '#52c41a' }} />
               <Text style={{ fontSize: 12 }}>
-                批次结束：成功 <b style={{ color: '#52c41a' }}>{result.success}</b>
-                {result.failed ? (
-                  <>
-                    {' '}
-                    · 失败 <b style={{ color: '#ff4d4f' }}>{result.failed}</b>
-                  </>
-                ) : null}
-                {result.interrupted ? (
-                  <>
-                    {' '}
-                    · 已中断 <b style={{ color: '#fa8c16' }}>{result.interrupted}</b>
-                  </>
-                ) : null}
-                {result.pending ? (
-                  <>
-                    {' '}
-                    · 待审批 <b style={{ color: '#fa8c16' }}>{result.pending}</b>
-                  </>
-                ) : null}{' '}
-                · 总耗时 <b>{Math.round(result.ms / 1000)}s</b>
+                {submitting
+                  ? '正在建单…'
+                  : runningCount
+                    ? `队列执行中：还剩 ${runningCount} 个未完成（平台会依次下发）`
+                    : '本批已全部停住'}
+                {batchNo ? <span style={{ color: '#9aa0aa' }}>（界面批次 {batchNo}）</span> : null}
               </Text>
             </Space>
           ) : null}
@@ -1821,13 +1971,24 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
           ) : null}
           {step === 2 ? (
             <>
+              {/* 「关闭」不再有任何风险提示的必要 —— 关不关都不影响发布，
+                  这正是这次改造要达到的效果。 */}
               <Button onClick={onClose}>关闭</Button>
               <Button
                 type="primary"
+                onClick={() => {
+                  onClose();
+                  navigate('/cd/deploys');
+                }}
+              >
+                查看部署记录
+              </Button>
+              <Button
                 ghost
                 onClick={() => {
                   setStep(0);
-                  setResult(null);
+                  setSubmitted([]);
+                  finishedRef.current = false;
                 }}
               >
                 再发一批
@@ -1844,7 +2005,8 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
         okText="确认发布"
         cancelText="再核对一下"
         onCancel={() => setConfirmOpen(false)}
-        onOk={start}
+        onOk={() => void submit()}
+        confirmLoading={submitting}
         width={560}
       >
         <Alert
@@ -1898,16 +2060,5 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   );
 };
 
-/**
- * 部署的日志流地址。
- *
- * 待审批的部署单**没有**执行实体：后端只在审批通过后才 run 它，
- * 此时挂 SSE 会拿到一个空连接。所以待审批时返回空串，
- * BatchRunner 据 awaitingApproval 直接落"待审批"态而不挂流。
- */
-function deployStatusStream(id: string, status: DeployStatus | string): string {
-  if (status === 'pending_approval') return '';
-  return deployApi.stream(String(id));
-}
 
 export default BatchDeployWizard;
