@@ -357,57 +357,84 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     let cancelled = false;
     setBranchLoading(true);
 
-    Promise.all(
-      keys.map(async (k) => {
-        const jk = jenkinsPlan[k];
-        try {
-          if (jk) {
-            // Jenkins 项目：可选值就是那个 Job 的 git 参数取值（每次都真去读一遍）
-            const v = await jenkinsApi.paramValues(jk.job, jk.param);
-            return { key: k, values: [...v.branches, ...v.tags, ...v.other] };
-          }
-          return { key: k, values: await projectApi.branches(k) };
-        } catch {
-          // 读不到**不能**当成"这个项目没有分支"——那会让人以为仓库是空的。
-          // 记下来，界面上如实说明。
-          return { key: k, values: [] as string[], failed: true };
-        }
-      }),
-    )
-      .then((rows) => {
-        if (cancelled) return;
-        const opts: Record<string, string[]> = {};
-        const failed: string[] = [];
-        rows.forEach((r) => {
-          const p = projectMap[r.key];
-          // 项目自己的默认分支永远进候选：读不到远端时至少有个起点，
-          // 而"有没有起点"不该由我们这次读取的成败决定。
-          const set = new Set<string>(r.values);
-          if (p?.defaultBranch) set.add(p.defaultBranch);
-          opts[r.key] = [...set].slice(0, BRANCH_OPTION_LIMIT);
-          if (r.failed) failed.push(p?.name || r.key);
-        });
-        setBranchOptions(opts);
-        setUnreadableProjects(failed);
-
-        setBranchOf((prev) => {
-          const next = { ...prev };
-          keys.forEach((k) => {
-            // 用户已经动过的**一律不动** —— 这是我们最容易犯的错
-            //（覆盖之后界面看着很正常，用户却发现自己选的分支被改掉了）。
-            if (next[k]) return;
-            const p = projectMap[k];
-            // 默认值 = 该项目**最近一次构建用过的分支** → 回落项目默认分支 → 候选第一个。
-            // 为什么用"最近构建过的"而不是 master：日常发版发的就是那些版本分支，
-            // 每次都要求手动改回去，等于把"默认"这两个字废掉了。
-            next[k] = p?.lastBuild?.branch || p?.defaultBranch || opts[k]?.[0] || '';
-          });
-          return next;
-        });
-      })
-      .finally(() => {
-        if (!cancelled) setBranchLoading(false);
+    void (async () => {
+      /**
+       * 先拉一次历史构建记录，作为**兜底的候选来源**。
+       *
+       * 为什么需要它：另外两个来源在真实环境里经常拿不到 ——
+       *   · Jenkins 项目的候选来自 Job 的 git 参数，Jenkins 没接通时整条读不出来；
+       *   · 平台项目的候选来自仓库分支，而"仓库归 Jenkins Job 自己管"的项目
+       *     `GitURL` 是空的，后端直接返回空数组。
+       * 结果就是分支框成了**空下拉**：默认值显示得出来，点开却什么都没有 ——
+       * 想改个分支无从下手，正是"不能下拉选择"的样子。
+       *
+       * 历史构建记录是**平台自己的数据**，永远读得到，而且它天然回答了
+       * "这个项目平时发的是哪几个分支"。
+       */
+      const hist = await buildApi.list({ pageSize: 200 }).catch(() => null);
+      if (cancelled) return;
+      const histOf: Record<string, string[]> = {};
+      (hist?.list ?? []).forEach((b) => {
+        if (!b.branch) return;
+        const arr = (histOf[b.projectKey] ??= []);
+        // 列表按时间倒序，所以第一个出现的即"最近用过的那一个"。
+        if (!arr.includes(b.branch)) arr.push(b.branch);
       });
+
+      const rows = await Promise.all(
+        keys.map(async (k) => {
+          const jk = jenkinsPlan[k];
+          try {
+            if (jk) {
+              // Jenkins 项目：可选值就是那个 Job 的 git 参数取值（每次都真去读一遍）
+              const v = await jenkinsApi.paramValues(jk.job, jk.param);
+              return { key: k, values: [...v.branches, ...v.tags, ...v.other] };
+            }
+            return { key: k, values: await projectApi.branches(k) };
+          } catch {
+            // 读不到**不能**当成"这个项目没有分支"——那会让人以为仓库是空的。
+            // 记下来，最终若一个候选都凑不出来，界面上如实说明。
+            return { key: k, values: [] as string[], failed: true };
+          }
+        }),
+      );
+      if (cancelled) return;
+
+      const opts: Record<string, string[]> = {};
+      const failed: string[] = [];
+      rows.forEach((r) => {
+        const p = projectMap[r.key];
+        const set = new Set<string>(r.values);
+        // 历史构建过的分支补进来（去重，最近用过的排在最前）。
+        (histOf[r.key] ?? []).forEach((b) => set.add(b));
+        // 项目自己的默认分支永远进候选：读不到远端时至少有个起点，
+        // 而"有没有起点"不该由我们这次读取的成败决定。
+        if (p?.defaultBranch) set.add(p.defaultBranch);
+
+        opts[r.key] = [...set].slice(0, BRANCH_OPTION_LIMIT);
+        // 只有**最终一个候选都没有**才算"读不到"。从历史构建里补到分支的项目
+        // 下拉是可用的，把它列进"读不到"只会误导。
+        if (r.failed && !opts[r.key].length) failed.push(p?.name || r.key);
+      });
+      setBranchOptions(opts);
+      setUnreadableProjects(failed);
+
+      setBranchOf((prev) => {
+        const next = { ...prev };
+        keys.forEach((k) => {
+          // 用户已经动过的**一律不动** —— 这是我们最容易犯的错
+          //（覆盖之后界面看着很正常，用户却发现自己选的分支被改掉了）。
+          if (next[k]) return;
+          const p = projectMap[k];
+          // 默认值 = 该项目**最近一次构建用过的分支** → 回落项目默认分支 → 候选第一个。
+          // 为什么用"最近构建过的"而不是 master：日常发版发的就是那些版本分支，
+          // 每次都要求手动改回去，等于把"默认"这两个字废掉了。
+          next[k] = p?.lastBuild?.branch || p?.defaultBranch || opts[k]?.[0] || '';
+        });
+        return next;
+      });
+      setBranchLoading(false);
+    })();
 
     return () => {
       cancelled = true;
@@ -800,7 +827,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     {
       title: '项目',
       key: 'project',
-      width: 252,
+      width: 190,
       render: (_, r) => (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           <span style={{ display: 'inline-flex', flex: 'none' }}>
@@ -818,12 +845,12 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     {
       title: '构建分支',
       key: 'branch',
+      width: 186,
       // 每个项目一个下拉、**各选各的**。
       //
       // 原来这一列是只读的，渲染 `startPayloadRef.current.branch` —— 全局同一个值，
       // 因为那时"分支"是在左边选一次、全批共用的。而各项目的版本分支本来就不同名，
       // 硬要共用就得取交集，于是大部分候选被筛掉、只剩 master。
-      width: 230,
       render: (_, r) => {
         const opts = branchOptions[r.key] ?? [];
         const val = branchOf[r.key] ?? '';
@@ -838,18 +865,70 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
             // 用 AutoComplete 而不是 Select：分支名**必须允许自由输入** ——
             // 远端读不到的仓库不代表它没有分支，把用户锁死在候选列表里
             // 等于让"读取失败"升级成"没法干活"。
-            filterOption={(input, option) =>
-              String(option?.value ?? '')
-                .toLowerCase()
-                .includes(input.toLowerCase())
+            //
+            // 候选为空时也要有个明确的落点：否则下拉是**什么都不显示**的，
+            // 用户分不清"没候选"和"点不开"，只能干瞪眼。
+            notFoundContent={
+              <span style={{ fontSize: 12, color: '#8c8c95' }}>
+                {branchLoading ? '正在读取分支…' : '没有读到候选，可直接输入分支名'}
+              </span>
             }
+            /**
+             * ⚠️ **必须显式关掉过滤**（`filterOption={false}`）。
+             *
+             * AutoComplete 默认拿**输入框里的值**当搜索词去过滤候选。而这个输入框
+             * 是受控的、显示着当前分支（比如 `Release_aiops_1.63`），于是点开下拉时
+             * 它拿这个值去匹配候选 —— 而候选往往是另一套写法（Jenkins Job 的 git
+             * 参数给的是 `origin/Release_aiops_1.63` 这类带前缀的），**一个都匹配不上**，
+             * 下拉被过滤成空的。用户看到的就是"点开什么都没有"，
+             * 而候选其实有 40 个。（2026-10-16 实测踩到。）
+             *
+             * 代价是不能用打字来缩小候选。但分支列表本来就只有几十个、
+             * 且要允许自由输入（读不到远端时用户得能自己打），
+             * "始终显示全部候选"比"能搜索但常常是空的"有用得多。
+             */
+            filterOption={false}
           />
         );
       },
     },
     {
+      // 上一版构建用的是哪个分支。
+      //
+      // 为什么它必须在同一行里：这一列的**默认值就是从它来的**（见上面的
+      // "默认值 = 最近一次构建用过的分支"）。把它显示出来，用户才能一眼对照
+      // "我之前发的是哪个分支 / 现在要发的是哪个" —— 否则改分支时没有任何参照，
+      // 只能凭记忆。
+      title: '最近构建分支',
+      key: 'lastBranch',
+      width: 148,
+      render: (_, r) =>
+        r.lastBuild?.branch ? (
+          <Space size={6}>
+            {/* 分支名往往很长（`origin/Release_aiops_dcdp_1.42_2.10.0`），
+                窄列里必然被截断 —— tag 补全，别让用户对着省略号猜。 */}
+            <Tooltip title={r.lastBuild.branch}>
+              <span
+                className="yn-mono yn-ellipsis"
+                style={{ fontSize: 12.5, color: '#8c8c95', display: 'inline-block', maxWidth: 96 }}
+              >
+                {r.lastBuild.branch}
+              </span>
+            </Tooltip>
+            <BuildStatusTag status={r.lastBuild.status} />
+          </Space>
+        ) : (
+          // 没构建过就说没构建过 —— 不给一个空的等宽块，那看着像"读不到"。
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            无构建记录
+          </Text>
+        ),
+    },
+    {
       title: '产物来源',
       key: 'tag',
+      // 明确给宽度：不给的话它会分到剩余空间，列一多就被挤到**表头竖排**。
+      width: 150,
       // 两类项目的产物来源完全不同，必须分开写：
       // Jenkins 项目的镜像由 Job 自己构建推送，平台给的 tagPattern 对它没有意义。
       render: (_, r) =>
@@ -1053,7 +1132,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
           }}
         >
           <Row gutter={20}>
-            <Col span={7}>
+            <Col span={5}>
               {branchLoading ? (
                 <Alert
                   type="info"
@@ -1128,7 +1207,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
               </Form.Item>
             </Col>
 
-            <Col span={15}>
+            <Col span={19}>
               <div className="yn-plan">
                 <div className="yn-plan__head">
                   <Space size={8}>
