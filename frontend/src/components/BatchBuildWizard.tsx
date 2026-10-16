@@ -410,12 +410,32 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       const failed: string[] = [];
       rows.forEach((r) => {
         const p = projectMap[r.key];
-        const set = new Set<string>(r.values);
-        // 历史构建过的分支补进来（去重，最近用过的排在最前）。
-        (histOf[r.key] ?? []).forEach((b) => set.add(b));
-        // 项目自己的默认分支永远进候选：读不到远端时至少有个起点，
-        // 而"有没有起点"不该由我们这次读取的成败决定。
-        if (p?.defaultBranch) set.add(p.defaultBranch);
+        const isJenkins = !!jenkinsPlan[r.key];
+        const hist = histOf[r.key] ?? [];
+
+        /**
+         * Jenkins 项目**只放 Job 的权威取值**，历史记录不掺进来。
+         *
+         * 否则会出现两个看着一样的分支：
+         *   `origin/Release_aiops_1.63`  ← Job 提供的选项（git 参数取值）
+         *   `Release_aiops_1.63`         ← 平台从自己的构建记录里学的
+         * 用户不知道该选哪个（问过）。而且"项目编译"那个弹窗里**只有** `origin/` 这一种，
+         * 两处应该一致。
+         *
+         * 平台自建项目没有这个问题：它的候选来自仓库分支，本来就是裸名，
+         * 历史记录补进来只是增加几个"发过的分支"，写法一致。
+         */
+        const set = new Set<string>(
+          isJenkins && r.values.length
+            ? r.values
+            : [...r.values, ...hist],
+        );
+        // 读不到远端时（候选为空）用历史/默认分支兜底 —— "有没有起点"
+        // 不该由我们这次读取的成败决定。
+        if (!set.size) {
+          hist.forEach((b) => set.add(b));
+          if (p?.defaultBranch) set.add(p.defaultBranch);
+        }
 
         opts[r.key] = [...set].slice(0, BRANCH_OPTION_LIMIT);
         // 只有**最终一个候选都没有**才算"读不到"。从历史构建里补到分支的项目
@@ -425,6 +445,25 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       setBranchOptions(opts);
       setUnreadableProjects(failed);
 
+      /**
+       * 把平台记录里的分支名对齐到候选里的写法。
+       *
+       * Jenkins 项目要的是 `origin/Release_aiops_1.63`，而平台的构建记录里存的
+       * 可能是裸的 `Release_aiops_1.63`（Jenkins 侧推上来什么就记什么）。
+       * 两者指向同一个分支 —— 但默认值如果落在"不在选项里"的那个写法上，
+       * 下拉打开时看不到它被选中，用户会以为没选。所以能对上就换成候选里的那个。
+       *
+       * 对不上时**原样返回**：不做臆测的改写（比如给所有名字加前缀），
+       * 后端按原值提交，与用户在"项目编译"里手输的行为一致。
+       */
+      const alignToOptions = (name: string | undefined, list: string[]): string | undefined => {
+        if (!name) return undefined;
+        if (list.includes(name)) return name;
+        const withOrigin = `origin/${name}`;
+        if (list.includes(withOrigin)) return withOrigin;
+        return name;
+      };
+
       setBranchOf((prev) => {
         const next = { ...prev };
         keys.forEach((k) => {
@@ -432,10 +471,15 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
           //（覆盖之后界面看着很正常，用户却发现自己选的分支被改掉了）。
           if (next[k]) return;
           const p = projectMap[k];
+          const list = opts[k] ?? [];
           // 默认值 = 该项目**最近一次构建用过的分支** → 回落项目默认分支 → 候选第一个。
           // 为什么用"最近构建过的"而不是 master：日常发版发的就是那些版本分支，
           // 每次都要求手动改回去，等于把"默认"这两个字废掉了。
-          next[k] = p?.lastBuild?.branch || p?.defaultBranch || opts[k]?.[0] || '';
+          next[k] =
+            alignToOptions(p?.lastBuild?.branch, list) ||
+            alignToOptions(p?.defaultBranch, list) ||
+            list[0] ||
+            '';
         });
         return next;
       });
