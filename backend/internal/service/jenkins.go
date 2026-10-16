@@ -285,11 +285,13 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 		}
 	}
 
-	// 触发前先拍一张快照：nextBuildNumber 就是这一次会拿到的编号。
-	// 队列项被 Jenkins 提前清掉时，靠它把属于本次的构建认出来——
-	// 没有它就只能按时间猜，而猜错的后果是"日志看着对、其实是上一次的"。
-	snapshot, snapErr := client.JobSnapshot(ctx, fullName)
-	expectedBuildNo := 0
+	// 先确认 Job 还在。这一步**留在 HTTP 路径**而不是挪进队列任务：
+	// 绑定失效（Job 被改名/删除）应当在用户点下去的这一刻就报 404，
+	// 而不是先告诉他"排队中"、等轮到他了再说"其实这个 Job 不存在"。
+	//
+	// ⚠️ 这里**不再**取 nextBuildNumber —— 那个快照必须在**触发前**拍
+	// （编号会随别人的构建往前走），所以它跟着触发一起挪进了队列任务。
+	_, snapErr := client.JobSnapshot(ctx, fullName)
 	switch {
 	case errors.Is(snapErr, integration.ErrJobNotFound):
 		// 绑定关系过期了（Job 在 Jenkins 上被改名/删除）。**在这里就返回**，
@@ -303,40 +305,22 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 		return nil, notFoundErr(
 			"项目 %s 绑定的 Jenkins Job「%s」已不存在（可能已被改名或删除）；请到项目里重新选择 Job",
 			p.ProjectKey, fullName)
-	case snapErr == nil && snapshot != nil:
-		expectedBuildNo = snapshot.NextBuildNumber
 	case snapErr != nil:
 		// 读快照失败不影响触发本身，只是失去构建号兜底，降级为告警继续。
 		s.log("ci.jenkins").Warn("读取 Job 快照失败，将无法用构建号兜底", "job", fullName, "err", snapErr)
 	}
 
-	// 先在 Jenkins 上排队，再在平台建记录。顺序是刻意选的：
-	// 反过来（先建记录）一旦触发失败，就要留一条"其实什么都没发生"的失败记录；
-	// 而先触发、建记录失败时，平台可以把队列项撤掉，做到真正的"要么都成、要么都没发生"。
-	queueID, err := client.Trigger(ctx, fullName, in.Parameters)
-	if err != nil {
-		s.audit(ctx, c, auditInput{
-			Module: "CI", Action: "build:trigger-jenkins", TargetType: "build",
-			TargetName: fullName, Detail: "触发 Jenkins 构建失败：" + err.Error(),
-			Result: "failed", ErrMsg: err.Error(),
-		})
-		return nil, upstreamError(err, "触发 Jenkins 构建失败")
-	}
-
 	params, err := s.jenkinsBranchAndSnapshot(p, fullName, in.Parameters)
 	if err != nil {
-		_ = client.CancelQueueItem(ctx, queueID)
 		return nil, err
 	}
 
 	buildNo, err := s.nextBuildNo(ctx, p.ID)
 	if err != nil {
-		_ = client.CancelQueueItem(ctx, queueID)
 		return nil, err
 	}
 
 	nowT := now()
-	qid := uint64(queueID)
 	rec := model.BuildRecord{
 		BuildNo:    buildNo,
 		ProjectID:  p.ID,
@@ -350,13 +334,14 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 		TriggerType:    "jenkins",
 		TriggerName:    c.Name(),
 		ParamsSnapshot: params.Snapshot,
-		Status:         "queued",
-		Stage:          "已提交 Jenkins，等待执行器",
-		Progress:       0,
-		JenkinsJob:     fullName,
-		JenkinsQueueID: &qid,
-		CreatedAt:      nowT,
-		UpdatedAt:      nowT,
+		Status:   "queued",
+		// 此刻**还没碰 Jenkins** —— 要等平台队列轮到本任务才触发。
+		// 文案必须如实：写成"已提交 Jenkins"会让用户去 Jenkins 上找一个还不存在的构建。
+		Stage:      "排队中，等待平台构建槽位",
+		Progress:   0,
+		JenkinsJob: fullName,
+		CreatedAt:  nowT,
+		UpdatedAt:  nowT,
 	}
 	if k := strings.TrimSpace(in.IdempotencyKey); k != "" {
 		rec.IdempotencyKey = &k
@@ -365,19 +350,15 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 		rec.TriggerBy = uid
 	}
 	if err := s.db(ctx).Create(&rec).Error; err != nil {
-		// 补偿：把已经排上的那次构建撤掉。不撤的话用户会看到
-		// "平台报错了，但 Jenkins 上莫名其妙多了一次构建"。
-		if cerr := client.CancelQueueItem(ctx, queueID); cerr != nil {
-			s.log("ci.jenkins").Error("撤销 Jenkins 队列项失败，请在 Jenkins 上手动确认",
-				"queueId", queueID, "job", fullName, "err", cerr)
-		}
-		return nil, errs.Internalf(err, "创建构建记录失败（已尝试撤销 Jenkins 上的排队，队列项 #%d）", queueID)
+		// 这里不再需要"撤销 Jenkins 排队"的补偿：触发已经挪到队列任务里，
+		// 此刻 Jenkins 侧干干净净，没有需要善后的东西。
+		return nil, errs.Internalf(err, "创建构建记录失败")
 	}
 
 	s.audit(ctx, c, auditInput{
 		Module: "CI", Action: "build:trigger-jenkins", TargetType: "build",
 		TargetID: &rec.ID, TargetName: fmt.Sprintf("%s#%d", p.ProjectKey, rec.BuildNo),
-		Detail: fmt.Sprintf("触发 Jenkins 构建：%s / Job %s（队列项 #%d）", p.ProjectKey, fullName, queueID),
+		Detail: fmt.Sprintf("提交 Jenkins 构建：%s / Job %s（已入平台队列，轮到后触发）", p.ProjectKey, fullName),
 	})
 
 	streamKey := BuildLogStreamKey(rec.ID)
@@ -393,7 +374,13 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 	}
 
 	pos, err := s.deps.Builds.Submit(rec.ID, func(taskCtx context.Context) {
-		s.runJenkinsBuild(taskCtx, rec.ID, p.ProjectKey, fullName, queueID, expectedBuildNo)
+		// ⚠️ **触发 Jenkins 的动作在任务内部**（见 runJenkinsBuild 开头）。
+		// 放在这里而不是 HTTP 请求里，是这次修复的核心：
+		// HTTP 路径一触发就进 Jenkins 队列，平台的 buildConcurrency 根本拦不住 ——
+		// 批量打包 6 个会一次性往 Jenkins 塞 6 个（3 跑 3 排），而平台记录显示
+		// "3 running + 3 queued"（那是跟读任务的位次），两边对不上。
+		// 现在只有轮到本任务（拿到平台槽位）才会真触发，Jenkins 侧最多 buildConcurrency 个。
+		s.runJenkinsBuild(taskCtx, rec.ID, p.ProjectKey, fullName, in.Parameters)
 	})
 	if err != nil {
 		failMsg := "任务提交失败"
@@ -403,10 +390,8 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 		case errors.Is(err, queue.ErrQueueFull):
 			failMsg = "构建队列已满，请稍后重试"
 		}
-		if cerr := client.CancelQueueItem(ctx, queueID); cerr != nil {
-			s.log("ci.jenkins").Error("撤销 Jenkins 队列项失败，请在 Jenkins 上手动确认",
-				"queueId", queueID, "job", fullName, "err", cerr)
-		}
+		// 不需要撤销 Jenkins：这时候还没触发过（这正是把触发挪进任务的另一个好处 ——
+		// 队列满时不会白触发一次 Jenkins 再忙着善后）。
 		fin := now()
 		_ = s.db(ctx).Model(&model.BuildRecord{}).Where("id = ?", rec.ID).
 			Updates(map[string]any{"status": "failed", "stage": "提交失败", "error_code": "QUEUE_REJECTED",
@@ -419,13 +404,9 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 	}
 
 	if pos > 0 {
-		// 平台调度排队：构建**已经**交给 Jenkins 了，只是平台的构建池满了，
-		// 要等一个槽位才能开始转写日志、同步状态。
-		//
-		// 文案必须点明是"平台调度"：写成「等待执行器」会让人以为 Jenkins 那边还没跑，
-		// 而事实往往相反——Jenkins 可能已经在构建，只是平台还没接管同步。
-		// 这两件事说反了，用户就会去 Jenkins 页面上怀疑人生。
-		rec.Stage = fmt.Sprintf("已提交 Jenkins；平台调度排队中（前面还有 %d 个任务）", pos-1)
+		// 平台调度排队：这一步**还没触发 Jenkins**，纯粹在等平台构建槽位。
+		// 文案如实说明"轮到后才会提交给 Jenkins" —— 用户去 Jenkins 上看不到这次构建是正常的。
+		rec.Stage = fmt.Sprintf("等待平台构建槽位（前面还有 %d 个任务），轮到后提交 Jenkins", pos-1)
 		_ = s.deps.Stream.SetStatus(ctx, streamKey, logstream.Status{
 			Status: "queued", Progress: 0, Stage: rec.Stage,
 		})
@@ -434,7 +415,9 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 	}
 
 	return &JenkinsTriggerResultDTO{
-		QueueID:  queueID,
+		// 此时还没有队列项号 —— 触发要等平台队列轮到本任务。
+		// 前端也不依赖它（用的是 buildId / buildNo / status / stage）。
+		QueueID:  0,
 		FullName: fullName,
 		BuildID:  rec.ID,
 		BuildNo:  rec.BuildNo,
@@ -443,8 +426,8 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 		Status:     rec.Status,
 		Stage:      rec.Stage,
 		Parameters: in.Parameters,
-		Message: fmt.Sprintf("已提交 Jenkins：Job %s，队列项 #%d。平台构建记录 #%d 已创建，"+
-			"构建号与实时日志会在 Jenkins 开跑后自动同步。", fullName, queueID, rec.BuildNo),
+		Message: fmt.Sprintf("平台构建记录 #%d 已创建，Job %s 将在轮到平台构建槽位时提交给 Jenkins，"+
+			"构建号与实时日志会在 Jenkins 开跑后自动同步。", rec.BuildNo, fullName),
 	}, nil
 }
 
@@ -511,8 +494,40 @@ func isJenkinsBranchParam(name string) bool {
 // --------------------------------------------------------------------------- 后台同步
 
 // runJenkinsBuild 在任务池中把一次 Jenkins 构建同步到底。
+// failJenkinsBuild 把"还没跑起来就失败"写回记录。
+//
+// 为什么必须有它：触发 Jenkins 的动作挪进队列任务之后，构建记录在**触发之前**
+// 就已经建好了 —— 于是"连不上 Jenkins""触发被 Jenkins 拒绝"这类失败不能只 return，
+// 否则记录会永远停在「排队中，等待平台构建槽位」：用户以为还在等，其实什么都没发生。
+//
+// ⚠️ 收尾用自己的 ctx（`WithoutCancel` + 超时）：本函数恰恰常在"任务已被取消/超时"
+// 时被调用，拿那个已经取消的 ctx 去写终态、封流，会**三件一起静默失败**
+// （CI / CD / Jenkins 同一条纪律）。
+func (s *CIService) failJenkinsBuild(ctx context.Context, buildID uint64, streamKey, stage, errMsg string) {
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+
+	fin := now()
+	if err := s.db(wctx).Model(&model.BuildRecord{}).Where("id = ?", buildID).
+		Updates(map[string]any{
+			"status": "failed", "stage": stage,
+			"error_code": "JENKINS_TRIGGER_FAILED", "error_message": errMsg,
+			"finished_at": &fin, "updated_at": fin,
+		}).Error; err != nil {
+		s.log("ci.jenkins").Error("写失败状态失败", "buildId", buildID, "err", err)
+	}
+	_ = s.deps.Stream.Finish(wctx, streamKey, "failed")
+}
+
+// runJenkinsBuild 跟读一次 Jenkins 构建。
+//
+// ⚠️ **真正触发 Jenkins 的动作在本函数开头**，不在 HTTP 请求路径里 —— 这是刻意的：
+// 放在 HTTP 路径时，任务一进队列就立刻打 Jenkins，平台的 `buildConcurrency` 完全拦不住它。
+// 表现（用户 2026-10-16 报的）：批量打包 6 个 → Jenkins 侧收到 6 个（3 个占执行器、3 个排队），
+// 而平台记录显示"3 running + 3 queued"（那是跟读任务的位次），两边对不上账。
+// 挪到这里之后，只有**拿到平台构建槽位**的任务才会触发，Jenkins 侧最多 buildConcurrency 个。
 func (s *CIService) runJenkinsBuild(taskCtx context.Context, buildID uint64, projectKey, fullName string,
-	queueID, expectedBuildNo int) {
+	triggerParams []integration.JenkinsBuildParam) {
 
 	streamKey := BuildLogStreamKey(buildID)
 	log := s.log("ci.jenkins").With("buildId", buildID, "job", fullName)
@@ -523,6 +538,36 @@ func (s *CIService) runJenkinsBuild(taskCtx context.Context, buildID uint64, pro
 	}
 	ctx, cancel := context.WithTimeout(taskCtx, timeout)
 	defer cancel()
+
+	client, err := s.jenkinsClient(ctx)
+	if err != nil {
+		s.failJenkinsBuild(ctx, buildID, streamKey, "连接 Jenkins 失败", err.Error())
+		return
+	}
+
+	// 拍快照：nextBuildNumber 就是这一次会拿到的编号。队列项被 Jenkins 提前清掉时，
+	// 靠它把属于本次的构建认出来 —— 没有它就只能按时间猜，而猜错的后果是
+	// "日志看着对、其实是上一次的"。必须在**触发前**拍（编号会随别人的构建往前走）。
+	snapshot, snapErr := client.JobSnapshot(ctx, fullName)
+	expectedBuildNo := 0
+	if snapErr == nil && snapshot != nil {
+		expectedBuildNo = snapshot.NextBuildNumber
+	} else if snapErr != nil {
+		log.Warn("读取 Job 快照失败，将无法用构建号兜底", "err", snapErr)
+	}
+
+	queueID, err := client.Trigger(ctx, fullName, triggerParams)
+	if err != nil {
+		// ⚠️ 这是新顺序**必须补上**的一环：记录在 HTTP 路径就已经建好了，
+		// 所以触发失败不能只 return —— 那会把它永远留在"排队中"，
+		// 用户以为还在等，其实什么都没发生。
+		s.failJenkinsBuild(ctx, buildID, streamKey, "触发 Jenkins 构建失败", err.Error())
+		return
+	}
+	// 回写队列项号：取消/对账都要用它把平台记录与 Jenkins 上的那次构建对上。
+	qid := uint64(queueID)
+	_ = s.db(ctx).Model(&model.BuildRecord{}).Where("id = ?", buildID).
+		Updates(map[string]any{"jenkins_queue_id": &qid, "updated_at": now()}).Error
 
 	started := now()
 	if err := s.db(ctx).Model(&model.BuildRecord{}).Where("id = ?", buildID).
@@ -597,13 +642,8 @@ func (s *CIService) runJenkinsBuild(taskCtx context.Context, buildID uint64, pro
 		_ = s.deps.Stream.Finish(fctx, streamKey, status)
 	}
 
-	client, err := s.jenkinsClient(ctx)
-	if err != nil {
-		sink("error", "无法连接 Jenkins："+err.Error())
-		finish("failed", "已失败", "JENKINS_UNAVAILABLE", err.Error())
-		log.Error("解析 Jenkins 配置失败", "err", err)
-		return
-	}
+	// client 已在函数开头取过（触发 Jenkins 之前必须先确认连得上，
+	// 否则会先白建一条记录再发现连不上）。这里直接复用。
 
 	// ① 队列项 → 构建号
 	buildNo, ok := s.waitJenkinsBuildNo(ctx, client, fullName, queueID, expectedBuildNo,
