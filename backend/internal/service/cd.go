@@ -3556,11 +3556,19 @@ func (s *CDService) ensureServices(ctx context.Context, envID uint64, projectIDs
 
 	fresh := make([]model.ServiceInstance, 0, len(projs))
 	reuse := make([]model.ServiceInstance, 0, len(projs))
+	// 新实例的副本数**以集群里实际的为准**，而不是拍一个默认值。
+	//
+	// 为什么非改不可（2026-10-16 用户报的"首次批量发布怎么给我起了 2 个实例"）：
+	// 原先这里写死 2，而集群里那个 Deployment 是 CI / 手工部署的、副本数是 1 ——
+	// 库里的 2 一直没生效，直到**第一次通过平台发布**时
+	// （`CreateDeployment` 里的 `replicas := svc.Replicas`）被写进集群。
+	// 用户看到的就是"我明明只有 1 个，一发就成了 2 个"，而那个 2 从纳管那天就存着了。
+	replicasOf := s.clusterReplicasOf(ctx, env, projs)
 	for i := range projs {
 		if have[projs[i].ID] {
 			continue
 		}
-		svc := s.newServiceInstance(ctx, env, projs[i])
+		svc := s.newServiceInstance(ctx, env, projs[i], replicasOf[projs[i].ProjectKey])
 		if id, ok := trashID[projs[i].ID]; ok {
 			svc.ID = id
 			reuse = append(reuse, svc)
@@ -3581,8 +3589,63 @@ func (s *CDService) ensureServices(ctx context.Context, envID uint64, projectIDs
 	return nil
 }
 
+// clusterReplicasOf 读这批项目在集群里**实际**的副本数。
+//
+// 只用于"纳管时给副本数一个合理初值"：读得到的用它；读不到的（没接集群、凭据无权、
+// 工作负载还不存在）**不写进结果**，由调用方退回保守默认值 ——
+// 把读不到当成 0 会让纳管出来的服务一发布就被缩成 0 个实例。
+func (s *CDService) clusterReplicasOf(ctx context.Context, env *model.Environment, projs []model.Project) map[string]int {
+	out := make(map[string]int, len(projs))
+	// 环境没接集群时直接返回：那种情况下每个 Describe 都会因同样的原因失败，
+	// 逐个试只是白等一轮超时。
+	if strings.TrimSpace(env.Namespace) == "" || strings.TrimSpace(env.Cluster) == "" {
+		return out
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	// ⚠️ **总超时**：纳管是用户在前台等着的操作，而"读副本数"只是为了给个更好的初值。
+	// 集群不通时每个 Describe 都要等到连接超时，几十个项目叠起来就是分钟级 ——
+	// 那是拿一个可选优化去卡住一次保存。超时就退回默认值（replicaInit 兜 1）。
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// 并发上限：纳管可能一次几十个项目，不限并发会把集群 apiserver 打满。
+	sem := make(chan struct{}, 6)
+	for i := range projs {
+		wg.Add(1)
+		go func(workload string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			st, err := s.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, workload))
+			if err != nil || st == nil || !st.Exists || st.Replicas <= 0 {
+				return
+			}
+			mu.Lock()
+			out[workload] = st.Replicas
+			mu.Unlock()
+		}(projs[i].ProjectKey)
+	}
+	wg.Wait()
+	return out
+}
+
+// replicaInit 纳管时的初始副本数：**读得到集群就用集群的**，读不到退回 1。
+//
+// 两个"不用什么"都是刻意的：
+//   - 不用 0 —— 那是停服，不是"还没定"；
+//   - 不用 2 —— 凭空多占一份资源，而且与用户"我就一个实例"的预期相反。
+//     这个 2 正是 2026-10-16 那次投诉的来源（见 clusterReplicasOf 的注释）。
+func replicaInit(fromCluster int) int {
+	if fromCluster > 0 {
+		return fromCluster
+	}
+	return 1
+}
+
 // newServiceInstance 按「新建」的默认值造一行服务实例；项目已有可用镜像时直接置成运行态。
-func (s *CDService) newServiceInstance(ctx context.Context, env *model.Environment, p model.Project) model.ServiceInstance {
+//
+// `replicas` 由调用方从**集群实况**取（见 clusterReplicasOf），取不到时传 0。
+func (s *CDService) newServiceInstance(ctx context.Context, env *model.Environment, p model.Project, replicas int) model.ServiceInstance {
 	svc := model.ServiceInstance{
 		EnvID:        env.ID,
 		ProjectID:    p.ID,
@@ -3590,7 +3653,7 @@ func (s *CDService) newServiceInstance(ctx context.Context, env *model.Environme
 		ProjectKey:   p.ProjectKey,
 		WorkloadKind: "Deployment",
 		WorkloadName: p.ProjectKey,
-		Replicas:     2,
+		Replicas:     replicaInit(replicas),
 		Status:       "pending",
 		CPURequest:   "200m", CPULimit: "1000m",
 		MemRequest: "256Mi", MemLimit: "1Gi",

@@ -36,9 +36,15 @@ type stubCluster struct {
 	// 调用计数：用来钉住"取消纳管不缩容"这条纪律（Scale 会真的停服，Release 不会）。
 	scaleCalls   int
 	releaseCalls int
+	// describeState 指定 Describe 返回什么。nil 时沿用旧行为（空状态，Exists=false）——
+	// 加这个字段是为了不动已有测试的语义。
+	describeState *integration.WorkloadState
 }
 
 func (c *stubCluster) Describe(context.Context, integration.WorkloadRef) (*integration.WorkloadState, error) {
+	if c.describeState != nil {
+		return c.describeState, nil
+	}
 	return &integration.WorkloadState{}, nil
 }
 
