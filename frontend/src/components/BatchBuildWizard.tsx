@@ -1115,7 +1115,23 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
                 scroll={{ y: 340 }}
                 rowSelection={{
                   selectedRowKeys: keys,
-                  onChange: (ks) => setKeys(ks as string[]),
+                  /**
+                   * ⚠️ 不能直接 `setKeys(ks)`。
+                   *
+                   * antd 的 `onChange` 只给**当前 dataSource 里**选中的行，而这里的
+                   * dataSource 是**搜索 / 筛选后**的列表 —— 于是"上一次搜索时勾的、
+                   * 这次不在结果里"的项目会被整个丢掉。用户的实际体验：
+                   * 搜 `aioitms` 勾上 → 再搜 `aioai` 勾一个 → 回头发现第一个没了，
+                   * 而界面上"已选"始终显示 1 个，像是勾选没生效。
+                   *
+                   * 正解：**只替换可见部分的勾选状态，不在可见范围内的旧勾选原样保留**。
+                   */
+                  onChange: (ks) => {
+                    const visible = list.map((p) => p.key);
+                    setKeys((prev) => [
+                      ...new Set([...prev.filter((k) => !visible.includes(k)), ...(ks as string[])]),
+                    ]);
+                  },
                   getCheckboxProps: (p) => {
                     // Jenkins 项目能不能勾，取决于平台能不能把「分支」传进去
                     // （Job 恰好一个 git 参数、且没有不认识的参数）。

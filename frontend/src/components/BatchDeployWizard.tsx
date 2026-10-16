@@ -1724,7 +1724,23 @@ const submitAtRef = useRef(Date.now());
               pagination={false}
               rowSelection={{
                 selectedRowKeys: keys,
-                onChange: (ks) => setKeys(ks as string[]),
+                /**
+                 * ⚠️ 不能直接 `setKeys(ks)`。
+                 *
+                 * antd 的 `onChange` 只给**当前 dataSource 里**选中的行，而这里的
+                 * dataSource 是**搜索 / 筛选后**的列表 —— 于是"上一次搜索时勾的、
+                 * 这次不在结果里"的服务会被整个丢掉。用户的实际体验：
+                 * 搜 `aioitms` 勾上 → 再搜 `aioai` 勾一个 → 回头发现第一个没了，
+                 * 而界面上"已选"始终显示 1 个，像是勾选没生效。
+                 *
+                 * 正解：**只替换可见部分的勾选状态，不在可见范围内的旧勾选原样保留**。
+                 */
+                onChange: (ks) => {
+                  const visible = filtered.map((r) => r.projectKey);
+                  setKeys((prev) => [
+                    ...new Set([...prev.filter((k) => !visible.includes(k)), ...(ks as string[])]),
+                  ]);
+                },
                 // 三条硬约束：没有构建产物（无镜像）、没有服务实例（后端不受理）、已有进行中部署（后端会拒）
                 getCheckboxProps: (r) => ({
                   disabled: !r.hasBuild || r.undeployed || !!r.inflight,
