@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   App as AntApp,
-  AutoComplete,
   Button,
   Checkbox,
   Col,
@@ -50,8 +49,15 @@ export interface BatchBuildWizardProps {
   onCompleted?: (r: BatchResult) => void;
 }
 
-/** 分支并集里最多挂几个选项，避免 20 个项目的分支全堆进下拉框 */
-const BRANCH_OPTION_LIMIT = 40;
+/**
+ * 每个项目的分支候选最多挂几个。
+ *
+ * ⚠️ 原来定的 40 **太小**：Jenkins Job 的分支参数实测有 230 个，
+ * 卡在 40 会把用户要找的分支整个砍掉（`Release_aiops_1.63` 就排在第 40 之后），
+ * 表现是"下拉里找不到它" —— 而候选其实有，只是被我们截了。
+ * 下拉本身有虚拟滚动，挂几百个不会卡。
+ */
+const BRANCH_OPTION_LIMIT = 400;
 
 /** 处于"未结束"的构建：需要连 SSE 实时日志，而不是读历史日志 */
 const isLive = (s?: BuildStatus | string) => s === 'running' || s === 'queued';
@@ -855,39 +861,47 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
         const opts = branchOptions[r.key] ?? [];
         const val = branchOf[r.key] ?? '';
         return (
-          <AutoComplete
+          /**
+           * 用 `Select` 而不是 `AutoComplete` —— 与「项目编译」里那个分支选择器**同一套写法**。
+           *
+           * 关键差别在**搜索词与已选值是否分离**：
+           *   · `Select` + `showSearch` + `optionFilterProp="label"`：输入框里敲的是搜索词，
+           *     已选值另存 —— 所以「输入 1.63 能联想出 origin/Release_aiops_1.63」是成立的。
+           *   · `AutoComplete`：输入框内容**就是** value，两者是同一个东西。
+           *     既拿它当"显示已选值"又拿它当"搜索词"，必然打架 ——
+           *     我前两轮在这里反复翻车（先是被预填值过滤成空下拉，改成不过滤又丢了联想）。
+           *
+           * 代价是不能再自由输入分支名。这是有意的取舍：
+           * 「能搜索、能选到」是日常主路径；自由输入只在"候选读不到"时才需要，
+           * 而那种情况下面会单独提示（让它看起来像能输、其实输不进去更糟）。
+           */
+          <Select
+            showSearch
+            allowClear
             size="small"
             style={{ width: '100%' }}
-            value={val}
-            options={opts.map((b) => ({ value: b }))}
-            onChange={(v) => setBranchOf((prev) => ({ ...prev, [r.key]: v }))}
-            placeholder={branchLoading ? '读取中…' : '选择或输入分支'}
-            // 用 AutoComplete 而不是 Select：分支名**必须允许自由输入** ——
-            // 远端读不到的仓库不代表它没有分支，把用户锁死在候选列表里
-            // 等于让"读取失败"升级成"没法干活"。
-            //
-            // 候选为空时也要有个明确的落点：否则下拉是**什么都不显示**的，
-            // 用户分不清"没候选"和"点不开"，只能干瞪眼。
+            value={val || undefined}
+            onChange={(v) => setBranchOf((prev) => ({ ...prev, [r.key]: v ?? '' }))}
+            options={opts.map((b) => ({ label: b, value: b }))}
+            // 按 label 过滤（label 就是分支名）—— 不设它的话 antd 会按 value 过，行为一样但显式更清楚
+            optionFilterProp="label"
+            loading={branchLoading}
+            // 候选可能有几百个（实测某个 Job 有 230 个），限住下拉高度免得盖住底部按钮
+            listHeight={280}
+            placeholder={branchLoading ? '读取中…' : '选择分支'}
             notFoundContent={
-              <span style={{ fontSize: 12, color: '#8c8c95' }}>
-                {branchLoading ? '正在读取分支…' : '没有读到候选，可直接输入分支名'}
-              </span>
+              branchLoading ? (
+                <div style={{ padding: 10, textAlign: 'center' }}>
+                  <Spin size="small" />
+                </div>
+              ) : (
+                <div style={{ padding: 10 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {opts.length ? '没有匹配的分支' : '没有读到该项目的分支候选'}
+                  </Text>
+                </div>
+              )
             }
-            /**
-             * ⚠️ **必须显式关掉过滤**（`filterOption={false}`）。
-             *
-             * AutoComplete 默认拿**输入框里的值**当搜索词去过滤候选。而这个输入框
-             * 是受控的、显示着当前分支（比如 `Release_aiops_1.63`），于是点开下拉时
-             * 它拿这个值去匹配候选 —— 而候选往往是另一套写法（Jenkins Job 的 git
-             * 参数给的是 `origin/Release_aiops_1.63` 这类带前缀的），**一个都匹配不上**，
-             * 下拉被过滤成空的。用户看到的就是"点开什么都没有"，
-             * 而候选其实有 40 个。（2026-10-16 实测踩到。）
-             *
-             * 代价是不能用打字来缩小候选。但分支列表本来就只有几十个、
-             * 且要允许自由输入（读不到远端时用户得能自己打），
-             * "始终显示全部候选"比"能搜索但常常是空的"有用得多。
-             */
-            filterOption={false}
           />
         );
       },
@@ -1142,7 +1156,12 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
                   showIcon
                   style={{ marginBottom: 10 }}
                   message={`${unreadableProjects.length} 个项目的分支没读到：${unreadableProjects.join('、')}`}
-                  description="候选里只有各自配置里的默认分支，可以直接在下方分支框里输入要构建的分支名。"
+                  description={
+                    <span style={{ fontSize: 12 }}>
+                      这些项目的下拉里只有各自配置里的默认分支。要构建别的分支，请先到
+                      「项目管理 → 编译」里确认该项目的分支可选（那里读的是同一个来源）。
+                    </span>
+                  }
                 />
               ) : null}
 
