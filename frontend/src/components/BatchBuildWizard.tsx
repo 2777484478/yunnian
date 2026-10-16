@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   App as AntApp,
+  AutoComplete,
   Button,
   Checkbox,
   Col,
@@ -25,17 +26,19 @@ import {
   CheckCircleFilled,
   ClusterOutlined,
   InfoCircleOutlined,
+  ReloadOutlined,
   SearchOutlined,
   ThunderboltFilled,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { BatchRunner } from './BatchRunner';
-import type { BatchResult, BatchTaskDef, BatchTaskHandle, BatchTaskOutcome } from './BatchRunner';
+// 只借用它的结果类型：本向导已不再用 BatchRunner 驱动执行
+// （那套串行编排是"关页面后只构建一个"的根因，见 submit 的注释）。
+import type { BatchResult } from './BatchRunner';
 import { KVFields } from './KVFields';
 import { BuildStatusTag, MethodTag, ProjectTypeTag } from './StatusTag';
 import { ApiError, buildApi, isGitParam, jenkinsApi, projectApi } from '@/api';
-import type { Project } from '@/types';
+import type { BuildStatus, Project } from '@/types';
 
 const { Text } = Typography;
 
@@ -47,15 +50,32 @@ export interface BatchBuildWizardProps {
   onCompleted?: (r: BatchResult) => void;
 }
 
-const CONCURRENCY_OPTIONS = [
-  { label: '1（串行排队）', value: 1 },
-  { label: '2', value: 2 },
-  { label: '3（推荐）', value: 3 },
-  { label: '4', value: 4 },
-];
-
 /** 分支并集里最多挂几个选项，避免 20 个项目的分支全堆进下拉框 */
 const BRANCH_OPTION_LIMIT = 40;
+
+/** 处于"未结束"的构建：需要连 SSE 实时日志，而不是读历史日志 */
+const isLive = (s?: BuildStatus | string) => s === 'running' || s === 'queued';
+
+/**
+ * 已提交的一个构建单。
+ *
+ * ⚠️ 这是**建单结果**，不是执行结果 —— 必须分开：
+ * 建单失败（分支不存在 / 项目停用 / 队列满）是**这次点击**的问题，用户当场得改；
+ * 执行失败是**构建过程**的问题，去「构建记录」看日志与 AI 归因。
+ * 混成一个"失败"，用户分不清该重试还是该改分支。
+ */
+interface SubmittedItem {
+  projectKey: string;
+  projectName: string;
+  branch: string;
+  /** 产物来源（Jenkins Job / 平台 Tag 规则） */
+  source: string;
+  buildId?: string;
+  buildNo?: string;
+  status?: BuildStatus;
+  /** 建单失败的真因（原样透出后端文案） */
+  error?: string;
+}
 
 /**
  * 一个 Jenkins 项目进批量打包所需的绑定信息。
@@ -111,27 +131,31 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
   const [projects, setProjects] = useState<Project[]>([]);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [versionOptions, setVersionOptions] = useState<string[]>([]);
-  const [versionLoading, setVersionLoading] = useState(false);
-  const [versionError, setVersionError] = useState('');
-  /** 预填版本被自动纠正时的说明（不是错误，只是告诉用户"值变了，为什么"） */
-  const [versionNote, setVersionNote] = useState('');
   /**
-   * 已对哪一批选择做过"预填纠正"。用 ref 记住，**同一批只纠正一次**——
-   * 否则 effect 因依赖变化重跑时会再次覆盖，把用户手工改的版本顶掉。
+   * 逐项目的分支候选（key → 分支列表）。
+   *
+   * 取代了原先的"所有项目共有版本（取交集）"。取交集的前提在实践中不成立：
+   * 各项目的分支本来就不同（形如 `v_aiops_1.16.0109` 的版本分支往往只有部分项目有），
+   * 交叉一遍只剩 master —— 而用户要发的恰恰不是 master。
    */
-  const versionFixedForRef = useRef('');
+  const [branchOptions, setBranchOptions] = useState<Record<string, string[]>>({});
+  /** 逐项目选中的分支（key → 分支名）。提交时按项目各取各的。 */
+  const [branchOf, setBranchOf] = useState<Record<string, string>>({});
+  const [branchLoading, setBranchLoading] = useState(false);
+  /** 分支读不到的项目名 —— 如实说出来，不能把它们当成"没有分支" */
+  const [unreadableProjects, setUnreadableProjects] = useState<string[]>([]);
   /** key → Jenkins 项目的批量计划（null = 不能进批量），只对 buildMethod=jenkins 的项有值 */
   const [jenkinsPlan, setJenkinsPlan] = useState<Record<string, JenkinsBatchPlan | null>>({});
   /** key → 不能进批量的原因，原样显示在卡片上（"勾不动"必须给出理由） */
   const [jenkinsBlocked, setJenkinsBlocked] = useState<Record<string, string>>({});
   const [planLoading, setPlanLoading] = useState(false);
-  const [tasks, setTasks] = useState<BatchTaskDef[]>([]);
   const [batchNo, setBatchNo] = useState('');
-  const [round, setRound] = useState(0);
-  const [result, setResult] = useState<BatchResult | null>(null);
-  /** 并发数：提交时从表单读出后冻结，避免执行中途改表单影响调度 */
-  const [concurrency, setConcurrency] = useState(3);
+  // 一次性建单之后的新状态：已提交的构建单 + 正在建单 + 二次确认弹窗
+  const [submitted, setSubmitted] = useState<SubmittedItem[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  /** 点「开始打包」的时刻，用来算整批墙钟耗时。 */
+  const submitAtRef = useRef(Date.now());
   const [form] = Form.useForm();
 
   // ------------------------------------------------------------------ 取数
@@ -154,14 +178,14 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     if (!open) return;
     setStep(0);
     setKeys(presetKeys ?? []);
-    setTasks([]);
-    setResult(null);
+    setSubmitted([]);
+    setSubmitting(false);
+    finishedRef.current = false;
     setKw('');
     setTypeFilter('all');
-    setVersionOptions([]);
-    setVersionError('');
-    setVersionNote('');
-    versionFixedForRef.current = '';
+    setBranchOptions({});
+    setBranchOf({});
+    setUnreadableProjects([]);
     setJenkinsPlan({});
     setJenkinsBlocked({});
     void loadProjects();
@@ -314,122 +338,75 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
   const toggle = (key: string, on: boolean) =>
     setKeys((prev) => (on ? [...new Set([...prev, key])] : prev.filter((k) => k !== key)));
 
-  // ------------------------------------------------------------------ 版本候选
+  // ------------------------------------------------------------------ 逐项目分支
   //
-  // 「版本」在两类项目里落到不同的地方：
+  // 「分支」在两类项目里落到不同的地方：
   //   - Jenkins 项目 → 传给它的 git 参数（如 git_branch）；
   //   - 平台构建项目 → 传给 POST /builds 的 branch。
   //
-  // 批量构建的语义是"这一批用同一个版本"，所以候选值必须是**所有选中项目都认识的**
-  // ——取**交集**而不是并集。并集允许用户挑到一个某个项目根本没有的版本，
-  // 那次构建必然失败，而失败原因要到日志里才看得出来。
-  //
-  // 取不到就退回项目自身默认版本 + 手工输入，并如实说明是谁没读到。
+  // ⚠️ 这里**不再取交集**。原先的算法是"只给所有选中项目都认识的版本"，
+  // 理由是"避免挑到一个某项目没有的版本、构建必然失败"。听起来稳妥，实际不成立：
+  // 各项目的分支本来就不同（版本分支 `v_aiops_1.16.0109` 往往只有部分项目有），
+  // 一交叉就只剩 master —— 而用户那批要发的根本不是 master。
+  // 更糟的是它还会"纠正"用户的选择：把预填的 master 换成一个交集里的值，
+  // 用户看到的就是"我选的分支被页面改掉了"。
+ //
+  // 现在每个项目拉**自己的**分支，各选各的，谁的项目谁负责。
   useEffect(() => {
     if (step !== 1 || !keys.length) return;
     let cancelled = false;
-    setVersionLoading(true);
-    setVersionError('');
-    setVersionNote('');
+    setBranchLoading(true);
 
-    const jenkinsKeys = keys.filter((k) => projectMap[k]?.buildMethod === 'jenkins');
-    const platformKeys = keys.filter((k) => projectMap[k]?.buildMethod !== 'jenkins');
-
-    // Jenkins 侧：只对选中的项目读可选值（这个接口每次都真去仓库拉一遍）。
-    const jenkinsValues = Promise.all(
-      jenkinsKeys.map(async (k) => {
-        const plan = jenkinsPlan[k];
-        if (!plan) return { key: k, values: null as string[] | null };
+    Promise.all(
+      keys.map(async (k) => {
+        const jk = jenkinsPlan[k];
         try {
-          const v = await jenkinsApi.paramValues(plan.job, plan.param);
-          return { key: k, values: [...v.tags, ...v.branches, ...v.other] };
+          if (jk) {
+            // Jenkins 项目：可选值就是那个 Job 的 git 参数取值（每次都真去读一遍）
+            const v = await jenkinsApi.paramValues(jk.job, jk.param);
+            return { key: k, values: [...v.branches, ...v.tags, ...v.other] };
+          }
+          return { key: k, values: await projectApi.branches(k) };
         } catch {
-          // 读不到**不能**当成"没有可选值"——后者会让人以为仓库里没版本。
-          return { key: k, values: null };
+          // 读不到**不能**当成"这个项目没有分支"——那会让人以为仓库是空的。
+          // 记下来，界面上如实说明。
+          return { key: k, values: [] as string[], failed: true };
         }
       }),
-    );
-
-    // 平台侧：沿用原来的分支读取（GitLab 未启用真实实现时整体降级）。
-    const platformBranches = platformKeys.length
-      ? Promise.all(platformKeys.map((k) => projectApi.branches(k).catch(() => null)))
-      : Promise.resolve([] as string[][] | null[]);
-
-    Promise.all([jenkinsValues, platformBranches])
-      .then(([jk, pf]) => {
+    )
+      .then((rows) => {
         if (cancelled) return;
+        const opts: Record<string, string[]> = {};
+        const failed: string[] = [];
+        rows.forEach((r) => {
+          const p = projectMap[r.key];
+          // 项目自己的默认分支永远进候选：读不到远端时至少有个起点，
+          // 而"有没有起点"不该由我们这次读取的成败决定。
+          const set = new Set<string>(r.values);
+          if (p?.defaultBranch) set.add(p.defaultBranch);
+          opts[r.key] = [...set].slice(0, BRANCH_OPTION_LIMIT);
+          if (r.failed) failed.push(p?.name || r.key);
+        });
+        setBranchOptions(opts);
+        setUnreadableProjects(failed);
 
-        const sets: Set<string>[] = [];
-        const unreadable: string[] = [];
-
-        for (const row of jk) {
-          if (row.values === null) unreadable.push(projectMap[row.key]?.name || row.key);
-          else sets.push(new Set(row.values));
-        }
-
-        if (platformKeys.length) {
-          const readable = (pf as (string[] | null)[]).filter((x): x is string[] => Array.isArray(x));
-          if (!readable.length) {
-            // 代码托管可能未启用真实实现——如实说明，并让用户手工填
-            unreadable.push(...platformKeys.map((k) => projectMap[k]?.name || k));
-          } else {
-            const union = new Set<string>();
-            readable.flat().forEach((b) => b && union.add(b));
-            // 项目自己的默认分支也放进来（平台侧原本就是这么做的：至少给用户一个起点）
-            platformKeys.forEach((k) => {
-              const d = projectMap[k]?.defaultBranch;
-              if (d) union.add(d);
-            });
-            sets.push(union);
-          }
-        }
-
-        let common: string[] = [];
-        if (sets.length) {
-          common = [...sets[0]].filter((v) => sets.every((s) => s.has(v)));
-        }
-
-        // 兜底：把各项目的默认版本也放进来（交集为空时用户至少有个起点），
-        // 但**只在它是共有值时才放**——否则等于偷偷放宽了"共有"这个前提。
-        if (!common.length) {
-          const defaults = new Set(
-            keys.map((k) => projectMap[k]?.defaultBranch).filter((b): b is string => !!b),
-          );
-          if (defaults.size && !sets.length) common = [...defaults];
-        }
-
-        setVersionOptions(common.slice(0, BRANCH_OPTION_LIMIT));
-
-        // 预填的版本来自"列表里第一个项目的默认分支"，它**未必**是所有选中项目
-        // 都认识的（Jenkins Job 的 git 参数里可能根本没有它）。留着它等于把
-        // "只给共有版本"这个前提偷偷放掉了——用户看不出哪个项目会构建失败。
-        // 所以只要它不在候选里就换成候选的第一个，并把这次改动明确说出来。
-        const picked = form.getFieldValue('branch') as string | undefined;
-        const selKey = keys.join(',');
-        if (common.length && picked && !common.includes(picked) && versionFixedForRef.current !== selKey) {
-          versionFixedForRef.current = selKey;
-          form.setFieldValue('branch', common[0]);
-          setVersionNote(
-            `预填的「${picked}」不是所有选中项目都有的版本，已改为候选里的「${common[0]}」`,
-          );
-        }
-
-        if (unreadable.length) {
-          setVersionError(
-            `未能读取以下项目的可选版本：${unreadable.join('、')}。候选里只剩读到的那些，` +
-              `不能保证每个项目都有——请自行确认，或直接在输入框里填版本名`,
-          );
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setVersionError('未能读取版本候选（代码托管 / Jenkins 可能未启用真实实现），请手工输入版本名');
-        const set = new Set<string>();
-        keys.forEach((k) => projectMap[k]?.defaultBranch && set.add(projectMap[k].defaultBranch!));
-        setVersionOptions([...set]);
+        setBranchOf((prev) => {
+          const next = { ...prev };
+          keys.forEach((k) => {
+            // 用户已经动过的**一律不动** —— 这是我们最容易犯的错
+            //（覆盖之后界面看着很正常，用户却发现自己选的分支被改掉了）。
+            if (next[k]) return;
+            const p = projectMap[k];
+            // 默认值 = 该项目**最近一次构建用过的分支** → 回落项目默认分支 → 候选第一个。
+            // 为什么用"最近构建过的"而不是 master：日常发版发的就是那些版本分支，
+            // 每次都要求手动改回去，等于把"默认"这两个字废掉了。
+            next[k] = p?.lastBuild?.branch || p?.defaultBranch || opts[k]?.[0] || '';
+          });
+          return next;
+        });
       })
       .finally(() => {
-        if (!cancelled) setVersionLoading(false);
+        if (!cancelled) setBranchLoading(false);
       });
 
     return () => {
@@ -447,19 +424,19 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
 
   // ------------------------------------------------------------------ 启动打包
 
-  /** 上一轮里成功的任务 id（重试时只带失败项） */
-  const lastOkRef = useRef<Set<string>>(new Set());
-  /** 本批次的公共提交参数（版本 / 参数） */
-  const startPayloadRef = useRef<{ branch: string; params?: Record<string, string> }>({
-    branch: 'master',
-  });
   /**
-   * 本批次里走 Jenkins 链路的项目 → 它报名时定下的 Job 与 git 参数名。
-   * 提交时按项目 key 取用；不在这里的走平台构建链路。
+   * 「开始打包」= **一次性把全部构建单建出来**，然后就不管了。
+   *
+   * ⚠️ 与批量发布同源的一次修复（见 BatchDeployWizard 的 submit）：
+   * 原来由前端（BatchRunner）在浏览器里逐个建单、等前一个跑完再建下一个，
+   * 于是**关掉页面后，后面的项目根本没有被创建过** —— 用户看到的就是
+   * "排队以后关闭页面，只执行一个，后面的不执行"。
+   *
+   * 而两条链路的建单都是**建单即入队**（`POST /builds` → 构建池；
+   * Jenkins 触发 → Job 自己排），由平台按 `BuildConcurrency` 调度。
+   * 单子一旦建出来，就与浏览器在不在、页面关没关完全无关。
    */
-  const jenkinsExecRef = useRef<Record<string, JenkinsBatchPlan>>({});
-
-  const start = async () => {
+  const submit = async () => {
     const v = await form.validateFields();
     const no = `BT${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Date.now()
       .toString()
@@ -471,149 +448,351 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       return acc;
     }, {});
 
-    const built: BatchTaskDef[] = keys.map((k) => {
+    setBatchNo(no);
+    setConfirmOpen(false);
+    setStep(2);
+    setSubmitting(true);
+
+    // 先把"要提交什么"算齐（纯计算），失败项也能原位显示出来。
+    const pending: SubmittedItem[] = keys.map((k) => {
       const p = projectMap[k];
       const jk = jenkinsPlan[k];
       return {
-        id: `bt_${k}`,
-        title: p.name,
-        subtitle: `${p.key} · ${p.type === 'frontend' ? '前端' : '后端'} · ${v.branch}`,
-        short: p.key,
         projectKey: k,
-        // 只读展示本次产物从哪来。Jenkins 项目的镜像由 Job 自己构建推送，
-        // 平台项目才由后端按 tagPattern 生成——两者不能写成同一句话。
-        imageHint: jk ? `Jenkins Job ${jk.job}` : `${p.registry}/${p.imageName} · ${p.tagPattern}`,
+        projectName: p.name,
+        // 分支**按项目各取各的**（见逐项目分支那段注释）
+        branch: branchOf[k] || p.defaultBranch || '',
+        // 只读展示产物从哪来。Jenkins 项目的镜像由 Job 自己构建推送，
+        // 平台项目才由后端按 tagPattern 生成 —— 两者不能写成同一句话。
+        source: jk ? `Jenkins Job ${jk.job}` : `${p.registry}/${p.imageName} · ${p.tagPattern}`,
       };
     });
+    setSubmitted(pending);
 
-    // 本次要走的 Jenkins 链路参数：job + 承接版本的 git 参数名。
-    // 放在 ref 里而不是 BatchTaskDef 上——task 定义只说"是什么"，不说"怎么跑"。
-    const exec: Record<string, JenkinsBatchPlan> = {};
-    for (const k of keys) {
-      const jk = jenkinsPlan[k];
-      if (jk) exec[k] = jk;
+    /**
+     * 并发建单，而不是串行。
+     *
+     * 串行唯一的"优势"是前面的失败就不建后面的 —— 那恰恰是坏语义：
+     * 勾了 6 个项目，凭什么因为第 2 个的分支不对就放弃后面 4 个？
+     * 每个构建单独立成败，失败项原位标出来让用户单独处理。
+     */
+    const results = await Promise.all(
+      keys.map(async (k, i): Promise<SubmittedItem> => {
+        const base = pending[i];
+        const jk = jenkinsPlan[k];
+        const branch = base.branch;
+        // 幂等键按「批次 + 项目」：后端对重复的 idempotencyKey 不报错，
+        // 而是把已有构建单原样返回（见 service/ci.go 的 TriggerBuild）。
+        const idem = `${no}:${k}`;
+        try {
+          if (jk) {
+            /**
+             * Jenkins 链路：把分支传给它的 git 参数。
+             *
+             * ⚠️ 必须分流。平台构建接口**不看 buildMethod**，会把"从 Jenkins
+             * 分支下拉里选出来的值"当成平台自己的分支名，去代码托管查一个提交、
+             * 再跑一次平台的 docker 构建 —— 最后成功落一条和 Jenkins 毫无关系的
+             * 构建记录。那属于最难发现的那种错：一切看起来都对。
+             */
+            const res = await jenkinsApi.trigger(
+              jk.job,
+              branch ? [{ name: jk.param, value: branch }] : [],
+              idem,
+            );
+            return {
+              ...base,
+              buildId: String(res.buildId),
+              buildNo: `${k}#${res.buildNo}`,
+              status: res.status === 'queued' ? 'queued' : 'running',
+            };
+          }
+          const b = await buildApi.trigger({
+            projectKey: k,
+            branch,
+            params,
+            idempotencyKey: idem,
+            triggerType: 'manual',
+          });
+          return {
+            ...base,
+            buildId: String(b.id),
+            buildNo: `${k}#${b.buildNo}`,
+            status: b.status === 'queued' ? 'queued' : 'running',
+          };
+        } catch (e) {
+          // 提交失败必须给**真因**（分支不存在 / 项目停用 / 队列满各不一样），
+          // 压成一句"提交失败"会让用户拿参数问题当系统故障去排查。
+          return { ...base, error: e instanceof ApiError ? e.message : '提交失败' };
+        }
+      }),
+    );
+
+    setSubmitted(results);
+    setSubmitting(false);
+
+    const ok = results.filter((x) => !x.error);
+    const bad = results.filter((x) => x.error);
+    if (bad.length) {
+      notification.warning({
+        message: `已提交 ${ok.length} 个，${bad.length} 个未能建单`,
+        description: `${bad.map((x) => x.projectKey).join('、')} 没有进入队列，原因见下方列表。其余项目已交给平台依次构建，与是否关闭本页面无关。`,
+        duration: 8,
+      });
+    } else {
+      notification.success({
+        message: `已提交 ${ok.length} 个构建任务`,
+        description: '平台会按构建池并发依次执行。现在就可以关闭本页面，构建不会中断。',
+        duration: 6,
+      });
     }
-    jenkinsExecRef.current = exec;
-
-    startPayloadRef.current = { branch: v.branch, params };
-    lastOkRef.current = new Set();
-
-    setBatchNo(no);
-    setTasks(built);
-    setResult(null);
-    setConcurrency(v.concurrency ?? 3);
-    setRound((r) => r + 1);
-    setStep(2);
   };
 
   /**
-   * 提交单个任务。**两条完全不同的链路，按项目的构建方式分流**：
+   * 轮询这批构建的状态 —— **只为给人看**，不驱动任何执行。
    *
-   *   - Jenkins 项目 → 打 Jenkins 触发接口，把所选版本传给 Job 的 git 参数。
-   *     必须这样分流：平台构建接口（下面那条）**不看 buildMethod**，它会把
-   *     "刚从 Jenkins 版本下拉里选出来的值"当成平台自己的分支名，去代码托管
-   *     查一个提交、再跑一次平台的 docker 构建——最后成功落一条和 Jenkins
-   *     毫无关系的构建记录。这属于最难发现的那种错：一切看起来都对。
-   *
-   *   - 其余项目 → 平台自己的构建链路，行为与之前完全一致。
-   *
-   * 幂等键按「批次 + 项目」生成——同一次点击只会产生一个构建单；
-   * 后端对重复的 idempotencyKey **不报错**，而是把已有构建单原样返回
-   * （幂等语义，见 service/ci.go 的 TriggerBuild），所以这里无需处理 409。
+   * 与改造前的本质区别：这里即使一次都不跑（用户把页面关了），
+   * 平台该构建的还是照跑。轮询失败也不改任何状态 —— 它只是显示层。
    */
-  const startTask = useCallback(
-    async (task: BatchTaskDef): Promise<BatchTaskHandle> => {
-      const { branch, params } = startPayloadRef.current;
-      const idem = `${batchNo}:${task.projectKey}`;
-      const jk = jenkinsExecRef.current[task.projectKey];
+  const refreshSubmitted = useCallback(async () => {
+    try {
+      const page = await buildApi.list({ pageSize: 100 });
+      const byId = new Map(page.list.map((b) => [b.id, b]));
+      setSubmitted((prev) =>
+        prev.map((x) => {
+          if (!x.buildId) return x;
+          const b = byId.get(x.buildId);
+          return b ? { ...x, status: b.status } : x;
+        }),
+      );
+    } catch {
+      // 读不到**不改状态**：把"我没读到"说成"构建失败了"，两者处置完全不同。
+    }
+  }, []);
 
-      if (jk) {
-        // 只传用户明确选过的参数：不传 → Jenkins 用它自己配置的默认值，
-        // 与在 Jenkins 页面上直接点 Build 一致；传一个平台猜的值才可能构建错版本。
-        const res = await jenkinsApi.trigger(
-          jk.job,
-          branch ? [{ name: jk.param, value: branch }] : [],
-          idem,
-        );
-        return {
-          runId: String(res.buildId),
-          // 两类构建的日志流 key 是同一个（BuildLogStreamKey），所以订阅方式一致。
-          // 不用响应里的 logStreamUrl：它是相对路径，EventSource 不能带请求头，
-          // 必须经 buildApi.stream() 把令牌拼进查询串。
-          stream: buildApi.stream(String(res.buildId)),
-          runNo: `${task.projectKey}#${res.buildNo}`,
-          initialStatus: res.status === 'queued' ? 'queued' : 'running',
-          initialStage: res.stage,
-        };
-      }
+  useEffect(() => {
+    if (!open || step !== 2 || submitting) return;
+    if (!submitted.some((x) => x.buildId)) return;
+    const timer = window.setInterval(() => void refreshSubmitted(), 4000);
+    void refreshSubmitted();
+    return () => window.clearInterval(timer);
+    // 依赖里**故意不放 submitted**：否则每次轮询都重建定时器，间隔被搅成不等。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, step, submitting, refreshSubmitted]);
 
-      const b = await buildApi.trigger({
-        projectKey: task.projectKey,
-        branch,
-        params,
-        idempotencyKey: idem,
-        triggerType: 'manual',
-      });
-      return {
-        runId: String(b.id),
-        stream: buildApi.stream(String(b.id)),
-        runNo: `${task.projectKey}#${b.buildNo}`,
-        // 后端刚建单时是 queued（构建池满会一直在排队）。如实上报，
-        // 面板据此显示"排队中"，而不是一律显示"执行中"。
-        initialStatus: b.status === 'queued' ? 'queued' : 'running',
-        initialStage: b.stage,
-      };
+  /** 本批概览（顶部与底部共用同一份数字，避免两处各算一次而分家）。 */
+  const okCount = submitted.filter((x) => !x.error).length;
+  const badCount = submitted.filter((x) => !!x.error).length;
+  const runningCount = submitted.filter((x) => !x.error && isLive(x.status)).length;
+  const successCount = submitted.filter((x) => x.status === 'success').length;
+  const failedCount = submitted.filter((x) => x.status === 'failed' || !!x.error).length;
+  const canceledCount = submitted.filter((x) => x.status === 'canceled').length;
+  const interruptedCount = submitted.filter((x) => x.status === 'interrupted').length;
+
+  /**
+   * 全部构建停住后向父组件报一次结果。
+   * ⚠️ `interrupted` 单列并且**绝不能**算进成功：漏掉它，一批"跑了一半就没了"
+   * 的构建会弹出绿色的「全部成功」。
+   */
+  const finishedRef = useRef(false);
+  useEffect(() => {
+    if (step !== 2 || submitting || !submitted.length || finishedRef.current) return;
+    if (!submitted.every((x) => !x.buildId || !isLive(x.status))) return;
+    finishedRef.current = true;
+    onCompleted?.({
+      total: submitted.length,
+      success: successCount,
+      failed: failedCount,
+      canceled: canceledCount,
+      pending: 0,
+      interrupted: interruptedCount,
+      ms: Date.now() - submitAtRef.current,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, submitting, submitted]);
+
+
+  /** 第 1 步「选择项目」表的列：把卡片上原有的信息平铺成列，不丢字段。 */
+  const pickColumns: ColumnsType<Project> = [
+    {
+      title: '项目',
+      key: 'project',
+      width: 300,
+      render: (_, p) => (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <span style={{ display: 'inline-flex', flex: 'none' }}>
+            <ProjectTypeTag type={p.type} />
+          </span>
+          <b className="yn-ellipsis" style={{ flex: '1 1 auto', minWidth: 0, fontWeight: 500 }}>
+            {p.name}
+          </b>
+          <span className="yn-mono" style={{ flex: 'none', color: '#9aa0aa', fontSize: 11 }}>
+            {p.key}
+          </span>
+        </div>
+      ),
     },
-    [batchNo],
-  );
+    {
+      title: '构建方式',
+      key: 'method',
+      width: 176,
+      render: (_, p) => {
+        const plan = p.buildMethod === 'jenkins' ? jenkinsPlan[p.key] : undefined;
+        return (
+          <Space size={4}>
+            <MethodTag method={p.buildMethod} />
+            {plan ? (
+              <Tooltip title={`批量提交会把所选分支传给该 Job 的 ${plan.param} 参数`}>
+                <Tag color="blue" style={{ marginInlineEnd: 0, cursor: 'help' }}>
+                  可批量
+                </Tag>
+              </Tooltip>
+            ) : null}
+            {!p.enabled ? <Tag style={{ marginInlineEnd: 0 }}>已停用</Tag> : null}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '最近构建',
+      key: 'last',
+      // 顺带把**分支**也放出来：第 2 步的默认分支取的就是它，
+      // 在这里能提前看到"我大概会构建哪个分支"。
+      width: 200,
+      render: (_, p) =>
+        p.lastBuild?.branch ? (
+          <Space size={6}>
+            <BuildStatusTag status={p.lastBuild.status} />
+            <span className="yn-mono" style={{ fontSize: 11.5, color: '#8c8c95' }}>
+              {p.lastBuild.branch}
+            </span>
+          </Space>
+        ) : (
+          <BuildStatusTag status={p.lastBuild?.status} />
+        ),
+    },
+    {
+      title: '负责人',
+      key: 'owner',
+      width: 110,
+      render: (_, p) => <span style={{ fontSize: 12.5 }}>{p.owner}</span>,
+    },
+    {
+      title: '说明',
+      key: 'note',
+      render: (_, p) => {
+        const isJenkins = p.buildMethod === 'jenkins';
+        const ready = isJenkins && !!jenkinsPlan[p.key];
+        const blockReason = isJenkins ? (jenkinsBlocked[p.key] ?? '') : '';
+        // 计划还没判定出来（参数正在读）—— 此时既不说"能"，也不说"不能"
+        if (blockReason) {
+          return (
+            <Text type="warning" style={{ fontSize: 12 }}>
+              不能批量构建：{blockReason}
+            </Text>
+          );
+        }
+        if (isJenkins && !ready) {
+          return (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              正在读取该 Job 的参数…
+            </Text>
+          );
+        }
+        return (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {ready ? `分支会传给 git 参数 ${jenkinsPlan[p.key]?.param}` : '按平台 Tag 规则生成镜像'}
+          </Text>
+        );
+      },
+    },
+  ];
 
-  const fetchOutcome = useCallback(async (runId: string): Promise<BatchTaskOutcome> => {
-    const b = await buildApi.get(runId);
-    const ok = b.status === 'success';
-    return {
-      ok,
-      status: b.status,
-      detail: ok
-        ? b.stage || '构建完成'
-        : // 中断的**不能**走 AI 归因那条路：它没有失败原因可归因（后端也只对 failed 受理），
-          // 落回 `b.stage`（启动补偿写的是"已中断"）会得到一句没有下文的"已中断"。
-          b.status === 'interrupted'
-          ? '因平台重启中断，未产出镜像；需重新打包'
-          : b.aiDiagnosis?.reason || b.stage || '构建失败',
-    };
-  }, []);
-
-  const cancelRun = useCallback(async (runId: string) => {
-    await buildApi.cancel(runId);
-  }, []);
-
-  const handleFinish = (r: BatchResult) => {
-    setResult(r);
-    onCompleted?.(r);
-    // interrupted 也算未成功：漏掉它会让"跑了一半就没了"的一批弹出绿色「全部成功」。
-    const allOk = !r.failed && !r.canceled && !r.interrupted;
-    notification[allOk ? 'success' : 'warning']({
-      message: allOk ? '批量打包全部成功' : '批量打包完成（存在未成功项）',
-      description: (
-        <span>
-          批次 <b>{batchNo}</b>：成功 <b style={{ color: '#52c41a' }}>{r.success}</b> 个
-          {r.failed ? (
-            <>
-              ，失败 <b style={{ color: '#ff4d4f' }}>{r.failed}</b> 个
-            </>
-          ) : null}
-          {r.interrupted ? (
-            <>
-              ，已中断 <b style={{ color: '#fa8c16' }}>{r.interrupted}</b> 个（平台重启打断，未产出镜像，需重新打包）
-            </>
-          ) : null}
-          {r.canceled ? `，取消 ${r.canceled} 个` : null}。构建记录已落库，可在「构建记录」查看详情与日志。
+  /** 第 3 步「已提交」表的列 —— 只读，不承担任何执行职责。 */
+  const submittedColumns: ColumnsType<SubmittedItem> = [
+    {
+      title: '项目',
+      key: 'project',
+      width: 250,
+      render: (_, r) => (
+        <Space size={6}>
+          <span style={{ fontWeight: 500 }}>{r.projectName}</span>
+          <Text className="yn-mono" type="secondary" style={{ fontSize: 11 }}>
+            {r.projectKey}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '构建分支',
+      key: 'branch',
+      width: 200,
+      // 每个项目**自己的**分支 —— 这一列正是这次改造的重点，所以要显眼。
+      render: (_, r) => (
+        <span className="yn-mono" style={{ fontSize: 12.5, color: '#1677ff' }}>
+          {r.branch || '—'}
         </span>
       ),
-      placement: 'topRight',
-      duration: 8,
-    });
-  };
+    },
+    {
+      title: '构建单号',
+      key: 'no',
+      width: 160,
+      render: (_, r) =>
+        r.buildNo ? (
+          <span className="yn-mono" style={{ fontSize: 12.5 }}>
+            {r.buildNo}
+          </span>
+        ) : (
+          // 没建单就没有单号 —— 不给占位号，那会让人去记录里搜一个不存在的号。
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            —
+          </Text>
+        ),
+    },
+    {
+      title: '状态',
+      key: 'status',
+      width: 110,
+      render: (_, r) =>
+        r.error ? (
+          <Tag color="error" style={{ marginInlineEnd: 0 }}>
+            未建单
+          </Tag>
+        ) : r.status ? (
+          <BuildStatusTag status={r.status} />
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            —
+          </Text>
+        ),
+    },
+    {
+      title: '说明',
+      key: 'note',
+      render: (_, r) =>
+        r.error ? (
+          // 建单失败原样给出后端文案（分支不存在 / 项目停用 / 队列满各不一样），
+          // 压成一句"失败"会让用户拿参数问题当系统故障去排查。
+          <Text type="danger" style={{ fontSize: 12 }}>
+            {r.error}
+          </Text>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }} className="yn-ellipsis">
+            {r.status === 'queued'
+              ? '排队中，前面的任务结束就轮到它'
+              : r.status === 'running'
+                ? '构建中，详情见「构建记录」'
+                : r.status === 'success'
+                  ? '构建完成'
+                  : r.status === 'interrupted'
+                    ? '平台重启打断，未产出镜像，需重新打包'
+                    : r.status === 'canceled'
+                      ? '已取消'
+                      : '未产出镜像，原因见该单日志与 AI 归因'}
+          </Text>
+        ),
+    },
+  ];
 
   // ------------------------------------------------------------------ 渲染
 
@@ -637,10 +816,36 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       ),
     },
     {
-      title: '构建版本',
+      title: '构建分支',
       key: 'branch',
-      width: 108,
-      render: () => <span className="yn-mono">{startPayloadRef.current.branch}</span>,
+      // 每个项目一个下拉、**各选各的**。
+      //
+      // 原来这一列是只读的，渲染 `startPayloadRef.current.branch` —— 全局同一个值，
+      // 因为那时"分支"是在左边选一次、全批共用的。而各项目的版本分支本来就不同名，
+      // 硬要共用就得取交集，于是大部分候选被筛掉、只剩 master。
+      width: 230,
+      render: (_, r) => {
+        const opts = branchOptions[r.key] ?? [];
+        const val = branchOf[r.key] ?? '';
+        return (
+          <AutoComplete
+            size="small"
+            style={{ width: '100%' }}
+            value={val}
+            options={opts.map((b) => ({ value: b }))}
+            onChange={(v) => setBranchOf((prev) => ({ ...prev, [r.key]: v }))}
+            placeholder={branchLoading ? '读取中…' : '选择或输入分支'}
+            // 用 AutoComplete 而不是 Select：分支名**必须允许自由输入** ——
+            // 远端读不到的仓库不代表它没有分支，把用户锁死在候选列表里
+            // 等于让"读取失败"升级成"没法干活"。
+            filterOption={(input, option) =>
+              String(option?.value ?? '')
+                .toLowerCase()
+                .includes(input.toLowerCase())
+            }
+          />
+        );
+      },
     },
     {
       title: '产物来源',
@@ -763,59 +968,36 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
               <Spin />
             </div>
           ) : (
-            <div className="yn-pick__grid">
-              {list.map((p) => {
-                const on = keys.includes(p.key);
-                // Jenkins 项目能不能勾，取决于平台能不能把「版本」传进去
-                // （Job 恰好一个 git 参数、且没有不认识的参数）。
-                // 做不到就**不给勾选框**并把原因写在卡片上——比"勾了再失败"清楚得多，
-                // 也比"勾了却构建出别的版本"安全。
-                const isJenkins = p.buildMethod === 'jenkins';
-                const jenkinsReady = isJenkins && !!jenkinsPlan[p.key];
-                const blockReason = isJenkins ? (jenkinsBlocked[p.key] ?? '') : '';
-                // 计划还没判定出来（参数正在读）——此时既不说"能"，也不说"不能"
-                const checking = isJenkins && !jenkinsReady && !blockReason;
-                return (
-                  <label key={p.key} className={`yn-pick__card ${on ? 'is-on' : ''}`}>
-                    <Checkbox
-                      checked={on}
-                      disabled={isJenkins && !jenkinsReady}
-                      onChange={(e) => toggle(p.key, e.target.checked)}
-                    />
-                    <div className="yn-pick__card-body">
-                      <div className="yn-pick__card-head">
-                        <b>{p.name}</b>
-                        <code>{p.key}</code>
-                      </div>
-                      <div className="yn-pick__card-tags">
-                        <ProjectTypeTag type={p.type} />
-                        <MethodTag method={p.buildMethod} />
-                        {!p.enabled ? <Tag color="default">已停用</Tag> : null}
-                        {jenkinsReady ? <Tag color="blue">走 Jenkins 构建</Tag> : null}
-                      </div>
-                      {blockReason ? (
-                        <div style={{ fontSize: 11.5, color: '#d46b08' }}>不能批量构建：{blockReason}</div>
-                      ) : null}
-                      {checking ? (
-                        <div style={{ fontSize: 11.5, color: '#8c8c95' }}>正在读取该 Job 的参数…</div>
-                      ) : null}
-                      {jenkinsReady ? (
-                        <div style={{ fontSize: 11.5, color: '#8c8c95' }}>
-                          批量提交会把所选版本传给{' '}
-                          <span className="yn-mono">{jenkinsPlan[p.key]?.param}</span>
-                        </div>
-                      ) : null}
-                      <div className="yn-pick__card-foot">
-                        <span>
-                          最近构建 <BuildStatusTag status={p.lastBuild?.status} />
-                        </span>
-                        <em>{p.owner}</em>
-                      </div>
-                    </div>
-                    {on ? <CheckCircleFilled className="yn-pick__card-tick" /> : null}
-                  </label>
-                );
-              })}
+            /**
+             * 用**表格**而不是卡片网格。
+             *
+             * 卡片是三列瀑布流、整张卡兼作 label —— 点卡片任何位置都会切换勾选。
+             * 一次要勾几十个的时候，相邻两张卡极容易误点（想选 A 结果把 B 也选上，
+             * 而 B 会不会被构建要等到第 3 步才发现）。表格一行一个勾选框，
+             * 纵向扫下来目标稳定，也不存在"点到卡片就选中"的意外。
+             */
+            <div className="yn-pick__table">
+              <Table<Project>
+                rowKey={(p) => p.key}
+                size="small"
+                dataSource={list}
+                columns={pickColumns}
+                pagination={false}
+                scroll={{ y: 340 }}
+                rowSelection={{
+                  selectedRowKeys: keys,
+                  onChange: (ks) => setKeys(ks as string[]),
+                  getCheckboxProps: (p) => {
+                    // Jenkins 项目能不能勾，取决于平台能不能把「分支」传进去
+                    // （Job 恰好一个 git 参数、且没有不认识的参数）。
+                    // 做不到就**不给勾选框**并把原因写在行里 —— "能勾选"必须等于
+                    // "后端会受理且出来的东西是对的"。
+                    const isJenkins = p.buildMethod === 'jenkins';
+                    const ready = isJenkins && !!jenkinsPlan[p.key];
+                    return { disabled: isJenkins && !ready };
+                  },
+                }}
+              />
             </div>
           )}
 
@@ -867,50 +1049,51 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
           layout="vertical"
           className="yn-batch__form"
           initialValues={{
-            branch: selected[0]?.defaultBranch ?? 'master',
-            concurrency: 3,
             buildParams: [],
           }}
         >
           <Row gutter={20}>
-            <Col span={9}>
-              <Form.Item
-                label="构建版本"
-                name="branch"
-                rules={[{ required: true, message: '请选择或输入版本' }]}
-                extra={
-                  versionLoading ? (
-                    '正在读取所选项目的版本候选…'
-                  ) : (
-                    <>
-                      {versionError ? (
-                        versionError
-                      ) : (
-                        <>候选是所有选中项目都认识的版本（取交集）；Jenkins 项目由它的 git 参数接收，平台项目作为分支</>
-                      )}
-                      {versionNote ? <div style={{ color: '#d46b08' }}>{versionNote}</div> : null}
-                    </>
-                  )
-                }
-                validateStatus={versionError ? 'warning' : undefined}
-              >
-                <Select
-                  showSearch
-                  // 不设 mode=tags：版本名可以是任意字符串，但下拉里选出错的选项比打错字更常见，
-                  // 这里允许直接输入（showSearch 支持），也允许清空重填
-                  options={versionOptions.map((b) => ({ label: b, value: b }))}
-                  placeholder="选择或输入版本"
-                  notFoundContent={versionLoading ? <Spin size="small" /> : '无共有候选版本，请直接输入'}
+            <Col span={7}>
+              {branchLoading ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message="正在读取各项目的分支…"
+                  description="每个项目会各自拉一次自己的分支列表。"
                 />
-              </Form.Item>
+              ) : unreadableProjects.length ? (
+                // 读不到**如实说**，并说明怎么办（可以直接在分支框里手打）。
+                // 静默留空会被读成"这些项目没有分支" —— 那是另一个结论。
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message={`${unreadableProjects.length} 个项目的分支没读到`}
+                  description={
+                    <span style={{ fontSize: 12 }}>
+                      {unreadableProjects.join('、')}
+                      。候选里只有各自配置里的默认分支，可以**在右侧分支框里直接输入**要构建的分支名。
+                    </span>
+                  }
+                />
+              ) : null}
 
-              <Form.Item
-                label="并发任务数"
-                name="concurrency"
-                tooltip="超出并发数的任务留在「排队中」，前面的任务结束后自动补位；后端构建池也会按自己的并发上限排队，实际状态以后端为准"
-              >
-                <Select options={CONCURRENCY_OPTIONS} />
-              </Form.Item>
+              {/* 「并发任务数」原来是前端编排用的（BatchRunner 按它领任务）。
+                  现在由平台构建池调度，前端不再编排 —— 留一个可调的下拉就成了假选项，
+                  所以换成一句如实说明。 */}
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="并发由平台构建池决定"
+                description={
+                  <span style={{ fontSize: 12 }}>
+                    提交后所有构建单立即入队，由平台按构建池的并发上限自动调度、依次执行。
+                    这里的顺序不影响后端排队。
+                  </span>
+                }
+              />
 
               <Form.Item label="镜像 Tag 由谁生成">
                 {selected.some((p) => p.buildMethod === 'jenkins') ? (
@@ -995,38 +1178,52 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
         </Form>
       ) : null}
 
-      {/* ---------------------------------------------------------- 步骤 3 */}
+      {/* ---------------------------------------------------------- 步骤 3
+          这一步**只读**：不再驱动任何执行。构建单在点「开始打包」时就全部建出来了，
+          由平台构建池按并发依次执行 —— 关掉页面、关掉浏览器都照常跑完。
+          所以这里的轮询纯粹是为了让人看见进展，它挂了也不影响构建。 */}
       {step === 2 ? (
-        <div className="yn-batch__stage">
-          <BatchRunner
-            key={round}
-            kind="ci"
-            batchNo={batchNo}
-            tasks={tasks}
-            concurrency={concurrency}
-            startTask={startTask}
-            fetchOutcome={fetchOutcome}
-            cancelRun={cancelRun}
-            onTaskDone={(task, outcome) => {
-              if (outcome.ok) lastOkRef.current.add(task.id);
-              else lastOkRef.current.delete(task.id);
-            }}
-            onFinish={handleFinish}
-            height={330}
-            onOpenRecords={() => {
-              onClose();
-              navigate('/ci/builds');
-            }}
-            onRetryFailed={() => {
-              // 只把失败项带进新一轮，成功的任务不再重跑（重跑成功任务没有意义）
-              const failedKeys = tasks
-                .filter((t) => !lastOkRef.current.has(t.id))
-                .map((t) => t.projectKey);
-              setKeys(failedKeys);
-              setStep(1);
-              setResult(null);
-              message.info(`已带出 ${failedKeys.length} 个失败项目，确认配置后可重新提交`);
-            }}
+        <div className="yn-batch__stage yn-submitted">
+          <div className="yn-submitted__head">
+            <Space size={[10, 6]} wrap>
+              <span className="yn-submitted__title">
+                已提交 <b>{okCount}</b> 个构建任务
+              </span>
+              {runningCount ? <Tag color="processing">进行中 {runningCount}</Tag> : null}
+              {successCount ? <Tag color="success">成功 {successCount}</Tag> : null}
+              {failedCount ? <Tag color="error">失败 {failedCount}</Tag> : null}
+              {canceledCount ? <Tag>已取消 {canceledCount}</Tag> : null}
+              {interruptedCount ? <Tag color="warning">已中断 {interruptedCount}</Tag> : null}
+              {badCount ? <Tag color="error">未建单 {badCount}</Tag> : null}
+              {submitting ? <Tag color="processing">正在提交…</Tag> : null}
+            </Space>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void refreshSubmitted()}>
+              刷新
+            </Button>
+          </div>
+
+          {/* 这句是这一步存在的理由：告诉用户"可以走了，不会断"。
+              改之前做不到 —— 那时关页面就是真的不构了。 */}
+          <Alert
+            type={badCount ? 'warning' : 'success'}
+            showIcon
+            style={{ marginBottom: 10 }}
+            message={badCount ? '部分项目未能建单，其余已进入队列' : '已进入平台构建队列，可以关闭本页面'}
+            description={
+              <span style={{ fontSize: 12 }}>
+                每个项目的构建单已落库排队，平台按构建池并发依次执行。
+                关闭弹窗、关闭浏览器都不会中断构建；进度可随时在「构建记录」里查看。
+              </span>
+            }
+          />
+
+          <Table<SubmittedItem>
+            rowKey="projectKey"
+            size="small"
+            dataSource={submitted}
+            columns={submittedColumns}
+            pagination={submitted.length > 8 ? { pageSize: 8, size: 'small' } : false}
+            scroll={{ y: 260 }}
           />
         </div>
       ) : null}
@@ -1047,26 +1244,16 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
               </Text>
             </Space>
           ) : null}
-          {step === 2 && result ? (
+          {step === 2 ? (
             <Space size={8}>
-              <CheckCircleFilled
-                style={{ color: result.failed || result.interrupted ? '#faad14' : '#52c41a' }}
-              />
+              <CheckCircleFilled style={{ color: failedCount || interruptedCount ? '#faad14' : '#52c41a' }} />
               <Text style={{ fontSize: 12 }}>
-                批次结束：成功 <b style={{ color: '#52c41a' }}>{result.success}</b>
-                {result.failed ? (
-                  <>
-                    {' '}
-                    · 失败 <b style={{ color: '#ff4d4f' }}>{result.failed}</b>
-                  </>
-                ) : null}
-                {result.interrupted ? (
-                  <>
-                    {' '}
-                    · 已中断 <b style={{ color: '#fa8c16' }}>{result.interrupted}</b>
-                  </>
-                ) : null}{' '}
-                · 总耗时 <b>{Math.round(result.ms / 1000)}s</b> · 记录已写入「构建记录」
+                {submitting
+                  ? '正在提交…'
+                  : runningCount
+                    ? `构建队列执行中：还剩 ${runningCount} 个未完成（平台按构建池并发调度）`
+                    : '本批已全部停住'}
+                {batchNo ? <span style={{ color: '#9aa0aa' }}>（批次 {batchNo}）</span> : null}
               </Text>
             </Space>
           ) : null}
@@ -1084,20 +1271,35 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
           {step === 1 ? (
             <>
               <Button onClick={() => setStep(0)}>上一步</Button>
-              <Button type="primary" icon={<ThunderboltOutlined />} onClick={start}>
+              <Button
+                type="primary"
+                icon={<ThunderboltOutlined />}
+                disabled={!selected.length || selected.some((p) => !branchOf[p.key])}
+                onClick={() => setConfirmOpen(true)}
+              >
                 开始打包（{selected.length}）
               </Button>
             </>
           ) : null}
           {step === 2 ? (
             <>
+              {/* 「关闭」不再有任何风险 —— 关不关都不影响构建，这正是本次改造的效果。 */}
               <Button onClick={onClose}>关闭</Button>
               <Button
                 type="primary"
+                onClick={() => {
+                  onClose();
+                  navigate('/ci/builds');
+                }}
+              >
+                查看构建记录
+              </Button>
+              <Button
                 ghost
                 onClick={() => {
                   setStep(0);
-                  setResult(null);
+                  setSubmitted([]);
+                  finishedRef.current = false;
                 }}
               >
                 再打包一批
@@ -1106,6 +1308,47 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
           ) : null}
         </Space>
       </div>
+
+      {/* 二次确认：一次点击会真的触发这么多项目的构建，值得多一次点击把分支再核一遍
+          （分支这次改成逐项目可调，最需要核对的恰恰是它）。 */}
+      <Modal
+        open={confirmOpen}
+        title={`确认打包 ${selected.length} 个项目？`}
+        okText="开始打包"
+        cancelText="再核对一下"
+        onCancel={() => setConfirmOpen(false)}
+        onOk={() => void submit()}
+        confirmLoading={submitting}
+        width={560}
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="每个项目按各自的分支构建，构建单会立即进入平台队列"
+          description={
+            <span style={{ fontSize: 12 }}>
+              提交后由平台按构建池并发调度，<b>关闭本页面也不会中断</b>；
+              进度可在「构建记录」里查看。
+            </span>
+          }
+        />
+        <div style={{ maxHeight: 240, overflow: 'auto', fontSize: 12.5 }}>
+          {selected.map((p) => (
+            <div
+              key={p.key}
+              style={{ display: 'flex', gap: 8, padding: '4px 0', borderBottom: '1px dashed #f0f0f0' }}
+            >
+              <span className="yn-ellipsis" style={{ flex: '1 1 auto', minWidth: 0 }}>
+                {p.name}
+              </span>
+              <span className="yn-mono" style={{ flex: 'none', color: '#1677ff' }}>
+                {branchOf[p.key] || '（未选分支）'}
+              </span>
+            </div>
+          ))}
+        </div>
+      </Modal>
     </Modal>
   );
 };
