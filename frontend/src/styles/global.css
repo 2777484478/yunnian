@@ -1416,3 +1416,264 @@ body {
   line-height: 1.55;
   color: #9aa0aa;
 }
+
+
+/* ===========================================================================
+   AI 助手 —— 视觉增强
+   
+   用户反馈"画面有点单调，想多彩酷炫一点"（2026-10-19）。
+   
+   ⚠️ 这是**浅色主题**（白天用、企业运维平台），所以"多彩"走的是
+   **低透明度彩色光晕 + 渐变描边 + 渐变文字**这一路，不是暗色荧光。
+   饱和度压得很低（0.16~0.22 的 alpha），叠在白底上像"有光透出来"，
+   而不是贴了几块彩纸 —— 后者在数据类产品里会显得不可信。
+   
+   动效只有两处（图标浮动 / 光晕呼吸），都尊重 prefers-reduced-motion。
+   =========================================================================== */
+
+/* ---- 空状态（欢迎区） ------------------------------------------------------ */
+
+.yn-ai-hero {
+  position: relative;
+  /* 垂直居中：原来贴着顶部，下面留一大片空白，像内容没加载完。
+     height:100% 在 .yn-ai-body（flex:1 + overflow:auto，高度确定）里是可算的。 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 320px;
+  padding: 24px;
+  text-align: center;
+  border-radius: 14px;
+  overflow: hidden;
+  /* 极淡的网格：给"运维/技术"一点质感，但淡到几乎只是噪点级别 */
+  background-image:
+    linear-gradient(rgba(120, 140, 200, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 140, 200, 0.045) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* 三团彩色光斑：蓝 / 紫 / 青。low alpha + blur，像背后透出的光 */
+.yn-ai-hero__glow {
+  position: absolute;
+  inset: -18% -14%;
+  /* 四团光斑（蓝/紫/青/粉）。alpha 从 0.17~0.22 提到 0.26~0.34 ——
+     原来那组叠在白底上几乎看不出颜色，"多彩"就落了空。 */
+  background:
+    radial-gradient(40% 60% at 20% 30%, rgba(88, 124, 255, 0.34), transparent 70%),
+    radial-gradient(36% 56% at 52% 12%, rgba(160, 107, 255, 0.30), transparent 70%),
+    radial-gradient(44% 64% at 84% 42%, rgba(45, 199, 190, 0.28), transparent 70%),
+    radial-gradient(40% 56% at 66% 86%, rgba(255, 122, 182, 0.22), transparent 72%);
+  filter: blur(10px);
+  animation: yn-ai-breathe 10s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* 图标块：渐变底 + 内高光 + 外发光，像一个立起来的小徽章 */
+.yn-ai-hero__icon {
+  position: relative;
+  width: 66px;
+  height: 66px;
+  margin: 0 auto 18px;
+  display: grid;
+  place-items: center;
+  font-size: 30px;
+  color: #fff;
+  border-radius: 20px;
+  background: linear-gradient(135deg, #6f8dff 0%, #a06bff 52%, #3fc9c0 100%);
+  box-shadow:
+    0 14px 30px -12px rgba(96, 110, 255, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  animation: yn-ai-float 5.5s ease-in-out infinite;
+}
+
+.yn-ai-hero__title {
+  position: relative;
+  margin: 0 0 8px;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  /* 渐变文字：蓝 → 紫 → 青，与图标同一套色系 */
+  background: linear-gradient(92deg, #3355ff 0%, #8b5cf6 46%, #14b8a6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.yn-ai-hero__sub {
+  position: relative;
+  margin: 0;
+  font-size: 13px;
+  color: var(--yn-text-2);
+}
+
+.yn-ai-hero__tags {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.yn-ai-hero__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid transparent;
+  /* 每种能力给一个不同的色相，但都压得很淡 */
+  color: #5a6478;
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.yn-ai-hero__tag--slate {
+  border-color: #dfe5f0;
+}
+
+.yn-ai-hero__tag--orange {
+  color: #c2410c;
+  border-color: #ffd9c2;
+  background: rgba(255, 247, 237, 0.85);
+}
+
+.yn-ai-hero__tag--violet {
+  color: #6d28d9;
+  border-color: #e0d5ff;
+  background: rgba(247, 243, 255, 0.85);
+}
+
+/* ---- 建议问题 chips：渐变描边，悬停时描边变亮 + 上浮 ---------------------- */
+
+.yn-ai-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid transparent !important;
+  border-radius: 999px !important;
+  /* 双层背景：padding-box 是白底，border-box 是渐变 —— 得到"渐变描边" */
+  background:
+    linear-gradient(#fff, #fff) padding-box,
+    linear-gradient(120deg, #d7e3ff, #ead9ff 50%, #d3f6f1) border-box !important;
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease,
+    background 0.16s ease;
+}
+
+.yn-ai-chip:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px -10px rgba(80, 110, 255, 0.55);
+  background:
+    linear-gradient(#f8faff, #f8faff) padding-box,
+    linear-gradient(120deg, #8ea8ff, #b98bff 50%, #5ed6cc) border-box !important;
+}
+
+/* ---- 左栏：「新建对话」渐变按钮 + 会话项悬停上浮 -------------------------- */
+
+.yn-ai-side > .ant-btn {
+  background: linear-gradient(135deg, #5b7cfa, #8c5cf6) !important;
+  border-color: transparent !important;
+  color: #fff !important;
+  box-shadow: 0 6px 16px -8px rgba(92, 100, 246, 0.7);
+  transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+}
+
+.yn-ai-side > .ant-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 22px -8px rgba(92, 100, 246, 0.75);
+  color: #fff !important;
+}
+
+.yn-ai-conv {
+  position: relative;
+  transition: background 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.yn-ai-conv:hover {
+  transform: translateX(1px);
+  box-shadow: 0 4px 12px -8px rgba(40, 60, 120, 0.4);
+}
+
+/* 当前会话左侧一条渐变色条：比整块换底色更"轻"，也更像一列可以被扫视的列表 */
+.yn-ai-conv--active::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #5b7cfa, #8c5cf6);
+}
+
+/* ---- 对话卡片：顶部一道渐变细线（品牌感，不占空间） ---------------------- */
+
+.yn-ai-shell {
+  position: relative;
+  overflow: hidden;
+}
+
+.yn-ai-shell::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #6f8dff, #a06bff 46%, #3fc9c0);
+}
+
+/* ---- 输入框：聚焦时渐变描边 --------------------------------------------- */
+
+.yn-ai-composer .ant-input-affix-wrapper:focus-within {
+  border-color: #a6b8ff;
+  box-shadow: 0 0 0 3px rgba(120, 140, 255, 0.14);
+}
+
+/* ---- 助手头像：橙 → 粉，比纯橙更"有光" ---------------------------------- */
+
+.yn-ai-msg--assistant .yn-ai-avatar {
+  background: linear-gradient(135deg, #ff9a4d, #ff5f8f);
+  box-shadow: 0 6px 14px -8px rgba(255, 110, 140, 0.8);
+}
+
+/* ---- 动效 ---------------------------------------------------------------- */
+
+@keyframes yn-ai-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes yn-ai-breathe {
+  0%,
+  100% {
+    opacity: 0.82;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+/* 尊重系统设置：关掉动效时不能还在飘 */
+@media (prefers-reduced-motion: reduce) {
+  .yn-ai-hero__glow,
+  .yn-ai-hero__icon {
+    animation: none !important;
+  }
+  .yn-ai-chip:hover,
+  .yn-ai-conv:hover,
+  .yn-ai-side > .ant-btn:hover {
+    transform: none;
+  }
+}

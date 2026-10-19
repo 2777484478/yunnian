@@ -7,6 +7,7 @@ import {
   LoadingOutlined,
   PlusOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
   SendOutlined,
   SettingOutlined,
   StopOutlined,
@@ -592,11 +593,38 @@ const AiAssistant: React.FC = () => {
       <div className="yn-ai-shell">
         <div className="yn-ai-body" ref={bodyRef}>
           {messages.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '48px 0', color: '#9aa0aa' }}>
-              <RobotOutlined style={{ fontSize: 40, color: '#d9d9d9' }} />
-              <div style={{ marginTop: 12 }}>问我关于构建、部署、回滚的任何问题</div>
-              <div style={{ marginTop: 6, fontSize: 12 }}>
-                我只具备只读查询能力，不会替你执行任何变更
+            /**
+             * 空状态。
+             *
+             * 这一屏在"还没有对话"时占满整个右侧，是最先被看见的地方 ——
+             * 原来只有一个灰色 emoji + 两行小字，整页素得像没做完，
+             * 也看不出这个助手到底能干什么。
+             *
+             * 现在给了：渐变光晕背景 + 渐变图标块 + 渐变标题 + 能力标签。
+             * 顺手把**能力边界**（只读、不改动）放在显眼处 ——
+             * 那两行小字原来埋在灰色里，等于没说。
+             *
+             * 动效克制（图标缓慢浮动 + 光晕呼吸），并尊重 prefers-reduced-motion。
+             */
+            <div className="yn-ai-hero">
+              <div className="yn-ai-hero__glow" aria-hidden="true" />
+              <div className="yn-ai-hero__icon">
+                <RobotOutlined />
+              </div>
+              <h2 className="yn-ai-hero__title">今天想查点什么？</h2>
+              <p className="yn-ai-hero__sub">
+                构建、部署、回滚、集群资源 —— 用一句话问我就行
+              </p>
+              <div className="yn-ai-hero__tags">
+                <span className="yn-ai-hero__tag yn-ai-hero__tag--slate">
+                  <SafetyCertificateOutlined /> 只读查询
+                </span>
+                <span className="yn-ai-hero__tag yn-ai-hero__tag--orange">
+                  <ThunderboltOutlined /> 失败自动归因
+                </span>
+                <span className="yn-ai-hero__tag yn-ai-hero__tag--violet">
+                  <ApiOutlined /> 8 个只读工具
+                </span>
               </div>
             </div>
           ) : (
