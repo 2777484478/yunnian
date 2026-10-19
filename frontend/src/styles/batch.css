@@ -413,6 +413,17 @@
   border-color: #ffd591;
 }
 
+/* 徽标不许撑破列：名字可能很长（`镜像打包-aiobasic`），
+   放不下就省略 —— 它与表头一起看已经能读懂，硬撑只会把整张表挤歪。 */
+.yn-src-badge {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
 /* --------------------------------------------------------------------------- 构建清单 */
 
 /*  一行 = 一个项目 + 它自己的分支 + 它的上次分支 + 产物来源。
@@ -426,6 +437,10 @@
 
 .yn-plan .ant-table-tbody > tr > td {
   border-bottom: 1px solid #f2f4f7;
+  /* 12px 左右内边距：默认太窄，上一列的值会贴着下一列的标签，
+     四列读起来像一长串。列与列之间需要一点呼吸。 */
+  padding-left: 12px;
+  padding-right: 12px;
 }
 
 /* 分支输入框：圆角与表格同一档；底色用白，和浅灰的表头区分开，

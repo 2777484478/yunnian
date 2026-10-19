@@ -694,7 +694,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     {
       title: '项目',
       key: 'project',
-      width: 288,
+      width: 268,
       render: (_, p) => (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
           <span style={{ display: 'inline-flex', flex: 'none' }}>
@@ -896,7 +896,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     {
       title: '构建分支',
       key: 'branch',
-      width: 250,
+      width: 226,
       // 每个项目一个下拉、**各选各的**。
       //
       // 原来这一列是只读的，渲染 `startPayloadRef.current.branch` —— 全局同一个值，
@@ -960,13 +960,19 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       // 只能凭记忆。
       title: '最近构建分支',
       key: 'lastBranch',
-      width: 224,
+      // 246：分支名（截断到 150）+ 状态标签（约 44）+ gap 6 + padding 24 = 224，留 22 余量
+      width: 246,
       render: (_, r) =>
         r.lastBuild?.branch ? (
           <Space size={6}>
             {/* 列宽足够时就不用截断；仍留 tooltip 兜极长分支名。 */}
             <Tooltip title={r.lastBuild.branch}>
-              <span className="yn-mono yn-ellipsis" style={{ fontSize: 12.5, color: '#8c8c95' }}>
+              <span
+                className="yn-mono yn-ellipsis"
+                // 150px：给后面的状态标签留位置。分支名本身可能很长
+                //（origin/Release_aiops_dcdp_1.42_2.10.0），截断 + 悬停看全名。
+                style={{ fontSize: 12.5, color: '#8c8c95', maxWidth: 150, display: 'inline-block' }}
+              >
                 {r.lastBuild.branch}
               </span>
             </Tooltip>
@@ -1249,7 +1255,17 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
                   dataSource={selected}
                   columns={planColumns}
                   pagination={selected.length > 8 ? { pageSize: 8, size: 'small' } : false}
-                  scroll={{ y: 320 }}
+                  /**
+                   * ⚠️ `x` 不能省。
+                   *
+                   * 只写 `y` 时 antd 不启用固定列宽（table-layout: fixed），
+                   * 浏览器会按**内容**去分配宽度：`镜像打包-aiobasic` 这种长徽标
+                   * 把自己那列撑开、把旁边几列压窄，于是单元格里的文字互相盖住。
+                   *
+                   * 给了 x（>= 各列宽度之和 1000）之后，列宽才是我们定的值，
+                   * 放不下就是横向滚动 —— 宁可滚，不要重叠。
+                   */
+                  scroll={{ x: 990, y: 320 }}
                 />
               </div>
             </Col>
