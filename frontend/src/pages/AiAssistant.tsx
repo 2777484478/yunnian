@@ -22,9 +22,6 @@ import type { ChatAttachment, Conversation, StoredMessage, ToolStep } from '@/ap
 import { hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
 import { ago, fmt } from '@/utils/format';
-// 品牌形象图：走 vite 资源管线（打包成 /assets/xxx.jpg），
-// 不能放 public/ 根目录 —— 后端只挂 /assets 和 index.html，根目录的静态文件取不到。
-import aiAvatar from '@/assets/ai-avatar.jpg';
 
 const { Text } = Typography;
 
@@ -612,9 +609,7 @@ const AiAssistant: React.FC = () => {
             <div className="yn-ai-hero">
               <div className="yn-ai-hero__glow" aria-hidden="true" />
               <div className="yn-ai-hero__icon">
-                {/* 品牌形象图。空 alt：它是装饰性形象，紧邻的文字已经把意思说全了，
-                    再念一遍"AI 运维助手"对读屏用户只是噪音。 */}
-                <img src={aiAvatar} alt="" />
+                <RobotOutlined />
               </div>
               <h2 className="yn-ai-hero__title">今天想查点什么？</h2>
               <p className="yn-ai-hero__sub">
