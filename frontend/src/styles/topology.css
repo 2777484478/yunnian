@@ -364,7 +364,15 @@
   position: relative;
   width: 176px;
   height: 176px;
-  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+  /* 柔和投影：原来圆是"贴"在纸上的，加一层淡淡的落影后才有厚度。
+     drop-shadow 而不是 box-shadow —— 圆是 SVG 描的，box 的方框影子会露角。 */
+  filter: drop-shadow(0 14px 26px rgba(24, 52, 120, 0.1));
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), filter 0.26s ease;
+}
+
+.yn-topo-node:hover .yn-topo-node__disc,
+.yn-topo-node.is-active .yn-topo-node__disc {
+  filter: drop-shadow(0 20px 34px rgba(24, 52, 120, 0.16));
 }
 
 .yn-topo-node:hover .yn-topo-node__disc {
@@ -459,7 +467,10 @@
   align-items: center;
   justify-content: center;
   gap: 1px;
-  padding: 0 24px;
+  /* 18px 而不是 24px："阿里云预生产环境" 8 个字 × 16px = 128px，
+     而 176-48 正好 128px —— 卡在边界上必然折成"…环境 / 境"。
+     缩到 18px 两侧各让出 6px，名字就能整行放下。 */
+  padding: 0 18px;
   text-align: center;
   pointer-events: none;
 }
@@ -474,10 +485,13 @@
 }
 
 .yn-topo-node__env {
-  font-size: 16px;
+  font-size: 15.5px;
   font-weight: 600;
   color: var(--yn-text);
-  letter-spacing: 0.6px;
+  letter-spacing: 0.4px;
+  /* 名字尽量一行放完；真放不下时也不要从中间断词 */
+  line-height: 1.3;
+  word-break: keep-all;
 }
 
 .yn-topo-node__ver {
@@ -495,6 +509,19 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 已部署：版本号用渐变文字。它是这一屏真正要读的那个数 ——
+   原来写死 #2c313a，在满屏黑白灰里没有任何视觉权重。 */
+.yn-topo-node__ver.is-live {
+  background: linear-gradient(120deg, #1e5eff 0%, #0ea5a5 92%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.yn-topo-node__ver.is-empty {
+  color: #b5bac4;
 }
 
 .yn-topo-node__build {
@@ -523,6 +550,26 @@
   height: 6px;
   border-radius: 50%;
   flex: none;
+  /* 小光点：与上方圆环同色，但不抢眼 */
+  box-shadow: 0 0 0 3px currentColor, 0 0 6px currentColor;
+  opacity: 0.95;
+}
+
+/* 底部胶囊跟着状态走一点色彩：所有节点都是同一个白胶囊时，
+   一排看过去分不出哪个是正常的、哪个不对劲。 */
+.yn-topo-node--healthy .yn-topo-node__foot {
+  border-color: #c9f0ec;
+  background: #fbfffe;
+}
+
+.yn-topo-node--warning .yn-topo-node__foot {
+  border-color: #ffe2b8;
+  background: #fffcf6;
+}
+
+.yn-topo-node--error .yn-topo-node__foot {
+  border-color: #ffd6d6;
+  background: #fffafa;
 }
 
 .yn-topo-node--deploying .yn-topo-node__dot {

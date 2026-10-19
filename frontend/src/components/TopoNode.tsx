@@ -148,6 +148,21 @@ export const TopoNode: React.FC<TopoNodeProps> = ({
               strokeDasharray={hollow ? '5 7' : undefined}
             />
 
+            {/* 内层刻度环：外圈那条是"就绪进度"，这一圈是刻度。
+                纯装饰，但 176px 的圆里如果只有"一圈环 + 一片白"，
+                看着就是个空盘子（用户 2026-10-19 反馈"有点简单"）。
+                加上它，圆里才有仪表盘该有的层次。 */}
+            <circle
+              cx={SIZE / 2}
+              cy={SIZE / 2}
+              r={R - SW - 9}
+              fill="none"
+              stroke={hollow ? '#eef0f3' : '#e8edf5'}
+              strokeWidth={1}
+              strokeDasharray="1 5"
+              opacity={0.95}
+            />
+
             {/* 进度弧 */}
             {deployed ? (
               <circle
@@ -209,7 +224,7 @@ export const TopoNode: React.FC<TopoNodeProps> = ({
               {clusterLabel}
             </span>
             <span className="yn-topo-node__env">{envName}</span>
-            <span className="yn-topo-node__ver" style={{ color: deployed ? '#2c313a' : '#b5bac4' }}>
+            <span className={`yn-topo-node__ver ${deployed ? 'is-live' : 'is-empty'}`}>
               {/* 未部署时不显示 "v—"：那一行只在有真实版本时才承载信息，
                   留个空壳字符反而像是"版本号取不到"。
                   状态未知时也不写"未部署"——那会把"读不到"说成"没有"。 */}
@@ -224,7 +239,9 @@ export const TopoNode: React.FC<TopoNodeProps> = ({
         </div>
 
         <div className="yn-topo-node__foot">
-          <span className="yn-topo-node__dot" style={{ background: st.solid }} />
+          {/* color 也要给：光晕用的是 currentColor，只设 background 的话
+              光会长成继承色（灰），与圆环的颜色对不上。 */}
+          <span className="yn-topo-node__dot" style={{ background: st.solid, color: st.solid }} />
           <span className="yn-topo-node__state">
             {st.label}
             {deployed && total ? ` ${ready}/${total}` : ''}
