@@ -141,6 +141,15 @@ type DeployRecord struct {
 	ApprovedAt   *time.Time `json:"-"`
 	RejectReason string     `gorm:"size:512" json:"-"`
 	ParentDeploy *uint64    `gorm:"column:parent_deploy_id" json:"-"`
+	// RecoveredAt 判失败**之后**集群自己就绪了的时间（只有 ROLLOUT_STUCK 会填）。
+	//
+	// 为什么要有它：K8s 在 progressDeadlineSeconds 到点就宣布 rollout 卡死，
+	// 而"镜像拉得慢"的场景里 Pod 常常在宣布**之后**才拉完并起来 ——
+	// 于是出现"集群已经好了、平台记录说失败"（2026-10-19 用户报的）。
+	//
+	// 刻意**不改 Status**：失败是当时的事实，改了会让审计失真，
+	// 也没法回答"这次到底算不算成功"。只把"事后自愈"记下来，页面标「失败后已就绪」。
+	RecoveredAt  *time.Time `gorm:"column:recovered_at" json:"recoveredAt"`
 	ErrorCode    string     `gorm:"size:64" json:"errorCode"`
 	// ErrorMessage 是失败那一刻的**人类可读真因**（如「滚动更新卡死：新 Pod 在进度
 	// 截止时间内始终没有就绪（工作负载 default/demobasic，progressDeadlineSeconds=600s）」）。

@@ -15,10 +15,12 @@ import {
   Steps,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import {
+  CheckCircleOutlined,
   CheckOutlined,
   CloseOutlined,
   CopyOutlined,
@@ -42,7 +44,7 @@ import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { useApi } from '@/hooks/useApi';
 import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
 import { useJobLogs } from '@/hooks/useJobLogs';
-import { humanDuration } from '@/utils/format';
+import { humanDuration, fmt } from '@/utils/format';
 import type { DeployRecord, DeployStatus } from '@/types';
 
 const { Text } = Typography;
@@ -309,6 +311,25 @@ const DeployList: React.FC = () => {
               藏进抽屉等于逼用户多点一次才能知道发生了什么。 */}
           {v === 'failed' || v === 'interrupted' ? (
             <FailureReason message={r.errorMessage} code={r.errorCode} tone={v === 'interrupted' ? 'warning' : 'error'} />
+          ) : null}
+          {/* 失败后集群自己好了。
+              必须在**这一列**标出来：用户看到红色的「失败」就会以为服务还挂着，
+              而实际 Pod 早就起来了 —— 这个标记是他决定"要不要再发一次"的关键信息。
+              状态不改（失败是当时的事实），只补一句"事后已就绪"。 */}
+          {r.recoveredAt ? (
+            <Tooltip
+              title={
+                <span>
+                  判失败后（{fmt(r.recoveredAt)}）集群内已就绪：镜像最终拉完了、Pod 起来了。
+                  <br />
+                  状态仍记为失败 —— 失败是当时的事实；这条只是事后事实，供你判断要不要重发。
+                </span>
+              }
+            >
+              <span className="yn-deploy-recovered">
+                <CheckCircleOutlined /> 失败后已就绪
+              </span>
+            </Tooltip>
           ) : null}
         </div>
       ),

@@ -1814,6 +1814,12 @@ func (s *CDService) runDeploy(taskCtx context.Context, deployID uint64) {
 		s.finishRollbackOf(finCtx, deployID, "failed", duration)
 
 		s.failDeploy(finCtx, deployID, code, reason, diagnoseDeploy(code))
+		// 「滚动更新卡死」特有：K8s 到点就宣布卡死，而镜像拉得慢时 Pod 常常
+		// 在宣布之后才起来。起一个后台观察，真自愈了就把时间记下来 ——
+		// 状态不动，只让页面能标「失败后已就绪」。
+		if code == "ROLLOUT_STUCK" {
+			go s.watchRecoveredAfterFailure(deployID, req.WorkloadRef)
+		}
 		// 服务回到"异常"而不是"部署中"：部署中是个瞬态，留着会让用户以为还在进行。
 		if err := s.db(finCtx).Model(&model.ServiceInstance{}).Where("id = ?", svc.ID).
 			Update("status", "error").Error; err != nil {
@@ -1871,6 +1877,42 @@ func (s *CDService) runDeploy(taskCtx context.Context, deployID uint64) {
 }
 
 // failDeploy 统一写部署失败终态并关流。
+// watchRecoveredAfterFailure 在部署被判「滚动更新卡死」之后，继续看一阵集群。
+//
+// 为什么需要它：K8s 到 progressDeadlineSeconds（未显式设置时默认 600s）就宣布卡死，
+// 而"镜像拉得慢"的场景里，Pod 往往在宣布**之后**才拉完并起来 ——
+// 用户看到的就是"后台其实成功了、页面说失败"（2026-10-19 报的）。
+//
+// 刻意**不改 Status**（理由见 model.DeployRecord.RecoveredAt）。
+//
+// 观察窗口 5 分钟、20 秒一次：足够覆盖"差一点拉完"，又不至于为一个已失败的单
+// 长期占着 goroutine。读不到状态时**继续看**（读不到 ≠ 没好）。
+func (s *CDService) watchRecoveredAfterFailure(deployID uint64, ref integration.WorkloadRef) {
+	// 独立 ctx：这个观察与部署任务的生死无关 —— 走到这里时部署 ctx 往往已经超时/取消了。
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	tick := time.NewTicker(20 * time.Second)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			st, err := s.deps.Up.Cluster.Describe(ctx, ref)
+			if err != nil || st == nil || st.Status != "running" {
+				continue
+			}
+			if err := s.db(ctx).Model(&model.DeployRecord{}).Where("id = ?", deployID).
+				Update("recovered_at", now()).Error; err != nil {
+				s.log("cd").Warn("记录部署自愈时间失败", "deployId", deployID, "err", err)
+			}
+			return
+		}
+	}
+}
+
 func (s *CDService) failDeploy(ctx context.Context, deployID uint64, code, reason string, diag *AIDiagnosisDTO) {
 	fin := now()
 	updates := map[string]any{

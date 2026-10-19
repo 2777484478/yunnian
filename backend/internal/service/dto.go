@@ -690,9 +690,13 @@ type DeployDTO struct {
 	FinishedAt  string          `json:"finishedAt,omitempty"`
 	Duration    int64           `json:"duration"`
 	// ErrorCode 机器码 / ErrorMessage 人类可读真因，见 BuildDTO 同名注释。
-	ErrorCode    string          `json:"errorCode"`
-	ErrorMessage string          `json:"errorMessage"`
-	RollbackOf   string          `json:"rollbackOf,omitempty"`
+	ErrorCode    string `json:"errorCode"`
+	ErrorMessage string `json:"errorMessage"`
+	// RecoveredAt 判失败**之后**集群自己就绪的时间（只有 ROLLOUT_STUCK 会填）。
+	// 与 Status 并存而不是替代它：失败是当时的事实，这条是事后事实，
+	// 前端据此标「失败后已就绪」——否则用户看到红色失败会以为服务还挂着，又重发一次。
+	RecoveredAt string `json:"recoveredAt,omitempty"`
+	RollbackOf  string `json:"rollbackOf,omitempty"`
 	AIDiagnosis  *AIDiagnosisDTO `json:"aiDiagnosis,omitempty"`
 	Logs         []string        `json:"logs"`
 }
@@ -748,6 +752,7 @@ func deployDTO(d *model.DeployRecord, envName, projectName string, steps []Deplo
 		FinishedAt:   formatTimePtr(d.FinishedAt),
 		ErrorCode:    d.ErrorCode,
 		ErrorMessage: d.ErrorMessage,
+		RecoveredAt:  formatTimePtr(d.RecoveredAt),
 		AIDiagnosis:  decodeAIDiagnosis(d.AIDiagnosis),
 		Logs:         logs,
 	}

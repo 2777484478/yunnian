@@ -441,6 +441,14 @@ export interface DeployRecord {
   /** 失败原因：`errorCode` 机器码 / `errorMessage` 人类可读真因。见 BuildRecord 同名注释。 */
   errorCode?: string;
   errorMessage?: string;
+  /**
+   * **判失败之后**集群自己就绪的时间。
+   *
+   * 只有 `ROLLOUT_STUCK` 会有：K8s 到 progressDeadlineSeconds 就宣布卡死，
+   * 而镜像拉得慢时 Pod 常在宣布之后才起来 —— 于是"后台其实成功了、页面说失败"。
+   * 状态仍记为失败（失败是当时的事实），这个字段只用来标「失败后已就绪」。
+   */
+  recoveredAt?: string;
   /** 部署异常时的 AI 诊断建议 */
   aiDiagnosis?: { reason: string; suggestion: string; confidence: number };
   logs: string[];

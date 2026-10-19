@@ -1677,3 +1677,27 @@ body {
     transform: none;
   }
 }
+
+
+/* --------------------------------------------------------------------------- 部署「失败后已就绪」
+
+   跟在红色失败原因下面，用**青绿**而不是黄：它表达的是"事后恢复了"，
+   与上面的失败原因并存、不互相抵消 —— 失败仍是失败，只是补一句"现在已经好了"。
+
+   为什么它值得单独一个标记：用户看到红色「失败」就会以为服务还挂着，
+   于是又发一次（把已经好的服务再滚一遍）。这条信息直接决定他要不要重发。 */
+
+.yn-deploy-recovered {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 18px;
+  color: #0f766e;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  cursor: help;
+}
