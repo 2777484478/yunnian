@@ -1606,6 +1606,10 @@ const Topology: React.FC = () => {
             预览参数 · {actionEnv?.name}
           </Space>
         }
+        // ⚠️ 必须有 onCancel：antd 的右上角 X、Esc、点遮罩**全靠它**触发。
+        // 不写的话这三个关闭方式全部无响应 —— 只有底部的「关闭」按钮能用，
+        // 用户点了 X 会以为页面卡住了（2026-10-19 用户报的就是这个）。
+        onCancel={closeAction}
         footer={<Button onClick={closeAction}>关闭</Button>}
         width={760}
       >
