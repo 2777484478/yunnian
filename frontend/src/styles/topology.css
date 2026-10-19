@@ -526,8 +526,15 @@
 
 .yn-topo-node__build {
   font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
-  font-size: 10.5px;
-  color: var(--yn-text-3);
+  /* 12.5px：原来是 10.5px 的灰字，几乎读不到。构建号不是装饰 ——
+     排查时要拿它去比对 Jenkins / Harbor 上的记录，弱到看不见就等于没有。 */
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  /* 与版本号渐变同色系（#1e5eff）但只用**纯色**：两个渐变并排会互相打架，
+     眼睛不知道该看哪个。它仍比版本号弱一档 —— 它回答的是"哪一次"，不是"哪个版本"。 */
+  color: #2f6fe0;
+  margin-top: 1px;
 }
 
 .yn-topo-node__foot {
