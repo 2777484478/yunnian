@@ -22,6 +22,7 @@ import (
 	"github.com/2777484478/yunnian/internal/logstream"
 	"github.com/2777484478/yunnian/internal/model"
 	"github.com/2777484478/yunnian/internal/queue"
+	"github.com/2777484478/yunnian/internal/store"
 )
 
 // CIService 持续集成：项目配置、构建、镜像。
@@ -3234,4 +3235,80 @@ func isDuplicate(err error) bool {
 	return strings.Contains(msg, "duplicate entry") ||
 		strings.Contains(msg, "unique constraint") ||
 		strings.Contains(msg, "error 1062")
+}
+
+// --------------------------------------------------------------------------- Harbor 实时 tag
+
+// HarborTagDTO Harbor 上的一个 tag（实时查询，不落库）。
+type HarborTagDTO struct {
+	Tag      string `json:"tag"`
+	Digest   string `json:"digest,omitempty"`
+	Size     int64  `json:"size"`
+	PushedAt string `json:"pushedAt,omitempty"`
+	// TimeSource 说明 PushedAt 是什么时间：Harbor v2 给 push 时间，
+	// v1 只给构建时间 —— 拿不到就留空，**不拿 tag 名字或猜测去凑**。
+	TimeSource string `json:"timeSource,omitempty"`
+}
+
+// ListHarborTags 实时读 Harbor 上某个项目镜像的 tag 列表。
+//
+// 为什么需要它（2026-10-20 用户提"镜像版本好像没接入 harbor"）：
+// `/images` 只列**平台自己构建并登记过**的镜像（`image_record` 表）。
+// Jenkins 推上去的、别人手工 push 的、更早的历史 tag，在那里一个都看不到 ——
+// 而页面标题就叫"镜像版本"，用户自然会以为那是仓库里的全部。
+//
+// 这个接口直接问仓库，给的是**真实存在**的 tag。
+//
+// ⚠️ 两套数据**不合并**：混在一屏会让人分不清"平台构建的"和"仓库里有的"，
+// 而这两件事的回答完全不同（前者能点进去看日志，后者只能看 digest）。
+func (s *CIService) ListHarborTags(ctx context.Context, projectKey string, page, pageSize int) ([]HarborTagDTO, int, error) {
+	key := strings.TrimSpace(projectKey)
+	if key == "" {
+		// 必须选项目：Harbor 是按仓库查的，没有"全部项目的 tag"这种请求。
+		return nil, 0, errs.Invalid("请先选择项目：Harbor 视角按项目去查它对应的仓库")
+	}
+	var p model.Project
+	if err := s.db(ctx).Where("project_key = ?", key).Order("id").First(&p).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, 0, errs.NotFoundf("项目 %s 不存在", key)
+		}
+		return nil, 0, errs.Internalf(err, "查询项目失败")
+	}
+	repo := strings.Trim(strings.TrimSpace(p.ImageName), "/")
+	if repo == "" {
+		return nil, 0, errs.StateConflict("该项目还没有配置镜像名，无法定位它在 Harbor 上的仓库")
+	}
+	// Harbor 的 API 把镜像拆成 project/repo 两段（如 escloud/aiobasic）。
+	// 没有 `/` 说明它只是单段名字，Harbor 上不可能存在这个仓库 —— 直接说清楚，
+	// 而不是拿它去拼一个必定 404 的请求。
+	slash := strings.Index(repo, "/")
+	if slash <= 0 || slash == len(repo)-1 {
+		return nil, 0, errs.StateConflict(fmt.Sprintf("镜像名 %q 不是「project/repo」两段式，无法在 Harbor 上定位", repo))
+	}
+	proj, name := repo[:slash], repo[slash+1:]
+
+	// ⚠️ 必须走 LoadHarborConfig：Harbor 的连接参数在「系统管理 → 集成」里改，
+	// 落库后覆盖 config.yaml。直接用 Cfg.Integrations.Harbor 会拿到启动时的旧值，
+	// 表现是"设置页填了地址、这里还是报未接入"。
+	hs, err := store.LoadHarborConfig(ctx, s.db(ctx), s.deps.Sealer, s.deps.Cfg.Integration.Harbor)
+	if err != nil {
+		return nil, 0, errs.Internalf(err, "读取 Harbor 配置失败")
+	}
+	if !hs.Cfg.Enabled {
+		return nil, 0, errs.StateConflict("Harbor 未接入：请先在「系统管理 → 集成」里启用镜像仓库并填好地址")
+	}
+	core := integration.NewHarborCore(hs.Cfg)
+	tags, total, err := core.ListTags(ctx, proj, name, page, pageSize)
+	if err != nil {
+		return nil, 0, upstreamError(err, "读取 Harbor 镜像 tag 失败")
+	}
+	out := make([]HarborTagDTO, 0, len(tags))
+	for _, t := range tags {
+		d := HarborTagDTO{Tag: t.Name, Digest: t.Digest, Size: t.Size, TimeSource: t.TimeSource}
+		if !t.Time.IsZero() {
+			d.PushedAt = formatTime(t.Time)
+		}
+		out = append(out, d)
+	}
+	return out, total, nil
 }

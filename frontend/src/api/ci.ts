@@ -211,9 +211,28 @@ export interface ImageQuery {
   pageSize?: number;
 }
 
+export interface HarborTagRow {
+  tag: string;
+  digest?: string;
+  size: number;
+  /** Harbor 给的时间；v1 只有"构建时间"，所以配合 timeSource 看 */
+  pushedAt?: string;
+  timeSource?: string;
+}
+
 export const imageApi = {
   list: async (q: ImageQuery = {}): Promise<PageResult<ImageRecord>> =>
     unwrapPage<ImageRecord>(await http.get('/images', params(q))),
+
+  /**
+   * **实时查 Harbor** 上某个项目镜像的 tag 列表。
+   *
+   * 与 `list` 是两件事：那个列**平台自己的记录**（只有平台构建并登记过的），
+   * 这个直接问仓库 —— Jenkins 推的、别人手工 push 的、更早的历史 tag 都在这里。
+   * 必须给 projectKey：Harbor 按仓库查，没有"全部项目的 tag"。
+   */
+  harborTags: async (projectKey: string, page = 1, pageSize = 20): Promise<PageResult<HarborTagRow>> =>
+    unwrapPage<HarborTagRow>(await http.get('/images/harbor', params({ projectKey, page, pageSize }))),
 
   get: (id: string) => http.get<ImageRecord>(`/images/${id}`),
 

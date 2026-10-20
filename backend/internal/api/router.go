@@ -157,6 +157,8 @@ func (h *handler) registerBuilds(g *gin.RouterGroup) {
 
 func (h *handler) registerImages(g *gin.RouterGroup) {
 	i := g.Group("/images")
+	// ⚠️ 静态段先注册：/images/harbor 若在 /images/:id 之后，会被 :id 当成 "harbor" 吃掉。
+	i.GET("/harbor", middleware.RequirePerm("image:read"), h.listHarborTags)
 	i.GET("", middleware.RequirePerm("image:read"), h.listImages)
 	i.POST("/cleanup", middleware.RequirePerm("image:delete"), h.cleanupImages)
 	// 注意：静态段 /cleanup 必须在 /:id 之前注册，否则会被当成 id=cleanup。

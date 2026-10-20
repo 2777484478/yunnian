@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, App as AntApp, Button, Col, Input, Row, Select, Space, Table, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Col, Input, Row, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { CopyOutlined, DeleteOutlined, HddOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
@@ -9,6 +9,7 @@ import { environmentApi, imageApi, projectApi } from '@/api';
 import { useApi } from '@/hooks/useApi';
 import { humanSize } from '@/utils/format';
 import type { Environment, ImageRecord } from '@/types';
+import HarborImages from './HarborImages';
 
 const { Text } = Typography;
 
@@ -18,6 +19,12 @@ const envColor = (key: string) => (key === 'prod' ? 'red' : key === 'staging' ? 
 const ImageList: React.FC = () => {
   const { message, modal } = AntApp.useApp();
 
+  /**
+   * 两个视角回答的是不同问题，不能混：
+   *   record → 平台记录（我发过什么、当时是哪个提交）
+   *   harbor → 仓库实况（现在到底有什么，含 Jenkins / 别人手工推的）
+   */
+  const [view, setView] = useState<'record' | 'harbor'>('record');
   const [keywordInput, setKeywordInput] = useState('');
   const [keyword, setKeyword] = useState('');
   const [projectFilter, setProjectFilter] = useState<string | undefined>();
@@ -194,11 +201,25 @@ const ImageList: React.FC = () => {
         description="平台构建产出的全部镜像标签，可按项目与环境检索，支持跳转 Harbor 与清理过期版本"
         extra={
           <Space>
-            <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={imagesApi.loading} />
+            <Segmented
+              value={view}
+              onChange={(v) => setView(v as 'record' | 'harbor')}
+              options={[
+                { label: '平台构建记录', value: 'record' },
+                { label: 'Harbor 仓库', value: 'harbor' },
+              ]}
+            />
+            {view === 'record' ? (
+              <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={imagesApi.loading} />
+            ) : null}
           </Space>
         }
       />
 
+      {view === 'harbor' ? (
+        <HarborImages />
+      ) : (
+        <>
       {imagesApi.error ? (
         <Alert
           type="error"
@@ -304,6 +325,8 @@ const ImageList: React.FC = () => {
           }}
         />
       </SectionCard>
+        </>
+      )}
     </div>
   );
 };

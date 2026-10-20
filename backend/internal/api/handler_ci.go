@@ -369,6 +369,19 @@ func (h *handler) listImages(c *gin.Context) {
 	httpx.OK(c, httpx.NewPageData(list, total, *pq))
 }
 
+// listHarborTags GET /images/harbor?projectKey=&page=&pageSize=
+//
+// 与 listImages 是两件事：那个列平台自己的记录，这个**实时问 Harbor**。
+func (h *handler) listHarborTags(c *gin.Context) {
+	q := pageQuery(c)
+	list, total, err := h.svc.CI.ListHarborTags(c.Request.Context(), c.Query("projectKey"), q.Page, q.PageSize)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, httpx.NewPageData(list, int64(total), q))
+}
+
 // getImage GET /images/{id}
 func (h *handler) getImage(c *gin.Context) {
 	id, ok := pathUint(c, "id")
