@@ -120,6 +120,7 @@ func (h *handler) registerUsers(g *gin.RouterGroup) {
 	g.POST("/users/invite", middleware.RequirePerm("user:manage"), h.inviteUser)
 	g.PATCH("/users/:id", middleware.RequirePerm("user:manage"), h.updateUser)
 	g.POST("/users/:id/reset-password", middleware.RequirePerm("user:manage"), h.resetPassword)
+	g.DELETE("/users/:id", middleware.RequirePerm("user:manage"), h.deleteUser)
 
 	g.GET("/roles", middleware.RequirePerm("user:manage"), h.listRoles)
 	// 团队主数据。读用 team:read（ops/dev/qa 都有），写用 team:manage（只有 admin）。

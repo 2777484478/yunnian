@@ -55,7 +55,7 @@ const { Text } = Typography;
 // ---------------------------------------------------------------------------
 
 const SystemUsers: React.FC = () => {
-  const { message, notification } = AntApp.useApp();
+  const { message, modal, notification } = AntApp.useApp();
   const me = getSession();
   const canManage = hasPerm('user:manage');
   const canEditRole = hasPerm('role:manage');
@@ -159,6 +159,36 @@ const SystemUsers: React.FC = () => {
     } finally {
       setSavingRole(false);
     }
+  };
+
+  /** 当前登录账号不能删自己 —— 与后端同一条约束，前端先挡掉，少一次白跑 */
+  const isSelf = (u: SysUser) => {
+    const me = getSession();
+    return !!me && String((me as unknown as { id?: string }).id ?? '') === String(u.id);
+  };
+
+  const removeUser = (u: SysUser) => {
+    modal.confirm({
+      title: `删除用户「${u.name}」？`,
+      content: (
+        <span style={{ fontSize: 13 }}>
+          账号 <b className="yn-mono">{u.username}</b>（{u.email || '无邮箱'}）将被永久删除。
+          <br />
+          他的登录会立刻失效；审计记录里保留的是名字，不受影响。此操作不可撤销。
+        </span>
+      ),
+      okText: '确认删除',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await userApi.remove(u.id);
+          message.success('已删除');
+          refresh();
+        } catch (e) {
+          message.error((e as Error)?.message ?? '删除失败');
+        }
+      },
+    });
   };
 
   // -------------------------------------------------------------- 重置密码
@@ -366,7 +396,7 @@ const SystemUsers: React.FC = () => {
       title: '操作',
       key: 'action',
       fixed: 'right',
-      width: 150,
+      width: 210,
       render: (_, r) => (
         <Space size={2}>
           <Button
@@ -390,6 +420,26 @@ const SystemUsers: React.FC = () => {
           >
             改角色
           </Button>
+          <Tooltip
+            title={
+              isSelf(r)
+                ? '不能删除当前登录的账号'
+                : !canManage
+                  ? '当前账号没有 user:manage 权限'
+                  : undefined
+            }
+          >
+            <Button
+              type="link"
+              size="small"
+              danger
+              style={{ paddingInline: 4 }}
+              disabled={!canManage || isSelf(r)}
+              onClick={() => removeUser(r)}
+            >
+              删除
+            </Button>
+          </Tooltip>
         </Space>
       ),
     },

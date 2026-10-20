@@ -110,6 +110,9 @@ export const userApi = {
   update: (id: string, body: { role?: string; enabled?: boolean; name?: string; email?: string }) =>
     http.patch<SysUser>(`/users/${id}`, body),
 
+  /** 删除用户（硬删）。后端拒绝删自己与最后一个超级管理员。 */
+  remove: (id: string) => http.del<{ deleted: boolean }>(`/users/${id}`),
+
   resetPassword: (id: string, body: { password: string }) =>
     http.post<{ password: string } | null>(`/users/${id}/reset-password`, body),
 };

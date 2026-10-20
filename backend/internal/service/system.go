@@ -3090,3 +3090,53 @@ func defaultFloat(v, def float64) float64 {
 	}
 	return v
 }
+
+// DeleteUser 删除用户。**硬删**（`user` 表没有 deleted_at，一期就是按行删除设计的）。
+//
+// 两条防锁死约束，缺一条就可能把平台弄成没人能管：
+//  ① **不能删自己** —— 手滑一次就把自己踢出去，而且没有任何界面能救回来。
+//  ② **不能删最后一个超级管理员** —— 删完就没有人能再进"用户/角色"页，
+//     连"再把谁设成管理员"这个动作都做不了。
+//
+// 删之前先清 user_role：表上没有外键，不清就会留下指向空用户的授权行。
+func (s *SystemService) DeleteUser(ctx context.Context, id uint64, c Caller) error {
+	if uid := c.UserID(); uid != nil && *uid == id {
+		return errs.Invalid("不能删除当前登录的账号")
+	}
+	var u model.User
+	if err := s.db(ctx).First(&u, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.NotFoundf("用户不存在")
+		}
+		return errs.Internalf(err, "查询用户失败")
+	}
+
+	// 该用户是否持有 admin 角色
+	var isAdmin int64
+	if err := s.db(ctx).Table("user_role AS ur").
+		Joins("JOIN role r ON r.id = ur.role_id").
+		Where("ur.user_id = ? AND r.code = ?", id, "admin").Count(&isAdmin).Error; err != nil {
+		return errs.Internalf(err, "查询用户角色失败")
+	}
+	if isAdmin > 0 {
+		var remain int64
+		if err := s.db(ctx).Table("user_role AS ur").
+			Joins("JOIN role r ON r.id = ur.role_id").
+			Where("r.code = ? AND ur.user_id <> ?", "admin", id).Count(&remain).Error; err != nil {
+			return errs.Internalf(err, "统计管理员数量失败")
+		}
+		if remain == 0 {
+			return errs.StateConflict("这是最后一个超级管理员，删除后将没有人能管理用户与角色")
+		}
+	}
+
+	return s.db(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", id).Delete(&model.UserRole{}).Error; err != nil {
+			return errs.Internalf(err, "清理用户角色失败")
+		}
+		if err := tx.Delete(&model.User{}, id).Error; err != nil {
+			return errs.Internalf(err, "删除用户失败")
+		}
+		return nil
+	})
+}

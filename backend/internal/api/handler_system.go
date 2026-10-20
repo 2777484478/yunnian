@@ -453,3 +453,16 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// deleteUser DELETE /users/:id
+func (h *handler) deleteUser(c *gin.Context) {
+	id, ok := pathUint(c, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.System.DeleteUser(c.Request.Context(), id, caller(c)); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"deleted": true})
+}
