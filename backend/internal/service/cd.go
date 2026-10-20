@@ -175,6 +175,33 @@ var envSortColumns = map[string]string{
 }
 
 // ListEnvironments 环境列表。
+// EnvKeyOfService 反查服务实例属于哪个环境。
+//
+// 给"按 service id 访问"的接口做可见性判断用 —— 那些路由里只有 id，
+// 不知道环境，必须先查一次才能判。
+func (s *CDService) EnvKeyOfService(ctx context.Context, id uint64) (string, error) {
+	var svc model.ServiceInstance
+	if err := s.db(ctx).Select("id", "env_key").First(&svc, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errs.NotFoundf("服务实例不存在")
+		}
+		return "", errs.Internalf(err, "查询服务实例失败")
+	}
+	return svc.EnvKey, nil
+}
+
+// EnvKeyOfDeployment 反查部署单属于哪个环境。
+func (s *CDService) EnvKeyOfDeployment(ctx context.Context, id uint64) (string, error) {
+	var d model.DeployRecord
+	if err := s.db(ctx).Select("id", "env_key").First(&d, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errs.NotFoundf("部署单不存在")
+		}
+		return "", errs.Internalf(err, "查询部署单失败")
+	}
+	return d.EnvKey, nil
+}
+
 // AssertEnvVisible 检查当前用户**能不能看**这个环境。
 //
 // 只解决"按 key 直连"的入口。`/services/:id`、`/deployments/:id` 这类

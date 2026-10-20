@@ -31,3 +31,53 @@ func (h *handler) requireEnvVisible() gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// requireServiceVisible 按 service id 访问时的环境可见性门控。
+//
+// `/services/:id`、`/:id/pods`、`/:id/params/history`、`/:id/versions`、
+// `/:id/pods/:pod/logs/stream`、以及扩缩容 / 重启 / 删除 —— 这些路由里只有 id。
+// 不查一次环境，就等于"列表里藏起来了，但知道 id 照样能读能改"。
+func (h *handler) requireServiceVisible() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, ok := pathUint(c, "id")
+		if !ok {
+			c.Abort()
+			return
+		}
+		envKey, err := h.svc.CD.EnvKeyOfService(c.Request.Context(), id)
+		if err != nil {
+			httpx.Fail(c, err)
+			c.Abort()
+			return
+		}
+		if err := h.svc.CD.AssertEnvVisible(c.Request.Context(), envKey, caller(c)); err != nil {
+			httpx.Fail(c, err)
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// requireDeployVisible 按 deployment id 访问时的门控（详情 / 日志 / 诊断 / 审批 / 重试…）。
+func (h *handler) requireDeployVisible() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, ok := pathUint(c, "id")
+		if !ok {
+			c.Abort()
+			return
+		}
+		envKey, err := h.svc.CD.EnvKeyOfDeployment(c.Request.Context(), id)
+		if err != nil {
+			httpx.Fail(c, err)
+			c.Abort()
+			return
+		}
+		if err := h.svc.CD.AssertEnvVisible(c.Request.Context(), envKey, caller(c)); err != nil {
+			httpx.Fail(c, err)
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}

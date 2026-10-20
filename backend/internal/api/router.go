@@ -210,19 +210,19 @@ func (h *handler) registerEnvironments(g *gin.RouterGroup) {
 
 func (h *handler) registerServices(g *gin.RouterGroup) {
 	s := g.Group("/services")
-	s.GET("/:id", middleware.RequirePerm("deploy:read"), h.getService)
-	s.GET("/:id/pods", middleware.RequirePerm("deploy:read"), h.servicePods)
-	s.GET("/:id/versions", middleware.RequirePerm("rollback:read"), h.serviceVersions)
-	s.GET("/:id/params/history", middleware.RequirePerm("deploy:read"), h.serviceParamHistory)
-	s.GET("/:id/pods/:podName/logs/stream", middleware.RequirePerm("log:read"), h.podLogStream)
+	s.GET("/:id", middleware.RequirePerm("deploy:read"), h.requireServiceVisible(), h.getService)
+	s.GET("/:id/pods", middleware.RequirePerm("deploy:read"), h.requireServiceVisible(), h.servicePods)
+	s.GET("/:id/versions", middleware.RequirePerm("rollback:read"), h.requireServiceVisible(), h.serviceVersions)
+	s.GET("/:id/params/history", middleware.RequirePerm("deploy:read"), h.requireServiceVisible(), h.serviceParamHistory)
+	s.GET("/:id/pods/:podName/logs/stream", middleware.RequirePerm("log:read"), h.requireServiceVisible(), h.podLogStream)
 
 	// 变更类：权限点按环境动态判定（deploy:test / deploy:prod），
 	// 所以这里只要求登录，真正的校验在 handler 里做（见 guardServiceEnv）。
-	s.PUT("/:id/params", middleware.RequirePerm(), h.updateServiceParams)
-	s.POST("/:id/scale", middleware.RequirePerm(), h.scaleService)
-	s.POST("/:id/restart", middleware.RequirePerm(), h.restartService)
-	s.POST("/:id/redeploy", middleware.RequirePerm(), h.redeployService)
-	s.DELETE("/:id", middleware.RequirePerm(), h.deleteService)
+	s.PUT("/:id/params", middleware.RequirePerm(), h.requireServiceVisible(), h.updateServiceParams)
+	s.POST("/:id/scale", middleware.RequirePerm(), h.requireServiceVisible(), h.scaleService)
+	s.POST("/:id/restart", middleware.RequirePerm(), h.requireServiceVisible(), h.restartService)
+	s.POST("/:id/redeploy", middleware.RequirePerm(), h.requireServiceVisible(), h.redeployService)
+	s.DELETE("/:id", middleware.RequirePerm(), h.requireServiceVisible(), h.deleteService)
 }
 
 func (h *handler) registerDeployments(g *gin.RouterGroup) {
@@ -234,14 +234,14 @@ func (h *handler) registerDeployments(g *gin.RouterGroup) {
 	d.GET("/pending-approval", middleware.RequirePerm("deploy:approve"), h.pendingApprovals)
 	// ⚠️ 静态段先于 /:id 注册，否则 "risk" 会被当成 id。
 	d.GET("/risk", middleware.RequirePerm("deploy:read"), h.deployRisk)
-	d.GET("/:id", middleware.RequirePerm("deploy:read"), h.getDeployment)
-	d.GET("/:id/logs", middleware.RequirePerm("log:read"), h.deploymentLogs)
-	d.GET("/:id/logs/stream", middleware.RequirePerm("log:read"), h.deploymentLogStream)
-	d.POST("/:id/approve", middleware.RequirePerm("deploy:approve"), h.approveDeployment)
-	d.POST("/:id/reject", middleware.RequirePerm("deploy:approve"), h.rejectDeployment)
-	d.POST("/:id/cancel", middleware.RequirePerm(), h.cancelDeployment)
-	d.POST("/:id/retry", middleware.RequirePerm(), h.retryDeployment)
-	d.GET("/:id/ai-diagnosis", middleware.RequirePerm("ai:query"), h.deploymentAIDiagnosis)
+	d.GET("/:id", middleware.RequirePerm("deploy:read"), h.requireDeployVisible(), h.getDeployment)
+	d.GET("/:id/logs", middleware.RequirePerm("log:read"), h.requireDeployVisible(), h.deploymentLogs)
+	d.GET("/:id/logs/stream", middleware.RequirePerm("log:read"), h.requireDeployVisible(), h.deploymentLogStream)
+	d.POST("/:id/approve", middleware.RequirePerm("deploy:approve"), h.requireDeployVisible(), h.approveDeployment)
+	d.POST("/:id/reject", middleware.RequirePerm("deploy:approve"), h.requireDeployVisible(), h.rejectDeployment)
+	d.POST("/:id/cancel", middleware.RequirePerm(), h.requireDeployVisible(), h.cancelDeployment)
+	d.POST("/:id/retry", middleware.RequirePerm(), h.requireDeployVisible(), h.retryDeployment)
+	d.GET("/:id/ai-diagnosis", middleware.RequirePerm("ai:query"), h.requireDeployVisible(), h.deploymentAIDiagnosis)
 }
 
 func (h *handler) registerRollbacks(g *gin.RouterGroup) {
