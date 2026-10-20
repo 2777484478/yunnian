@@ -334,6 +334,8 @@ func (a *AuthService) toCurrentUserDTO(p *principal) CurrentUserDTO {
 		Username:    p.User.Username,
 		Name:        p.User.Name,
 		Email:       p.User.Email,
+		Avatar:      p.User.Avatar,
+		Phone:       p.User.Phone,
 		Role:        RoleBrief{Code: p.RoleCode, Name: p.RoleName},
 		RoleCode:    p.RoleCode,
 		RoleName:    p.RoleName,

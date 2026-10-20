@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/base64"
+	"strings"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -67,6 +69,80 @@ func (h *handler) me(c *gin.Context) {
 		return
 	}
 	httpx.OK(c, u)
+}
+
+// updateSelf PATCH /auth/me
+//
+// 改**自己**的基本信息。刻意不走 /users/:id（那个要 user:manage）：
+// 每个人都能改自己的姓名/邮箱/电话/头像，但改不了角色与启用状态。
+func (h *handler) updateSelf(c *gin.Context) {
+	var in service.UpdateSelfInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		httpx.Fail(c, errValidation("请求参数不合法："+err.Error()))
+		return
+	}
+	u, err := h.svc.Auth.UpdateSelf(c.Request.Context(), in, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	// 回最新的 /auth/me —— 前端拿到就能直接替换全局用户态，不必再请求一次。
+	me, err := h.svc.Auth.Me(c.Request.Context(), caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	_ = u
+	httpx.OK(c, me)
+}
+
+// changeSelfPassword PUT /auth/me/password
+func (h *handler) changeSelfPassword(c *gin.Context) {
+	var in struct {
+		OldPassword string `json:"oldPassword" binding:"required"`
+		NewPassword string `json:"newPassword" binding:"required,min=8,max=72"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		httpx.Fail(c, errValidation("请求参数不合法："+err.Error()))
+		return
+	}
+	if err := h.svc.Auth.ChangeSelfPassword(c.Request.Context(), in.OldPassword, in.NewPassword, caller(c)); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"changed": true})
+}
+
+// uploadSelfAvatar POST /auth/me/avatar
+//
+// 收 **base64 JSON**（`{fileName, data}`）而不是 multipart：
+// 前端那一层 http 封装固定发 JSON，走 multipart 要绕开它（连带的令牌与错误处理都会丢）。
+// 头像本身 ≤1MB，base64 膨胀 33% 也在可接受范围。
+func (h *handler) uploadSelfAvatar(c *gin.Context) {
+	var in struct {
+		FileName string `json:"fileName" binding:"required"`
+		Data     string `json:"data" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		httpx.Fail(c, errValidation("请求参数不合法："+err.Error()))
+		return
+	}
+	raw := in.Data
+	// 允许前端直接塞 `data:image/png;base64,xxx`（FileReader 的原样输出）。
+	if i := strings.Index(raw, "base64,"); i >= 0 {
+		raw = raw[i+len("base64,"):]
+	}
+	data, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		httpx.Fail(c, errValidation("头像数据不是合法的 base64"))
+		return
+	}
+	url, err := h.svc.Auth.SaveSelfAvatar(c.Request.Context(), in.FileName, data, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"avatar": url})
 }
 
 // oidcAuthorize GET /auth/oidc/authorize

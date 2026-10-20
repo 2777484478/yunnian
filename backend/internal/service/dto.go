@@ -1044,9 +1044,12 @@ type RoleBrief struct {
 // 嵌套形态给文档对齐用，扁平那对给前端直接用。字段冗余但语义明确，不产生歧义。
 type CurrentUserDTO struct {
 	ID       string    `json:"id"`
-	Username string    `json:"username"`
-	Name     string    `json:"name"`
-	Email    string    `json:"email"`
+	Username string `json:"username"`
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	// Avatar 头像 URL（`/uploads/avatars/xxx.png`）。空串 = 没设过，前端用姓名首字兜底。
+	Avatar string `json:"avatar"`
+	Phone  string `json:"phone"`
 	Role     RoleBrief `json:"role"`
 	RoleCode string    `json:"roleCode"`
 	RoleName string    `json:"roleName"`

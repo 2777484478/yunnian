@@ -25,6 +25,28 @@ export const authApi = {
     return r.user;
   },
 
+  /**
+   * 改**自己**的基本信息。
+   *
+   * 刻意不走 `/users/:id`（那个要 user:manage）—— 每个人都能改自己的资料，
+   * 但改不了角色与启用状态。
+   */
+  updateSelf: (body: { name?: string; email?: string; phone?: string; avatar?: string }) =>
+    http.patch<CurrentUser>('/auth/me', body),
+
+  /** 改自己的密码（必须验旧密码） */
+  changePassword: (oldPassword: string, newPassword: string) =>
+    http.put<{ changed: boolean }>('/auth/me/password', { oldPassword, newPassword }),
+
+  /**
+   * 上传头像：**base64 JSON**，不是 multipart。
+   *
+   * 我们的 http 封装固定发 JSON；走 multipart 就得绕开它，连令牌与错误处理一起丢。
+   * 头像 ≤1MB，base64 膨胀 33% 可接受。
+   */
+  uploadAvatar: (fileName: string, dataUrl: string) =>
+    http.post<{ avatar: string }>('/auth/me/avatar', { fileName, data: dataUrl }),
+
   /** 登出：吊销服务端会话。网络失败也要清本地，否则用户会卡在"登不出去"。 */
   async logout(): Promise<void> {
     try {

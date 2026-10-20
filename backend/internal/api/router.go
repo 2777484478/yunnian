@@ -104,6 +104,10 @@ func (h *handler) registerAuth(g *gin.RouterGroup) {
 	// 登录态
 	a.POST("/logout", middleware.RequirePerm(), h.logout)
 	a.GET("/me", middleware.RequirePerm(), h.me)
+	// 改自己：不需要 user:manage —— 那几个权限改的是**别人**。
+	a.PATCH("/me", middleware.RequirePerm(), h.updateSelf)
+	a.PUT("/me/password", middleware.RequirePerm(), h.changeSelfPassword)
+	a.POST("/me/avatar", middleware.RequirePerm(), h.uploadSelfAvatar)
 }
 
 func (h *handler) registerUsers(g *gin.RouterGroup) {
@@ -360,6 +364,9 @@ func (h *handler) mountStatic(r *gin.Engine) {
 		return
 	}
 	r.Static("/assets", dir+"/assets")
+	// 用户头像。独立于前端产物目录 —— 那里每次构建都会被整体替换。
+	// 相对运行目录（backend/），实际位置 backend/data/uploads。
+	r.Static("/uploads", "data/uploads")
 	r.StaticFile("/", dir+"/index.html")
 	// 浏览器无条件请求 /favicon.ico，而前端产物里是 favicon.svg（矢量、带品牌色）。
 	// 两个路径都注册：不注册 .ico 会在每次访问时留下一条无意义的 404。

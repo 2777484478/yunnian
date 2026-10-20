@@ -45,6 +45,7 @@ import { LogoCloud } from '@/components/Logo';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { getSession, hasAnyPerm, hasPerm, logout } from '@/auth';
 import { deployApi, environmentApi, projectApi } from '@/api';
+import ProfileModal from '@/components/ProfileModal';
 import { useApi } from '@/hooks/useApi';
 import { useEnvResources, envResStatusOf } from '@/hooks/useEnvResources';
 import type { DeployRecord, Environment } from '@/types';
@@ -159,6 +160,10 @@ export const AppLayout: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  // 改完资料/头像后 +1，让下面那次 getSession() 重算 —— session 不是 state，
+  // 不这样推一下，头部还会显示旧姓名/旧头像。
+  const [, bumpSession] = useState(0);
   const { message } = AntdApp.useApp();
 
   const session = getSession();
@@ -166,6 +171,7 @@ export const AppLayout: React.FC = () => {
     name: session?.name ?? '未登录',
     roleName: session?.roleName ?? '',
     username: session?.username ?? '',
+    avatar: session?.avatar ?? '',
   };
 
   // ------------------------------------------------------------------ 菜单
@@ -512,7 +518,7 @@ export const AppLayout: React.FC = () => {
           <Dropdown
             menu={{
               items: [
-                { key: 'profile', label: '个人设置（二期）' },
+                { key: 'profile', label: '个人设置' },
                 { key: 'token', label: '访问令牌（二期）' },
                 { type: 'divider' },
                 {
@@ -540,12 +546,16 @@ export const AppLayout: React.FC = () => {
                     });
                   return;
                 }
+                if (key === 'profile') {
+                  setProfileOpen(true);
+                  return;
+                }
                 message.info('该功能排入二期，当前版本暂未实现');
               },
             }}
           >
             <Space size={8} style={{ cursor: 'pointer', marginLeft: 8 }}>
-              <Avatar size={30} style={{ background: '#1677ff', fontSize: 13 }}>
+              <Avatar size={30} src={me.avatar || undefined} style={{ background: '#1677ff', fontSize: 13 }}>
                 {me.name.slice(0, 1)}
               </Avatar>
               <span style={{ lineHeight: 1.2 }}>
@@ -558,6 +568,12 @@ export const AppLayout: React.FC = () => {
           </Dropdown>
         </div>
       </Header>
+
+      <ProfileModal
+        open={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        onSaved={() => bumpSession((n) => n + 1)}
+      />
 
       <Layout>
         <Sider

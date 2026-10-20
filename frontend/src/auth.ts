@@ -13,6 +13,10 @@ import { authApi, setUnauthorizedHandler, tokenStore } from '@/api';
 
 /** 会话用户。字段名与页面既有引用保持一致（roleName 等不能改名）。 */
 export interface SessionUser {
+  /** 头像 URL（`/uploads/avatars/xxx.png`）。空 = 没设过，用姓名首字兜底 */
+  avatar?: string;
+  phone?: string;
+  email?: string;
   id: string;
   username: string;
   name: string;
