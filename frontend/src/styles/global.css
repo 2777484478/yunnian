@@ -1780,3 +1780,38 @@ body {
 .yn-harbor-table .ant-table-tbody > tr:hover > td {
   background: #f5f9ff;
 }
+
+
+/* --------------------------------------------------------------------------- 部署风险：低风险那条
+
+   刻意做得**很轻**：一行小字 + 一个绿点，不跟表单抢注意力。
+   但必须存在 —— 打开弹窗什么都没有，用户会以为功能没做（实测踩过）。 */
+
+.yn-risk-low {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: #3f6212;
+  background: #f7fbef;
+  border: 1px solid #e3efd0;
+}
+
+.yn-risk-low__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #65a30d;
+  flex: none;
+}
+
+.yn-risk-low__detail {
+  color: #7a8a5e;
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

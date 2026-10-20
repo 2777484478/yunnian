@@ -15,7 +15,14 @@ export interface DeployRiskBannerProps {
  * 放在**建单之前**的表单里，因为它的全部价值就是"提交前知道有多险"。
  * 放到部署记录列表上没有意义 —— 那时候已经发完了。
  *
- * 只显示 medium / high：`low` 是默认状态，每个表单都挂一条"低风险"只会变成噪音。
+ * ⚠️ **三档都要显示，包括 low**。
+ *
+ * 最初只显示 medium/high，理由是"低风险是默认态，挂一条是噪音"——**这个判断错了**：
+ * 用户打开弹窗看到**什么都没有**，第一反应不是"哦这次很安全"，而是"功能没做"
+ *（2026-10-20 实测：`aiobasic@test-152` 18 分 low，弹窗里一片空白，用户直接来问"做了吗"）。
+ *
+ * 低风险也是一条**有用的信息**："这次没什么特别的"，而且它顺带证明这个功能在工作。
+ * 所以 low 也渲染，只是收敛成一行小字，不抢镜。
  */
 const DeployRiskBanner: React.FC<DeployRiskBannerProps> = ({ projectKey, envKey, active }) => {
   const [level, setLevel] = useState<'low' | 'medium' | 'high' | null>(null);
@@ -52,7 +59,20 @@ const DeployRiskBanner: React.FC<DeployRiskBannerProps> = ({ projectKey, envKey,
   }, [active, projectKey, envKey]);
 
   if (loading) return <Skeleton.Input active size="small" style={{ width: '100%', marginBottom: 12 }} block />;
-  if (!level || level === 'low') return null;
+  // 还没算出来 / 评估失败：不渲染（评估是辅助信息，不能拦住部署）
+  if (!level) return null;
+
+  if (level === 'low') {
+    return (
+      <div className="yn-risk-low">
+        <span className="yn-risk-low__dot" />
+        风险低 · {score} 分
+        <span className="yn-risk-low__detail">
+          {reasons.length ? reasons.join('；') : '无风险因子命中'}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <Alert
