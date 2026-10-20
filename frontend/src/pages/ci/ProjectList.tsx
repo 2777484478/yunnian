@@ -967,7 +967,15 @@ const ProjectList: React.FC = () => {
       // Jenkins 项目的分支**不预填**：平台读不到 GitParameter 的真实默认值
       // （插件不通过 API 暴露），拿项目的 defaultBranch 顶上就是"猜"——
       // 猜错会静默构建出另一个版本。留空 = 不传该参数 = Jenkins 用它自己的默认值。
-      branch: p.buildMethod === 'jenkins' ? undefined : p.defaultBranch,
+      // ⚠️ 平台自建项目也**不预填** branch。
+      //
+      // 那个输入框同时是**搜索框**（AutoComplete）：预填 `master` 之后，用户点进来
+      // 直接打 `1.64`，实际得到的是 `master1.64` —— 一个候选都匹配不上，下拉空掉。
+      // 用户看到的就是"输入了却不联想"（2026-10-20 报的），而过滤本身是好的。
+      //
+      // 默认分支改由 placeholder 提示 + 提交时兜底（见 submitBuild），
+      // 语义完全不变，但搜索词干净了。
+      branch: undefined,
       buildParams: p.buildParams,
       tagOverride: '',
       notify: true,
@@ -1023,7 +1031,9 @@ const ProjectList: React.FC = () => {
 
       const b = await buildApi.trigger({
         projectKey: buildTarget.key,
-        branch: values.branch,
+        // 分支留空 = 用项目默认分支。不能把空串发给后端：
+        // 那会变成"检出空分支名"，失败原因还和"没填"毫无关系。
+        branch: values.branch || buildTarget?.defaultBranch,
         params: toParamsMap(values.buildParams),
         idempotencyKey: idemKeyRef.current,
       });
@@ -1600,7 +1610,8 @@ const ProjectList: React.FC = () => {
                 <Form.Item
                   name="branch"
                   label="构建分支"
-                  rules={[{ required: true, message: '请选择或输入分支' }]}
+                  // 不设 required：留空表示"用项目默认分支"，由提交时兜底（见 submitBuild）。
+                  // 留着 required 会让"什么都不填直接用默认"变成一条报错。
                   tooltip="候选来自项目仓库的真实分支；也可以直接输入分支名，例如 release/1.9"
                   extra={branchExtra}
                   validateStatus={branchError ? 'warning' : undefined}
@@ -1608,8 +1619,34 @@ const ProjectList: React.FC = () => {
                   {/* AutoComplete 而不是 Select：Select 不带 tags 模式时**只能从选项里挑**，
                       "支持直接输入分支名"会变成一句做不到的承诺（新分支永远选不到）。 */}
                   <AutoComplete
-                    placeholder="选择或输入分支"
+                    placeholder={`默认 ${buildTarget?.defaultBranch || 'master'}；输入或选择其他分支`}
                     options={branchCandidates.map((b) => ({ label: b, value: b }))}
+                    /**
+                     * 显式给 filterOption。
+                     *
+                     * 默认规则本来就该按 value 包含输入来过滤，但实测没生效
+                     * （2026-10-20 用户报"输入 1.64 不联想"，截图里 6 个候选原样全在）。
+                     * 显式写出来至少排除"默认被跳过"这一种可能，也让意图写在代码里。
+                     *
+                     * ⚠️ 这个控件与批量打包那处**不同**：这里必须允许自由输入
+                     *（新分支还没进候选时要能直接打），所以不能用 Select。
+                     */
+                    filterOption={(input, option) =>
+                      String(option?.value ?? '')
+                        .toLowerCase()
+                        .includes(String(input).toLowerCase())
+                    }
+                    /**
+                     * ⚠️ **聚焦时全选**。这是"预填值 + 搜索框"的经典冲突：
+                     *
+                     * 弹窗打开时这个框预填了项目默认分支（`master`），而它同时又是搜索框。
+                     * 用户点进来直接打 `1.64`，实际得到的是 `master1.64` —— 一个候选都匹配不上，
+                     * 下拉直接空掉。用户看到的现象就是"输入了却不联想"，
+                     * 而过滤本身是好的（2026-10-20 实测：input 实际变成了 "1.64master"）。
+                     *
+                     * 全选之后，用户一打字就整体替换掉预填值；
+                     * 不打字、直接关下拉，默认分支还在 —— 两个诉求都不牺牲。
+                     */
                     notFoundContent={
                       branchLoading ? <Spin size="small" /> : '没有匹配的分支，可直接输入'
                     }
