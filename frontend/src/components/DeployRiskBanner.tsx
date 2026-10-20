@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, Skeleton } from 'antd';
-import { SafetyCertificateOutlined } from '@ant-design/icons';
+import { RobotOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { deployApi } from '@/api';
 
 export interface DeployRiskBannerProps {
@@ -25,6 +25,25 @@ export interface DeployRiskBannerProps {
  * 低风险也是一条**有用的信息**："这次没什么特别的"，而且它顺带证明这个功能在工作。
  * 所以 low 也渲染，只是收敛成一行小字，不抢镜。
  */
+/**
+ * 「AI 风险评估」标题 + 内容。
+ *
+ * 为什么要有这行标题：光有一条绿条/黄条，用户看不出**这是什么** ——
+ * 是平台算的？是告警？还是某个服务的属性？加一行明确的标题，
+ * 这块信息才有归属，也才配得上"要不要看它"的判断。
+ *
+ * 三档共用同一个标题：**换了颜色和内容，但"这是风险评估"这件事不变**。
+ */
+const RiskBlock: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="yn-risk-block">
+    <div className="yn-risk-block__title">
+      <RobotOutlined />
+      AI 风险评估
+    </div>
+    {children}
+  </div>
+);
+
 const DeployRiskBanner: React.FC<DeployRiskBannerProps> = ({ projectKey, envKey, active }) => {
   const [level, setLevel] = useState<'low' | 'medium' | 'high' | null>(null);
   const [score, setScore] = useState(0);
@@ -69,40 +88,43 @@ const DeployRiskBanner: React.FC<DeployRiskBannerProps> = ({ projectKey, envKey,
     // （2026-10-20 用户先反馈"看不到"、再反馈"太不明显"，两次都是同一个问题：
     //   信息的存在感要和它的重要性匹配，而"低"也不等于"可以忽略"。）
     return (
-      <div className="yn-risk-low">
-        <SafetyCertificateOutlined className="yn-risk-low__icon" />
-        <div style={{ minWidth: 0 }}>
-          <div className="yn-risk-low__head">
-            <span className="yn-risk-low__title">风险低</span>
-            <span className="yn-risk-low__score">{score}</span>
-            <span className="yn-risk-low__unit">分</span>
-          </div>
-          <div className="yn-risk-low__reasons">
-            {reasons.length ? reasons.join('；') : '没有命中任何风险因子'}
+      <RiskBlock>
+        <div className="yn-risk-low">
+          <SafetyCertificateOutlined className="yn-risk-low__icon" />
+          <div style={{ minWidth: 0 }}>
+            <div className="yn-risk-low__head">
+              <span className="yn-risk-low__title">风险低</span>
+              <span className="yn-risk-low__score">{score}</span>
+              <span className="yn-risk-low__unit">分</span>
+            </div>
+            <div className="yn-risk-low__reasons">
+              {reasons.length ? reasons.join('；') : '没有命中任何风险因子'}
+            </div>
           </div>
         </div>
-      </div>
+      </RiskBlock>
     );
   }
 
   return (
-    <Alert
-      type={level === 'high' ? 'error' : 'warning'}
-      showIcon
-      style={{ marginBottom: 12 }}
-      message={
-        <span>
-          {level === 'high' ? '高风险部署' : '中等风险'} · 风险分 {score}
-        </span>
-      }
-      description={
-        <ul style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 12.5 }}>
-          {reasons.map((r) => (
-            <li key={r}>{r}</li>
-          ))}
-        </ul>
-      }
-    />
+    <RiskBlock>
+      <Alert
+        type={level === 'high' ? 'error' : 'warning'}
+        showIcon
+        message={
+          <span>
+            {level === 'high' ? '高风险部署' : '中等风险'} · 风险分 {score}
+          </span>
+        }
+        description={
+          <ul style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 12.5 }}>
+            {reasons.map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ul>
+        }
+      />
+    </RiskBlock>
   );
 };
 
