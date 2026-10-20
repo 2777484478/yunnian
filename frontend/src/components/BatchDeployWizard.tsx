@@ -250,8 +250,42 @@ const BatchDeployWizard: React.FC<BatchDeployWizardProps> = ({
   const [imageCount, setImageCount] = useState(0);
 
   /** 逐服务的目标版本（默认 = 仓库最新，值形如 `r:1.2.3` / `p:1.2.3`，见 SRC_*） */
+  /**
+   * 批量发布的风险分：N 个服务 × **同一个环境**。
+   *
+   * 一次并发算，用完存下来 —— 不在 render 里算，也不会因为翻页/勾选重复请求。
+   * 只走到第 2 步（确认清单）才算：第 0 步 rows 已经加载好了，提前算等于
+   * 给一批还没确认的候选发 N 个请求。
+   */
+  const [riskMap, setRiskMap] = useState<Record<string, { level: string; score: number; reasons: string[] }>>({});
+
   const [targets, setTargets] = useState<Record<string, string>>({});
   const [skipped, setSkipped] = useState<string[]>([]);
+
+  useEffect(() => {
+    // 只在确认步算，且必须有环境
+    if (step < 2 || !envKey || !rows.length) return;
+    let alive = true;
+    Promise.all(
+      rows.map((r) =>
+        deployApi
+          .risk(r.projectKey, envKey)
+          .then((x) => [r.projectKey, x] as const)
+          // 单个失败不影响其它行 —— 少一个分数比整批没有强
+          .catch(() => null),
+      ),
+    ).then((list) => {
+      if (!alive) return;
+      const m: Record<string, { level: string; score: number; reasons: string[] }> = {};
+      list.forEach((it) => {
+        if (it) m[it[0]] = it[1] as { level: string; score: number; reasons: string[] };
+      });
+      setRiskMap(m);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [step, envKey, rows]);
   /**
    * 逐服务**要改成的**副本数。
    *
@@ -1353,6 +1387,24 @@ const submitAtRef = useRef(Date.now());
           </Text>
         </Space>
       ),
+    },
+    {
+      title: '风险',
+      key: 'risk',
+      width: 92,
+      render: (_: unknown, r) => {
+        const k = riskMap[r.projectKey];
+        if (!k) return <Text type="secondary" style={{ fontSize: 11.5 }}>—</Text>;
+        const color = k.level === 'high' ? 'red' : k.level === 'medium' ? 'orange' : 'green';
+        const word = k.level === 'high' ? '高' : k.level === 'medium' ? '中' : '低';
+        return (
+          <Tooltip title={(k.reasons || []).join('；') || '无风险因子命中'}>
+            <Tag color={color} style={{ marginInlineEnd: 0 }}>
+              {word} · {k.score}
+            </Tag>
+          </Tooltip>
+        );
+      },
     },
     prevColumn(),
     {
