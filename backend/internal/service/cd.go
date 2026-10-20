@@ -175,6 +175,25 @@ var envSortColumns = map[string]string{
 }
 
 // ListEnvironments 环境列表。
+// AssertEnvVisible 检查当前用户**能不能看**这个环境。
+//
+// 只解决"按 key 直连"的入口。`/services/:id`、`/deployments/:id` 这类
+// 要先反查环境的，见 AssertEnvVisibleByService / AssertEnvVisibleByDeploy。
+//
+// 没配可见性的人（绝大多数存量角色）直接放行 —— 规则与 VisibleEnvKeys 一致。
+func (s *CDService) AssertEnvVisible(ctx context.Context, envKey string, c Caller) error {
+	allowed, restricted := c.VisibleEnvKeys()
+	if !restricted {
+		return nil
+	}
+	for _, k := range allowed {
+		if k == envKey {
+			return nil
+		}
+	}
+	return errs.Forbidden("无权查看该环境")
+}
+
 func (s *CDService) ListEnvironments(ctx context.Context, q EnvironmentQuery, c Caller) (*httpx.PageQuery, any, int64, error) {
 	pq := httpx.PageQuery{Page: q.Page, PageSize: q.PageSize, SortBy: q.SortBy, Order: q.Order, Keyword: q.Keyword}
 	column, desc := pq.Normalize(envSortColumns, "created_at")
