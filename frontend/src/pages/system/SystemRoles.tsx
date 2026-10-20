@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, App as AntApp, Button, Checkbox, Empty, Input, Space, Spin, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Checkbox, Select, Empty, Input, Space, Spin, Tag, Tooltip, Typography } from 'antd';
 import { LockOutlined, SaveOutlined } from '@ant-design/icons';
 import { PageHeader, SectionCard } from '@/components/ui';
-import { roleApi } from '@/api';
+import { environmentApi, roleApi } from '@/api';
 import { hasPerm } from '@/auth';
+import { useApi } from '@/hooks/useApi';
 import type { PermissionPoint, SysRole } from '@/types';
 
 const { Text } = Typography;
@@ -58,6 +59,27 @@ const SystemRoles: React.FC = () => {
   /** 当前编辑中的勾选（与角色上的 perms 分开：改完没保存时要能看出差异） */
   const [draft, setDraft] = useState<string[]>([]);
   const [kw, setKw] = useState('');
+
+  /** 环境列表 —— 只用于"可见范围"多选 */
+  const envApi = useApi(() => environmentApi.list(), []);
+  const allEnvs = useMemo(() => envApi.data?.list ?? [], [envApi.data]);
+
+  /** 当前 draft 里已配的可见环境（`env:view:<key>` 的 key 部分） */
+  const visibleKeys = useMemo(
+    () => draft.filter((p) => p.startsWith('env:view:')).map((p) => p.slice('env:view:'.length)),
+    [draft],
+  );
+
+  /**
+   * 改可见范围：**先摘掉 draft 里所有 env:view:*，再放入新的**。
+   *
+   * 不这么做的话，取消勾选会留下旧 code —— 保存后"明明取消了他还看得见"，
+   * 而且界面上看不出来（那个 code 已经不在选项里了）。
+   */
+  const setVisibleKeys = (keys: string[]) => {
+    const kept = draft.filter((p) => !p.startsWith('env:view:'));
+    setDraft([...kept, ...keys.map((k) => `env:view:${k}`)]);
+  };
 
   const load = async () => {
     setLoading(true);
@@ -254,6 +276,40 @@ const SystemRoles: React.FC = () => {
                 </div>
               ) : (
                 <div style={{ padding: '12px 16px 20px' }}>
+                  {/* 环境可见范围：不在"权限点"清单里逐个勾，而是直接选环境 ——
+                      用户脑子里想的是"他能看哪几台"，不是"他有 env:view:test-152 这个码"。
+                      存库仍是 env:view:<key>，与后端 VisibleEnvKeys 一一对应。 */}
+                  <div
+                    style={{
+                      marginBottom: 18,
+                      padding: '12px 14px',
+                      background: '#f7f9fc',
+                      border: '1px solid #eef1f6',
+                      borderRadius: 8,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                      <span style={{ width: 3, height: 12, borderRadius: 2, background: '#1677ff', opacity: 0.7 }} />
+                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>环境可见范围</span>
+                      <Text type="secondary" style={{ fontSize: 11.5 }}>
+                        没配过 = 全部可见；配了之后看不到未选中的环境（列表里就没有）
+                      </Text>
+                    </div>
+                    <Select
+                      mode="multiple"
+                      allowClear
+                      showSearch
+                      optionFilterProp="label"
+                      style={{ width: '100%' }}
+                      placeholder={isSuper || draft.includes('env:*') ? '当前角色可见全部环境' : '选要开放给该角色的环境'}
+                      disabled={!canWrite || isSuper || draft.includes('env:*')}
+                      value={visibleKeys}
+                      onChange={(v) => setVisibleKeys(v as string[])}
+                      options={allEnvs.map((e) => ({ label: `${e.name}（${e.key}）`, value: e.key }))}
+                      loading={envApi.loading}
+                    />
+                  </div>
+
                   {grouped.length === 0 ? (
                     <Empty description="没有匹配的权限点" />
                   ) : (

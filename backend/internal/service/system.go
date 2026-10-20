@@ -1588,6 +1588,35 @@ func (s *SystemService) UpdateRolePermissions(ctx context.Context, code string, 
 		return nil, errs.Invalid("将角色权限清空会影响该角色下所有用户，请显式确认（allowEmpty=true）")
 	}
 
+	// ⚠️ 动态权限点：`env:view:<envKey>` 是按环境生成的，不预先在 permSeed 里登记。
+	// 保存前先把缺的补进 permission 表 —— 否则会被下面"权限点必须存在"的校验直接拒掉，
+	// 表现是"在角色页选了环境 → 保存报错"，而用户完全看不出为什么。
+	// 名字带环境名，好在权限清单里读得懂（如「查看：阿里云预生产环境」）。
+	for _, code := range dedupeStrings(in.Perms) {
+		rest, ok := strings.CutPrefix(code, "env:view:")
+		if !ok || rest == "" {
+			continue
+		}
+		var cnt int64
+		if err := s.db(ctx).Model(&model.Permission{}).Where("code = ?", code).Count(&cnt).Error; err != nil {
+			return nil, errs.Internalf(err, "检查权限点失败")
+		}
+		if cnt > 0 {
+			continue
+		}
+		name := rest
+		var env model.Environment
+		if err := s.db(ctx).Where("env_key = ?", rest).First(&env).Error; err == nil && env.Name != "" {
+			name = env.Name
+		}
+		if err := s.db(ctx).Create(&model.Permission{
+			Code: code, Name: "查看：" + name, Module: "environment",
+		}).Error; err != nil {
+			// 并发下另一个请求刚插进去，跳过即可
+			continue
+		}
+	}
+
 	// 权限点必须存在于权限表：写错一个 code 就会静默失效（鉴权时匹配不上），
 	// 而用户会以为"配好了"。这里逐一校验。
 	var perms []model.Permission
