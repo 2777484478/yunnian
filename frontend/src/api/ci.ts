@@ -262,6 +262,14 @@ export const imageApi = {
   harborProjects: async (): Promise<string[]> =>
     unwrapList<string>(await http.get('/images/harbor/projects')),
 
+  /**
+   * Harbor 的展示前缀：镜像仓库域名 + 默认 project。
+   *
+   * 前端要显示**完整镜像地址**（registry/project/repo），而 registry 配在后端
+   * （还加密），前端拿不到 —— 所以由后端给。
+   */
+  harborMeta: () => http.get<{ registry: string; defaultProject: string }>('/images/harbor/meta'),
+
   get: (id: string) => http.get<ImageRecord>(`/images/${id}`),
 
   /**

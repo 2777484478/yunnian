@@ -51,6 +51,9 @@ const HarborImages: React.FC = () => {
     return (list.length ? list : [DEFAULT_PROJECT]).map((n) => ({ label: n, value: n }));
   }, [projectsApi.data]);
 
+  // 镜像仓库域名（拼完整地址用）—— 配在后端，前端拿不到
+  const metaApi = useApi(() => imageApi.harborMeta(), []);
+
   // 微服务候选：平台已纳管的项目
   const servicesApi = useApi(() => projectApi.list({ pageSize: 200 }), []);
   const services = useMemo(() => servicesApi.data?.list ?? [], [servicesApi.data]);
@@ -63,7 +66,15 @@ const HarborImages: React.FC = () => {
 
   const service = services.find((s) => s.key === serviceKey);
   const repo = repoOf(service?.imageName);
-  const address = repo ? `${project}/${repo}` : '';
+  /**
+   * 完整镜像地址 = registry（配置里的镜像仓库域名）/ project / repo。
+   *
+   * ⚠️ 必须带 registry。只写 `escloud/xxljobexecutor` 是**仓库内路径**，不是能
+   * `docker pull` 的地址 —— 用户要的是后者（2026-10-20 指出）。
+   * registry 拿不到时退回项目表里的同名字段，再没有就只显示路径（不编域名）。
+   */
+  const registry = metaApi.data?.registry || service?.registry || '';
+  const address = repo ? (registry ? `${registry}/${project}/${repo}` : `${project}/${repo}`) : '';
 
   useEffect(() => {
     if (!repo) {

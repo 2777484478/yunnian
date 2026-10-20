@@ -3370,3 +3370,39 @@ func (s *CIService) ListHarborProjects(ctx context.Context) ([]string, error) {
 	}
 	return names, nil
 }
+
+// HarborMetaDTO Harbor 视角需要的"环境信息"（不是数据，是前缀）。
+type HarborMetaDTO struct {
+	// Registry 镜像仓库的**域名/地址前缀**，如 es-repo.digiwincloud.com.cn:5000
+	//
+	// 取的是「系统管理 → 集成」里配的那个 registry，而不是项目表里的同名字段 ——
+	// 用户说的"配置镜像仓库的域名地址"就是这个。留空时退回 BaseURL，
+	// 但要剥掉 http(s):// 前缀（镜像地址里不带协议）。
+	Registry string `json:"registry"`
+	// DefaultProject 没选项目时的默认 Harbor project
+	DefaultProject string `json:"defaultProject"`
+}
+
+// HarborMeta 给 Harbor 视角提供展示用的前缀信息。
+//
+// 为什么要单独一个接口：前端要显示**完整镜像地址**（registry/project/repo），
+// 而 Harbor 的连接配置在后端（还要解密），前端拿不到。
+func (s *CIService) HarborMeta(ctx context.Context) (*HarborMetaDTO, error) {
+	hs, err := store.LoadHarborConfig(ctx, s.db(ctx), s.deps.Sealer, s.deps.Cfg.Integration.Harbor)
+	if err != nil {
+		return nil, errs.Internalf(err, "读取 Harbor 配置失败")
+	}
+	reg := strings.TrimSpace(hs.Cfg.Registry)
+	if reg == "" {
+		// 没单独配 registry 时，BaseURL 就是同一个入口 —— 剥掉协议头即可。
+		reg = strings.TrimSpace(hs.Cfg.BaseURL)
+		reg = strings.TrimPrefix(reg, "https://")
+		reg = strings.TrimPrefix(reg, "http://")
+		reg = strings.TrimSuffix(reg, "/")
+	}
+	proj := strings.TrimSpace(hs.Cfg.Project)
+	if proj == "" {
+		proj = "escloud"
+	}
+	return &HarborMetaDTO{Registry: reg, DefaultProject: proj}, nil
+}

@@ -369,6 +369,18 @@ func (h *handler) listImages(c *gin.Context) {
 	httpx.OK(c, httpx.NewPageData(list, total, *pq))
 }
 
+// getHarborMeta GET /images/harbor/meta
+//
+// 给前端拼"完整镜像地址"用（registry 在后端，还加密，前端拿不到）。
+func (h *handler) getHarborMeta(c *gin.Context) {
+	m, err := h.svc.CI.HarborMeta(c.Request.Context())
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, m)
+}
+
 // listHarborProjects GET /images/harbor/projects
 //
 // 给「Harbor 项目」下拉供候选：直接问 Harbor 有哪些 project，
