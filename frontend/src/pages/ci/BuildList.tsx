@@ -242,7 +242,13 @@ const BuildList: React.FC = () => {
         <div>
           <Tag style={{ marginInlineEnd: 0 }}>{v}</Tag>
           <div style={{ fontSize: 12, color: '#9aa0aa', marginTop: 3 }}>
-            <span className="yn-mono">{r.commitId}</span> · {(r.commitMsg || '').slice(0, 18)}
+            {/* 列表里只给**短哈希**（8 位，Git 惯例）：完整的 40 位在这个宽度下要折成两行，
+                反而看不出来是"哪个提交"。完整值挂 tooltip，要复制时点开就能看到。
+                （详情页那几处仍然显示全号——那里有空间，也可能要拿去做精确比对。） */}
+            <Tooltip title={r.commitId || ''}>
+              <span className="yn-mono">{(r.commitId || '').slice(0, 8)}</span>
+            </Tooltip>{' '}
+            · {(r.commitMsg || '').slice(0, 18)}
             {(r.commitMsg || '').length > 18 ? '…' : ''}
           </div>
         </div>
