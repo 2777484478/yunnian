@@ -352,6 +352,18 @@ export const deployApi = {
 
   aiDiagnosis: (id: string) => http.get<DeployDiagnosis>(`/deployments/${id}/ai-diagnosis`),
 
+  /**
+   * 建单**之前**的风险评估。
+   *
+   * 分数全部来自确定性计数（历史失败率 / 回滚次数 / 重复发布 / 正式区 / 并发），
+   * `reasons` 逐条给出每一分的来源 —— 不是"模型觉得危险"。
+   */
+  risk: (projectKey: string, envKey: string) =>
+    http.get<{ score: number; level: 'low' | 'medium' | 'high'; reasons: string[] }>('/deployments/risk', {
+      projectKey,
+      envKey,
+    }),
+
   stream: (id: string) => streamUrl(`/deployments/${id}/logs/stream`),
 };
 

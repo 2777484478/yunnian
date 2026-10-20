@@ -40,6 +40,7 @@ import {
 } from '@ant-design/icons';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { PageHeader, SectionCard } from '@/components/ui';
+import DeployRiskBanner from '@/components/DeployRiskBanner';
 import { LogPanel } from '@/components/LogPanel';
 import BatchDeployWizard from '@/components/BatchDeployWizard';
 import { STATE_STYLE, TopoLink, TopoNode } from '@/components/TopoNode';
@@ -1455,7 +1456,12 @@ const Topology: React.FC = () => {
         onCancel={closeAction}
         onOk={submitDeploy}
       >
-        <Form form={deployForm} layout="vertical" style={{ marginTop: 16 }}>
+        {/* 风险条放在**最上面**：它是"提交前要知道的事"，
+            藏在表单下面等于没做。算不出来时它自己什么都不渲染，不拦人。 */}
+        <div style={{ marginTop: 16 }}>
+          <DeployRiskBanner projectKey={projectKey} envKey={actionEnv?.key} active={action?.type === 'deploy'} />
+        </div>
+        <Form form={deployForm} layout="vertical" style={{ marginTop: 8 }}>
           <Form.Item
             name="imageChoice"
             label="选择镜像"

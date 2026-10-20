@@ -728,3 +728,17 @@ func splitApprovers(raw string) []string {
 	}
 	return out
 }
+
+// deployRisk GET /deployments/risk?projectKey=&envKey=
+//
+// 建单**之前**查一次：让用户在提交前就知道"这次有多险、为什么"。
+// 分数全部来自确定性计数（历史失败率 / 回滚次数 / 重复发布 / 正式区 / 并发），
+// 所以每个数字都能对上账 —— 不是模型觉得危险。
+func (h *handler) deployRisk(c *gin.Context) {
+	res, err := h.svc.CD.DeployRisk(c.Request.Context(), c.Query("projectKey"), c.Query("envKey"))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, res)
+}

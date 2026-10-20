@@ -231,6 +231,8 @@ func (h *handler) registerDeployments(g *gin.RouterGroup) {
 	d.GET("", middleware.RequirePerm("deploy:read"), h.listDeployments)
 	// 静态段先注册（同 images/cleanup）
 	d.GET("/pending-approval", middleware.RequirePerm("deploy:approve"), h.pendingApprovals)
+	// ⚠️ 静态段先于 /:id 注册，否则 "risk" 会被当成 id。
+	d.GET("/risk", middleware.RequirePerm("deploy:read"), h.deployRisk)
 	d.GET("/:id", middleware.RequirePerm("deploy:read"), h.getDeployment)
 	d.GET("/:id/logs", middleware.RequirePerm("log:read"), h.deploymentLogs)
 	d.GET("/:id/logs/stream", middleware.RequirePerm("log:read"), h.deploymentLogStream)
