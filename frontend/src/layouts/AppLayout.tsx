@@ -141,6 +141,7 @@ const MENU: MenuGroup[] = [
     children: [
       { key: '/system/users', icon: <TeamOutlined />, label: '用户', perms: ['user:manage'] },
       { key: '/system/roles', icon: <SafetyOutlined />, label: '角色权限', perms: ['user:manage'] },
+      { key: '/system/teams', icon: <ApartmentOutlined />, label: '团队', perms: ['team:read'] },
       { key: '/system/notify', icon: <BellOutlined />, label: '通知渠道', perms: ['notify:manage'] },
       // 只登录即可读：不挂权限点
       { key: '/system/integrations', icon: <GithubOutlined />, label: '第三方集成' },

@@ -210,6 +210,20 @@ func run() error {
 		log.Info("任务并发上限", "build", rt.BuildConcurrency, "deploy", rt.DeployConcurrency, "source", rt.Source)
 	}
 
+	// ------------------------------------------------------------------ 权限点与团队
+	//
+	// ⚠️ 已有库不会重跑 `Seed`（它按 user 表为空判据整段跳过），
+	// 所以**后加的权限点**必须单独补一次：否则代码里能用、库里没有，
+	// 表现是「角色权限页勾不到它」+「相关接口一律 403」，而代码看起来完全正常。
+	if err := store.SyncPermissionCatalog(ctx, db); err != nil {
+		log.Warn("补齐权限点失败（新增的权限点可能不可见）", "err", err)
+	}
+	// 团队表从存量 `project.team` 反推：新库与老库走同一套逻辑，
+	// 不会出现"界面里有 6 个团队、项目的 team 却是第 7 个"这种悬空。
+	if err := store.EnsureTeams(ctx, db); err != nil {
+		log.Warn("初始化团队失败（团队下拉可能为空）", "err", err)
+	}
+
 	// ------------------------------------------------------------------ HTTP
 	router := api.NewRouter(api.Deps{
 		Cfg:      cfg,

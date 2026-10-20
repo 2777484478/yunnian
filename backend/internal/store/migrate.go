@@ -22,6 +22,7 @@ func Models() []any {
 		// 1. 用户 / 角色 / 权限
 		&model.User{},
 		&model.Role{},
+		&model.Team{},
 		&model.Permission{},
 		&model.UserRole{},
 		&model.RolePermission{},

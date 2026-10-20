@@ -22,6 +22,7 @@ const AiAssistant = lazy(() => import('@/pages/AiAssistant'));
 const AuditLogPage = lazy(() => import('@/pages/AuditLogPage'));
 const SystemUsers = lazy(() => import('@/pages/system/SystemUsers'));
 const SystemRoles = lazy(() => import('@/pages/system/SystemRoles'));
+const SystemTeams = lazy(() => import('@/pages/system/SystemTeams'));
 const SystemNotify = lazy(() => import('@/pages/system/SystemNotify'));
 const SystemIntegrations = lazy(() => import('@/pages/system/SystemIntegrations'));
 const SystemModels = lazy(() => import('@/pages/system/SystemModels'));
@@ -116,6 +117,7 @@ const RoutedApp: React.FC = () => {
             <Route path="system/users" element={<RequirePerm codes={['user:manage']}><SystemUsers /></RequirePerm>} />
             {/* 读角色要 user:manage、写权限要 role:manage —— 读的那半更宽松，所以按读的挂路由 */}
             <Route path="system/roles" element={<RequirePerm codes={['user:manage']}><SystemRoles /></RequirePerm>} />
+            <Route path="system/teams" element={<RequirePerm codes={['team:read']}><SystemTeams /></RequirePerm>} />
             <Route path="system/notify" element={<RequirePerm codes={['notify:manage']}><SystemNotify /></RequirePerm>} />
             {/* 第三方集成只登录即可读（写操作才需要 user:manage），不加权限守卫 */}
             <Route path="system/integrations" element={<SystemIntegrations />} />

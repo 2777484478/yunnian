@@ -56,6 +56,7 @@ import {
   ProjectTypeTag,
 } from '@/components/StatusTag';
 import { ApiError, buildApi, jenkinsApi, projectApi } from '@/api';
+import { teamApi } from '@/api/team';
 import type { GitConnectionResult } from '@/api';
 import { getSession, hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
@@ -66,7 +67,9 @@ import type { JenkinsJob } from '@/api';
 
 const { Text } = Typography;
 
-const TEAMS = ['用户增长组', '前端体验组', '交易中台组', '支付结算组', '基础架构组', '数据平台组'];
+// ⚠️ 团队候选**不再写死**：原来这里有 6 个硬编码的中文名，其中「交易中台组」「支付结算组」
+// 从来没被任何项目用过，而库里真实存在的团队它又管不了。现在统一读 `teamApi.list()`
+// （团队主数据在「系统管理 → 团队」维护）。
 const OWNERS = ['张伟', '李静', '王强', '刘洋', '陈晨', '赵敏', '冯雪', '韩磊', '曹阳', '运维示例', '高鹏'];
 
 // ---------------------------------------------------------------------------
@@ -79,7 +82,9 @@ const OWNERS = ['张伟', '李静', '王强', '刘洋', '陈晨', '赵敏', '冯
 // （谁建的项目谁负责）。二期做出团队/成员主数据后，这里的默认值改为从接口取。
 // ---------------------------------------------------------------------------
 const DEFAULT_TYPE = 'backend';
-const DEFAULT_TEAM = '基础架构组';
+// 默认团队：优先「基础架构组」（历史默认值，26 个项目都挂它），没有就取排第一的。
+// 不再写死字符串 —— 团队可以被改名/停用，写死就会指向一个不存在的名字。
+const PREFERRED_DEFAULT_TEAM = '基础架构组';
 
 /**
  * 默认 Tag 规则。必须与后端 `buildscript.DefaultTagPattern` 同值 ——
@@ -377,6 +382,21 @@ const ProjectList: React.FC = () => {
    *   2. 纳管项目是个位数到几十的量级，一次拉完比"每敲一个字请求一次"体验好。
    * 项目数上百时应改为后端筛选 + 分组统计接口——那时的取舍会反过来。
    */
+  // 团队候选来自团队主数据（「系统管理 → 团队」维护），不写死
+  const teamsApi = useApi(() => teamApi.list(), []);
+  const teamOptions = useMemo(
+    () =>
+      (teamsApi.data ?? [])
+        .filter((t) => t.enabled)
+        .map((t) => ({ label: t.name, value: t.name })),
+    [teamsApi.data],
+  );
+  const defaultTeam = useMemo(() => {
+    const names = teamOptions.map((o) => o.value);
+    if (names.includes(PREFERRED_DEFAULT_TEAM)) return PREFERRED_DEFAULT_TEAM;
+    return names[0] ?? '';
+  }, [teamOptions]);
+
   const projectsApi = useApi(() => projectApi.list({ pageSize: 200 }), []);
   const projects = useMemo(() => projectsApi.data?.list ?? [], [projectsApi.data]);
   /** 变更后重拉列表（建/改/删/停用都要调，否则界面与库里会各说各话） */
@@ -914,7 +934,7 @@ const ProjectList: React.FC = () => {
         </Col>
         <Col span={12}>
           <Form.Item name="team" label="所属团队" rules={[{ required: true }]}>
-            <Select showSearch options={TEAMS.map((t) => ({ label: t, value: t }))} />
+            <Select showSearch options={teamOptions} />
           </Form.Item>
         </Col>
         <Col span={12}>
@@ -1065,7 +1085,7 @@ const ProjectList: React.FC = () => {
     form.setFieldsValue({
       // 基本信息：一期没有维护入口，先给默认值，用户只填名称与标识即可提交
       type: DEFAULT_TYPE,
-      team: DEFAULT_TEAM,
+      team: defaultTeam,
       owner: getSession()?.name ?? '',
       // 默认 Jenkins Job：公司既有资产是 Jenkins，多数项目挂过去就能构建，
       // 不必在平台上再配一套仓库 / 构建上下文 / 构建脚本。

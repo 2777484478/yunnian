@@ -87,6 +87,24 @@ type User struct {
 	UpdatedAt   time.Time  `json:"updatedAt"`
 }
 
+// Team 团队主数据。
+//
+// 为什么需要它：`project.team` 一直是个**自由字符串**（用户的数据权限按它反查），
+// 而候选值是前端写死的 6 个中文名 —— 后端没有任何约束，手填一个不存在的团队也能存进去。
+//
+// ⚠️ 唯一的标识就是 `name` 本身（不是另立 code）：
+// 存量数据 `project.team` 存的是中文名，改名时必须**级联更新**所有项目，
+// 否则项目会指向一个已经不存在的团队。这条在 `UpdateTeam` 里做（同一事务）。
+type Team struct {
+	ID          uint64    `gorm:"primaryKey;autoIncrement" json:"-"`
+	Name        string    `gorm:"size:64;uniqueIndex:uk_team_name" json:"name"`
+	Description string    `gorm:"size:255" json:"description"`
+	Sort        int       `gorm:"not null;default:0" json:"sort"`
+	Enabled     bool      `gorm:"not null;default:true" json:"enabled"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 // Role 角色。code 为 admin/ops/dev/qa/readonly。
 type Role struct {
 	ID          uint64    `gorm:"primaryKey;autoIncrement" json:"-"`

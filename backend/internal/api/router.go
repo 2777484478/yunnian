@@ -122,6 +122,11 @@ func (h *handler) registerUsers(g *gin.RouterGroup) {
 	g.POST("/users/:id/reset-password", middleware.RequirePerm("user:manage"), h.resetPassword)
 
 	g.GET("/roles", middleware.RequirePerm("user:manage"), h.listRoles)
+	// 团队主数据。读用 team:read（ops/dev/qa 都有），写用 team:manage（只有 admin）。
+	g.GET("/teams", middleware.RequirePerm("team:read"), h.listTeams)
+	g.POST("/teams", middleware.RequirePerm("team:manage"), h.createTeam)
+	g.PATCH("/teams/:id", middleware.RequirePerm("team:manage"), h.updateTeam)
+	g.DELETE("/teams/:id", middleware.RequirePerm("team:manage"), h.deleteTeam)
 	// 权限点清单给"角色权限编辑"页面用，同属角色管理
 	g.GET("/permissions", middleware.RequirePerm("role:manage", "user:manage"), h.listPermissions)
 	g.PUT("/roles/:code/permissions", middleware.RequirePerm("role:manage"), h.updateRolePermissions)

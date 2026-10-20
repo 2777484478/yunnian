@@ -307,6 +307,8 @@ var permSeed = []struct{ Code, Name, Module string }{
 	{"audit:read", "查看审计", "audit"},
 	{"user:manage", "用户管理", "system"},
 	{"role:manage", "角色管理", "system"},
+	{"team:read", "查看团队", "system"},
+	{"team:manage", "团队管理", "system"},
 	{"notify:manage", "通知管理", "system"},
 	{"ai:query", "AI 查询", "ai"},
 	{"*:read", "全部只读权限", "system"},
@@ -325,11 +327,11 @@ var roleSeed = []struct {
 		// ai:query 必须给：ops 能管部署、能看部署记录，而 CI 构建记录页与 CD 部署记录页的
 		// AI 归因都挂在 ai:query 上（router.go 的 /:id/ai-diagnosis 与 /ai 分组）。
 		// 缺了它，运维点自己刚失败的部署单做归因会直接 403，功能对最该用它的人不可见。
-		[]string{"env:*", "deploy:*", "rollback:*", "project:read", "build:*", "image:read", "audit:read", "log:read", "ai:query"}},
+		[]string{"env:*", "deploy:*", "rollback:*", "project:read", "build:*", "image:read", "audit:read", "log:read", "ai:query", "team:read"}},
 	{"dev", "开发", "可维护自己负责的项目、触发构建，测试/预发环境部署", 3,
-		[]string{"project:read", "project:write:own", "build:*", "deploy:test,staging", "image:read", "log:read"}},
+		[]string{"project:read", "project:write:own", "build:*", "deploy:test,staging", "image:read", "log:read", "team:read"}},
 	{"qa", "测试", "可触发测试区部署与重启，查看构建/部署日志", 4,
-		[]string{"project:read", "build:read", "deploy:test", "log:read"}},
+		[]string{"project:read", "build:read", "deploy:test", "log:read", "team:read"}},
 	{"readonly", "只读用户", "仅可查看所有资源，不能执行任何变更操作", 5,
 		[]string{"*:read"}},
 }
