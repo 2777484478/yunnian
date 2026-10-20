@@ -16,6 +16,7 @@ import {
   Typography,
 } from 'antd';
 import {
+  SafetyOutlined,
   ApartmentOutlined,
   ApiOutlined,
   AppstoreOutlined,
@@ -138,7 +139,8 @@ const MENU: MenuGroup[] = [
     icon: <SettingOutlined />,
     label: '系统管理',
     children: [
-      { key: '/system/users', icon: <TeamOutlined />, label: '用户与权限', perms: ['user:manage'] },
+      { key: '/system/users', icon: <TeamOutlined />, label: '用户', perms: ['user:manage'] },
+      { key: '/system/roles', icon: <SafetyOutlined />, label: '角色权限', perms: ['user:manage'] },
       { key: '/system/notify', icon: <BellOutlined />, label: '通知渠道', perms: ['notify:manage'] },
       // 只登录即可读：不挂权限点
       { key: '/system/integrations', icon: <GithubOutlined />, label: '第三方集成' },
