@@ -253,6 +253,15 @@ export const imageApi = {
   harborRepos: async (project: string, page = 1, pageSize = 50): Promise<PageResult<HarborRepoRow>> =>
     unwrapPage<HarborRepoRow>(await http.get('/images/harbor/repos', params({ project, page, pageSize }))),
 
+  /**
+   * Harbor 上有哪些 project（给「Harbor 项目」下拉供候选）。
+   *
+   * 不写死 escloud：写死的那种，Harbor 一分项目就得改代码；
+   * 而"哪些项目真的存在"只有 Harbor 自己知道。
+   */
+  harborProjects: async (): Promise<string[]> =>
+    unwrapList<string>(await http.get('/images/harbor/projects')),
+
   get: (id: string) => http.get<ImageRecord>(`/images/${id}`),
 
   /**

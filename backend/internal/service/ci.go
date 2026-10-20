@@ -3287,7 +3287,7 @@ func (s *CIService) ListHarborTags(ctx context.Context, project, repo string, pa
 	if err != nil {
 		// 文案带上**实际查的路径**：路径拼错和"仓库真的没有"报的错长得一样，
 		// 不写出来就只能靠猜。
-		return nil, 0, upstreamError(err, fmt.Sprintf("读取 Harbor 仓库 %s/%s 失败", proj, name))
+		return nil, 0, upstreamError(err, "读取 Harbor 仓库 %s/%s 失败", proj, name)
 	}
 	out := make([]HarborTagDTO, 0, len(tags))
 	for _, t := range tags {
@@ -3335,7 +3335,7 @@ func (s *CIService) ListHarborRepos(ctx context.Context, project string, page, p
 	core := integration.NewHarborCore(hs.Cfg)
 	refs, total, err := core.ListRepositories(ctx, proj, page, pageSize)
 	if err != nil {
-		return nil, 0, upstreamError(err, fmt.Sprintf("读取 Harbor 项目 %q 的仓库列表失败", proj))
+		return nil, 0, upstreamError(err, "读取 Harbor 项目 %q 的仓库列表失败", proj)
 	}
 	out := make([]HarborRepoDTO, 0, len(refs))
 	for _, r := range refs {
@@ -3346,4 +3346,27 @@ func (s *CIService) ListHarborRepos(ctx context.Context, project string, page, p
 		out = append(out, HarborRepoDTO{FullName: r.FullName, Name: name, TagCount: r.TagCount})
 	}
 	return out, total, nil
+}
+
+// ListHarborProjects 列 Harbor 上的所有项目（给「Harbor 项目」下拉用）。
+//
+// 为什么不写死 escloud：写死的话，Harbor 上分了别的 project 就得改代码；
+// 而"哪些项目真的存在"这件事，只有 Harbor 自己最清楚。
+func (s *CIService) ListHarborProjects(ctx context.Context) ([]string, error) {
+	hs, err := store.LoadHarborConfig(ctx, s.db(ctx), s.deps.Sealer, s.deps.Cfg.Integration.Harbor)
+	if err != nil {
+		return nil, errs.Internalf(err, "读取 Harbor 配置失败")
+	}
+	if !hs.Cfg.Enabled {
+		return nil, errs.StateConflict("Harbor 未接入：请先在「系统管理 → 集成」里启用镜像仓库并填好地址")
+	}
+	core := integration.NewHarborCore(hs.Cfg)
+	names, err := core.ListProjects(ctx)
+	if err != nil {
+		return nil, upstreamError(err, "读取 Harbor 项目列表失败")
+	}
+	if names == nil {
+		names = []string{}
+	}
+	return names, nil
 }

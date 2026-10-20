@@ -459,6 +459,67 @@ func (c *HarborCore) SearchRepos(ctx context.Context, keyword string) ([]HarborR
 	return refs, nil
 }
 
+// ListProjects 列 Harbor 上**所有项目**（给「Harbor 项目」下拉用）。
+//
+// v2：/api/v2.0/projects —— 标准列表接口，服务端分页、X-Total-Count 给总数。
+// v1：没有对应的列表接口，只能从 search 的仓库全名里把 project 段抽出来去重。
+//     这是**推断**而非查询，但 v1 上确实没有更权威的来源；抽不出来就返回空，
+//     让调用方退回默认值，不编一个不存在的项目名。
+func (c *HarborCore) ListProjects(ctx context.Context) ([]string, error) {
+	if _, _, err := c.detect(ctx); err != nil {
+		return nil, err
+	}
+
+	switch c.apiVersion {
+	case "v2":
+		// 一次拿 100 个：Harbor 上的 project 通常是个位数量级，这里不做翻页
+		path := "/api/v2.0/projects?page=1&page_size=100"
+		var rows []struct {
+			Name string `json:"name"`
+		}
+		status, _, err := c.getJSONWithTotal(ctx, path, &rows)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			return nil, fmt.Errorf("读取 Harbor 项目列表被拒绝（HTTP %d）：检查账号权限", status)
+		case status >= 400:
+			return nil, fmt.Errorf("读取 Harbor 项目列表失败：HTTP %d", status)
+		}
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			if n := strings.TrimSpace(r.Name); n != "" {
+				out = append(out, n)
+			}
+		}
+		return out, nil
+
+	case "v1":
+		all, err := c.SearchRepos(ctx, "")
+		if err != nil {
+			return nil, err
+		}
+		seen := map[string]struct{}{}
+		out := make([]string, 0, 4)
+		for _, r := range all {
+			n := strings.TrimSpace(r.ProjectName)
+			if n == "" {
+				continue
+			}
+			if _, ok := seen[n]; ok {
+				continue
+			}
+			seen[n] = struct{}{}
+			out = append(out, n)
+		}
+		return out, nil
+
+	default:
+		return nil, fmt.Errorf("%s 上没有 Harbor 管理接口：无法读取项目列表", c.base)
+	}
+}
+
 // ListRepositories 列某个 Harbor project 下的**全部仓库**。
 //
 // 为什么要它（2026-10-20 用户提"加一个读取 harbor 项目的所有接口，点击显示所有项目"）：

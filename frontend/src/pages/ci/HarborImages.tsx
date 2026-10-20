@@ -1,100 +1,90 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Empty, Input, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Button, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { ArrowLeftOutlined, CopyOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CopyOutlined, ReloadOutlined } from '@ant-design/icons';
 import { SectionCard } from '@/components/ui';
-import { imageApi } from '@/api';
-import type { HarborRepoRow, HarborTagRow } from '@/api/ci';
+import { imageApi, projectApi } from '@/api';
+import type { HarborTagRow } from '@/api/ci';
+import { useApi } from '@/hooks/useApi';
 import { ago, fmt, humanSize } from '@/utils/format';
 
 const { Text } = Typography;
 
-/**
- * Harbor 上的仓库项目名，默认 `escloud`。
- *
- * ⚠️ 平台的 `imageName` 分前后端（`backend/userv2`、`frontend/aio-doc`），
- * 但 Harbor 上这些镜像**统一放在 escloud 下**（`escloud/userv2`）。
- * 拿 imageName 拼地址会得到 `backend/userv2` —— 那仓库不存在
- * （2026-10-20 用户报的正是这个）。
- *
- * 做成可改的输入框：以后 Harbor 上若分了别的 project，不用改代码。
- * 后端对应配置是 `harbor.project`，默认值同样是 escloud。
- */
+/** Harbor 项目默认值（拉不到列表时兜底，与后端 `harbor.project` 默认一致） */
 const DEFAULT_PROJECT = 'escloud';
 
 /**
  * 「Harbor 仓库」视角。
  *
- * 两级视图（2026-10-20 用户要求"加一个读取 harbor 项目的所有接口，点击显示所有项目"）：
- *   ① 仓库列表 —— 直接列 Harbor 某个 project 下的**全部仓库**，不依赖平台项目记录
- *   ② 某个仓库的 tag —— 点进去才查
+ * 结构（2026-10-20 用户确认的效果图）：
+ *   [Harbor 项目 ▼]  [微服务 ▼]  [重新读取]  地址
+ *   ── Tag / Digest / 大小 / 时间 / 操作 ──
  *
- * 为什么不能只做"先选平台项目"：那样想看仓库里有什么，得先在脑子里把项目名映射成
- * 仓库名，还得祈祷 `image_name` 拼对了。而这个视角的意义恰恰是**绕过平台记录看仓库真相**
- *（含 Jenkins 推的、别人手工 push 的、平台根本不认识的镜像）。
+ * 两个下拉各管一件事，不要合并：
+ *   · **Harbor 项目** —— Harbor 上的 project（候选实时从 Harbor 拉，默认 escloud）
+ *   · **微服务** —— 平台**已纳管**的项目，一个不多一个不少
+ * 查的是「project + 微服务的镜像名末段」拼出来的那个仓库。
+ *
+ * ⚠️ 为什么不直接用平台的 `imageName` 整段：
+ * 它分前后端（`backend/userv2`、`frontend/aio-doc`），而 Harbor 上这些镜像
+ * **统一在 escloud 下**（`escloud/userv2`）。拿第一段当 project 会查一个不存在的仓库
+ * （2026-10-20 用户报的正是这个）。
  */
+const repoOf = (imageName?: string) => (imageName || '').split('/').filter(Boolean).pop() || '';
+
 const HarborImages: React.FC = () => {
   const [project, setProject] = useState(DEFAULT_PROJECT);
-  /** 当前打开 tag 列表的仓库（null = 停在仓库列表这一级） */
-  const [repo, setRepo] = useState<string | null>(null);
+  const [serviceKey, setServiceKey] = useState<string | undefined>();
 
-  const [repos, setRepos] = useState<HarborRepoRow[]>([]);
-  const [repoTotal, setRepoTotal] = useState(0);
-  const [repoPage, setRepoPage] = useState(1);
-
-  const [tags, setTags] = useState<HarborTagRow[]>([]);
-  const [tagTotal, setTagTotal] = useState(0);
-  const [tagPage, setTagPage] = useState(1);
+  const [rows, setRows] = useState<HarborTagRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadAt, setReloadAt] = useState(0);
 
-  // ① 仓库列表（只在第一级拉）
-  useEffect(() => {
-    if (repo) return;
-    let alive = true;
-    setLoading(true);
-    setError(null);
-    imageApi
-      .harborRepos(project, repoPage, 50)
-      .then((r) => {
-        if (!alive) return;
-        setRepos(r.list ?? []);
-        setRepoTotal(r.total ?? 0);
-      })
-      .catch((e) => {
-        if (!alive) return;
-        setRepos([]);
-        setRepoTotal(0);
-        setError(e?.message ?? '读取 Harbor 仓库列表失败');
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [project, repoPage, repo, reloadAt]);
+  // Harbor 项目候选：实时从 Harbor 拉；拉不到就退回默认值（不让下拉空着）
+  const projectsApi = useApi(() => imageApi.harborProjects(), []);
+  const projectOptions = useMemo(() => {
+    const list = projectsApi.data ?? [];
+    return (list.length ? list : [DEFAULT_PROJECT]).map((n) => ({ label: n, value: n }));
+  }, [projectsApi.data]);
 
-  // ② 某个仓库的 tag
+  // 微服务候选：平台已纳管的项目
+  const servicesApi = useApi(() => projectApi.list({ pageSize: 200 }), []);
+  const services = useMemo(() => servicesApi.data?.list ?? [], [servicesApi.data]);
+
   useEffect(() => {
-    if (!repo) return;
+    if (projectOptions.length && !projectOptions.some((o) => o.value === project)) {
+      setProject(projectOptions[0].value);
+    }
+  }, [projectOptions, project]);
+
+  const service = services.find((s) => s.key === serviceKey);
+  const repo = repoOf(service?.imageName);
+  const address = repo ? `${project}/${repo}` : '';
+
+  useEffect(() => {
+    if (!repo) {
+      setRows([]);
+      setTotal(0);
+      return;
+    }
     let alive = true;
     setLoading(true);
     setError(null);
     imageApi
-      .harborTags(project, repo, tagPage, pageSize)
+      .harborTags(project, repo, page, pageSize)
       .then((r) => {
         if (!alive) return;
-        setTags(r.list ?? []);
-        setTagTotal(r.total ?? 0);
+        setRows(r.list ?? []);
+        setTotal(r.total ?? 0);
       })
       .catch((e) => {
         if (!alive) return;
-        setTags([]);
-        setTagTotal(0);
+        setRows([]);
+        setTotal(0);
         setError(e?.message ?? '读取 Harbor tag 失败');
       })
       .finally(() => {
@@ -103,56 +93,14 @@ const HarborImages: React.FC = () => {
     return () => {
       alive = false;
     };
-  }, [project, repo, tagPage, pageSize, reloadAt]);
+  }, [project, repo, page, pageSize, reloadAt]);
 
-  const address = useMemo(() => `${project}/${repo ?? ''}`, [project, repo]);
-
-  const repoColumns: ColumnsType<HarborRepoRow> = [
-    {
-      title: '仓库',
-      dataIndex: 'name',
-      render: (v: string) => (
-        <span className="yn-mono" style={{ fontWeight: 600 }}>
-          {v}
-        </span>
-      ),
-    },
-    {
-      title: 'Tag 数',
-      dataIndex: 'tagCount',
-      width: 110,
-      render: (v: number) =>
-        // 0 可能是"真的没有 tag"，也可能是 v1 不回收 artifact_count —— 显示 — 而不是编一个数
-        typeof v === 'number' && v > 0 ? <Tag color="blue">{v}</Tag> : <Text type="secondary">—</Text>,
-    },
-    {
-      title: '操作',
-      key: 'act',
-      width: 110,
-      render: (_: unknown, r: HarborRepoRow) => (
-        <Button
-          size="small"
-          type="link"
-          onClick={() => {
-            setRepo(r.name);
-            setTagPage(1);
-          }}
-        >
-          查看 tag
-        </Button>
-      ),
-    },
-  ];
-
-  const tagColumns: ColumnsType<HarborTagRow> = [
+  const columns: ColumnsType<HarborTagRow> = [
     {
       title: 'Tag',
       dataIndex: 'tag',
-      width: 240,
-      render: (v: string) => (
-        // 胶囊底 + 等宽：一行行 tag 要能被快速扫读，纯文字在白底上是一排一样的黑块
-        <span className="yn-harbor-tag yn-mono">{v}</span>
-      ),
+      width: 220,
+      render: (v: string) => <span className="yn-harbor-tag yn-mono">{v}</span>,
     },
     {
       title: 'Digest',
@@ -165,9 +113,7 @@ const HarborImages: React.FC = () => {
             </span>
           </Tooltip>
         ) : (
-          // ⚠️ 只画一个弱化的 —，把"为什么不显示"挂 tooltip。
-          // 原来每行都写"该 Harbor 未提供"：v1 上十几行全都一样，那不是在说明，
-          // 是在用同一句话把整列糊掉 —— 真正的信息（哪些行**有** digest）反而看不见了。
+          // 只画弱化的 —，把原因挂 tooltip：v1 上每行都写同一句话会把这列糊掉
           <Tooltip title="该 Harbor 版本的 core 接口不返回 digest（v1），需要 digest 请用 v2 的 artifacts 接口">
             <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
               —
@@ -184,13 +130,12 @@ const HarborImages: React.FC = () => {
     {
       title: '时间',
       dataIndex: 'pushedAt',
-      width: 200,
+      width: 190,
       render: (v?: string, r?: HarborTagRow) =>
         v ? (
           <Tooltip title={`${fmt(v)}${r?.timeSource === 'build' ? '（构建时间，不是推送时间）' : ''}`}>
             <span>
               {ago(v)}
-              {/* 时间口径说清楚：v1 只有构建时间，不是推送到仓库的时间 */}
               {r?.timeSource && r.timeSource !== 'push' ? (
                 <Text type="secondary" style={{ fontSize: 11.5 }}>
                   {' '}
@@ -226,36 +171,45 @@ const HarborImages: React.FC = () => {
     <SectionCard bodyStyle={{ padding: 0 }}>
       <div className="yn-filter-bar">
         <Space size={12} wrap>
-          {/* 左边是"选什么"，右边是"看到了什么" —— 顺序就是用户 2026-10-20 指出的那个 */}
           <span style={{ fontSize: 13, color: '#5a6478' }}>
             Harbor 项目
-            <Input
+            <Select
               style={{ width: 150, marginLeft: 8 }}
               value={project}
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                setProject(v || DEFAULT_PROJECT);
-                setRepo(null);
-                setRepoPage(1);
+              onChange={(v) => {
+                setProject(v);
+                setPage(1);
               }}
-              placeholder={DEFAULT_PROJECT}
+              options={projectOptions}
+              loading={projectsApi.loading}
+              // 拉不到列表时提示一下，别让人以为"Harbor 上只有一个 project"
+              notFoundContent={projectsApi.error ? '读取 Harbor 项目列表失败' : '没有读到项目'}
             />
           </span>
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => setReloadAt((n) => n + 1)}>
+          <span style={{ fontSize: 13, color: '#5a6478' }}>
+            微服务
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择平台已纳管的项目"
+              style={{ width: 260, marginLeft: 8 }}
+              value={serviceKey}
+              onChange={(v) => {
+                setServiceKey(v);
+                setPage(1);
+              }}
+              options={services.map((s) => ({ label: `${s.name}（${s.key}）`, value: s.key }))}
+              loading={servicesApi.loading}
+            />
+          </span>
+          <Button icon={<ReloadOutlined />} loading={loading} disabled={!repo} onClick={() => setReloadAt((n) => n + 1)}>
             重新读取
           </Button>
-          {repo ? (
-            <>
-              <Button icon={<ArrowLeftOutlined />} type="link" onClick={() => setRepo(null)}>
-                返回仓库列表
-              </Button>
-              <Tag className="yn-mono" style={{ marginInlineEnd: 0 }}>
-                {address}
-              </Tag>
-            </>
-          ) : (
-            <Tag style={{ marginInlineEnd: 0 }}>该 Harbor 项目下共 {repoTotal} 个仓库</Tag>
-          )}
+          {address ? (
+            <Tag className="yn-mono" style={{ marginInlineEnd: 0 }}>
+              {address}
+            </Tag>
+          ) : null}
         </Space>
       </div>
 
@@ -264,7 +218,7 @@ const HarborImages: React.FC = () => {
           <Alert
             type="error"
             showIcon
-            message={repo ? '读取 Harbor tag 失败' : '读取 Harbor 仓库列表失败'}
+            message="读取 Harbor tag 失败"
             description={error}
             action={
               <Button size="small" onClick={() => setReloadAt((n) => n + 1)}>
@@ -275,55 +229,31 @@ const HarborImages: React.FC = () => {
         </div>
       ) : null}
 
-      {repo ? (
+      {!repo ? (
+        <div style={{ padding: '44px 0', textAlign: 'center' }}>
+          <span style={{ fontSize: 13, color: '#8c8c95' }}>
+            选一个微服务，我去 <b>{project}</b> 下查它对应的仓库有哪些 tag
+          </span>
+        </div>
+      ) : (
         <Table<HarborTagRow>
           rowKey={(r) => `${r.tag}-${r.digest ?? ''}`}
           size="small"
           loading={loading}
-          dataSource={tags}
-          columns={tagColumns}
+          dataSource={rows}
+          columns={columns}
           pagination={{
-            current: tagPage,
+            current: page,
             pageSize,
-            total: tagTotal,
+            total,
             showSizeChanger: true,
             pageSizeOptions: [10, 20, 50, 100],
             showTotal: (n) => `共 ${n} 个 tag`,
             onChange: (p, ps) => {
-              setTagPage(p);
+              setPage(p);
               setPageSize(ps);
             },
           }}
-        />
-      ) : (
-        <Table<HarborRepoRow>
-          rowKey={(r) => r.fullName}
-          size="small"
-          loading={loading}
-          dataSource={repos}
-          columns={repoColumns}
-          locale={{
-            emptyText: (
-              <Empty
-                description={
-                  <span style={{ fontSize: 13, color: '#8c8c95' }}>
-                    项目 <b>{project}</b> 下没有读到仓库 —— 确认 Harbor 上项目名是否正确
-                  </span>
-                }
-              />
-            ),
-          }}
-          pagination={
-            repoTotal > 50
-              ? {
-                  current: repoPage,
-                  pageSize: 50,
-                  total: repoTotal,
-                  showTotal: (n) => `共 ${n} 个仓库`,
-                  onChange: (p) => setRepoPage(p),
-                }
-              : false
-          }
         />
       )}
     </SectionCard>

@@ -369,6 +369,19 @@ func (h *handler) listImages(c *gin.Context) {
 	httpx.OK(c, httpx.NewPageData(list, total, *pq))
 }
 
+// listHarborProjects GET /images/harbor/projects
+//
+// 给「Harbor 项目」下拉供候选：直接问 Harbor 有哪些 project，
+// 而不是在代码里写死——写死的那种，Harbor 一分项目就得改代码。
+func (h *handler) listHarborProjects(c *gin.Context) {
+	list, err := h.svc.CI.ListHarborProjects(c.Request.Context())
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"list": list})
+}
+
 // listHarborRepos GET /images/harbor/repos?project=&page=&pageSize=
 //
 // 列 Harbor 某个 project 下的全部仓库（不依赖平台项目）。
