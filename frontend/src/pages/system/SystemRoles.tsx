@@ -423,8 +423,20 @@ const SystemRoles: React.FC = () => {
                           <span style={{ fontSize: 11.5, color: '#b0b6c2', fontWeight: 400 }}>{list.length}</span>
                         </div>
                         <Checkbox.Group
+                          /**
+                           * ⚠️ **每个模块一个 Checkbox.Group，但共用同一个 draft**。
+                           *
+                           * antd 的 `onChange` 只返回**本组内**被选中的值 ——
+                           * 直接 `setDraft(v)` 会把其它模块的勾选全部冲掉
+                           *（实测：在「镜像」里勾一下「清理镜像」，构建/环境/日志的勾选全消失）。
+                           *
+                           * 所以 onChange 必须**合并**：先摘掉本组的 code，再放入本组的新选中。
+                           */
                           value={draft}
-                          onChange={(v) => setDraft(v as string[])}
+                          onChange={(v) => {
+                            const groupCodes = new Set(list.map((p) => p.code));
+                            setDraft([...draft.filter((c) => !groupCodes.has(c)), ...(v as string[])]);
+                          }}
                           style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 8 }}
                         >
                           {list.map((p) => (
