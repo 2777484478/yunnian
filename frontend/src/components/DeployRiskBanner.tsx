@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, Skeleton } from 'antd';
+import { SafetyCertificateOutlined } from '@ant-design/icons';
 import { deployApi } from '@/api';
 
 export interface DeployRiskBannerProps {
@@ -63,13 +64,23 @@ const DeployRiskBanner: React.FC<DeployRiskBannerProps> = ({ projectKey, envKey,
   if (!level) return null;
 
   if (level === 'low') {
+    // ⚠️ 要**一眼看到有这个东西**，但又不能做得像警告 ——
+    // 它是绿色、带左侧色条、分数大一号；原因单独一行弱化。
+    // （2026-10-20 用户先反馈"看不到"、再反馈"太不明显"，两次都是同一个问题：
+    //   信息的存在感要和它的重要性匹配，而"低"也不等于"可以忽略"。）
     return (
       <div className="yn-risk-low">
-        <span className="yn-risk-low__dot" />
-        风险低 · {score} 分
-        <span className="yn-risk-low__detail">
-          {reasons.length ? reasons.join('；') : '无风险因子命中'}
-        </span>
+        <SafetyCertificateOutlined className="yn-risk-low__icon" />
+        <div style={{ minWidth: 0 }}>
+          <div className="yn-risk-low__head">
+            <span className="yn-risk-low__title">风险低</span>
+            <span className="yn-risk-low__score">{score}</span>
+            <span className="yn-risk-low__unit">分</span>
+          </div>
+          <div className="yn-risk-low__reasons">
+            {reasons.length ? reasons.join('；') : '没有命中任何风险因子'}
+          </div>
+        </div>
       </div>
     );
   }
