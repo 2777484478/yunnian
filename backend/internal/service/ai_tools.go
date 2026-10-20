@@ -44,7 +44,7 @@ type aiTool struct {
 	Description string
 	// Parameters JSON Schema；nil 表示无入参。
 	Parameters map[string]any
-	Run        func(ctx context.Context, args map[string]any) (string, error)
+	Run func(ctx context.Context, c Caller, args map[string]any) (string, error)
 }
 
 // aiToolDecls 转成给模型看的工具声明。
@@ -99,6 +99,13 @@ func (a *AIService) aiTools() []aiTool {
 
 // --------------------------------------------------------------------------- 名录类
 
+/**
+ * list_environments（并**只列出当前用户能看的环境**）。
+ *
+ * ⚠️ 这个过滤是必须的：有 `ai:query` 的人能通过它读到全部环境的名录，
+ * 再拿 env_key 去调别的工具 —— 如果名录不收敛，"环境按权限可见"就形同虚设。
+ * 可见性规则走 Caller.VisibleEnvKeys，与接口层**同一份**判断，不另写一套。
+ */
 func (a *AIService) toolListEnvironments() aiTool {
 	return aiTool{
 		Name: "list_environments",
@@ -106,9 +113,19 @@ func (a *AIService) toolListEnvironments() aiTool {
 			"集群资源水位（字段名 healthStatus，**只表示该集群节点的 CPU/内存用量**，越线不等于服务故障——" +
 			"服务健康要用 get_service_status 去集群读）、是否需要审批。" +
 			"用户用口语描述环境时（「测试区192」「正式区」「stage」），先用它把描述对应到 env_key，不要凭猜测填。",
-		Run: func(ctx context.Context, _ map[string]any) (string, error) {
+		Run: func(ctx context.Context, c Caller, _ map[string]any) (string, error) {
+			q := a.db(ctx)
+			// ⚠️ 名录必须跟着可见性收敛：这是模型"知道有哪些环境"的唯一来源，
+			// 它直接决定模型会不会去查正式区。过滤规则与接口层同一份（VisibleEnvKeys）。
+			if allowed, restricted := c.VisibleEnvKeys(); restricted {
+				if len(allowed) == 0 {
+					q = q.Where("1 = 0")
+				} else {
+					q = q.Where("env_key IN ?", allowed)
+				}
+			}
 			var envs []model.Environment
-			if err := a.db(ctx).Order("stage_order asc, id asc").Find(&envs).Error; err != nil {
+			if err := q.Order("stage_order asc, id asc").Find(&envs).Error; err != nil {
 				return "", err
 			}
 			out := make([]map[string]any, 0, len(envs))
@@ -129,6 +146,27 @@ func (a *AIService) toolListEnvironments() aiTool {
 	}
 }
 
+/**
+ * assertToolEnvVisible 工具侧的可见性断言。
+ *
+ * 与接口层 `CDService.AssertEnvVisible` **同一条规则**（都走 VisibleEnvKeys），
+ * 这里是另一份实现而不是复用 —— 因为 AIService 拿不到 CDService，
+ * 而为了一个十行的判断去建立依赖不值得。规则本身只有一处定义（VisibleEnvKeys），
+ * 所以不会分家。
+ */
+func assertToolEnvVisible(c Caller, envKey string) error {
+	allowed, restricted := c.VisibleEnvKeys()
+	if !restricted || envKey == "" {
+		return nil
+	}
+	for _, k := range allowed {
+		if k == envKey {
+			return nil
+		}
+	}
+	return fmt.Errorf("无权查看环境 %s", envKey)
+}
+
 func (a *AIService) toolListProjects() aiTool {
 	return aiTool{
 		Name: "list_projects",
@@ -137,7 +175,7 @@ func (a *AIService) toolListProjects() aiTool {
 		Parameters: schema(map[string]any{
 			"keyword": map[string]any{"type": "string", "description": "可选，按名称或标识模糊匹配"},
 		}, nil),
-		Run: func(ctx context.Context, args map[string]any) (string, error) {
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
 			q := a.db(ctx).Model(&model.Project{})
 			if kw := argStr(args, "keyword"); kw != "" {
 				like := "%" + kw + "%"
@@ -173,8 +211,11 @@ func (a *AIService) toolListEnvServices() aiTool {
 		Parameters: schema(map[string]any{
 			"envKey": map[string]any{"type": "string", "description": "环境的 env_key，先用 list_environments 确认"},
 		}, []string{"envKey"}),
-		Run: func(ctx context.Context, args map[string]any) (string, error) {
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
 			envKey := argStr(args, "envKey")
+			if err := assertToolEnvVisible(c, envKey); err != nil {
+				return "", err
+			}
 			if envKey == "" {
 				return "", errors.New("缺少 envKey")
 			}
@@ -222,8 +263,11 @@ func (a *AIService) toolGetServiceStatus() aiTool {
 			"envKey":     map[string]any{"type": "string", "description": "环境的 env_key"},
 			"projectKey": map[string]any{"type": "string", "description": "项目的 project_key"},
 		}, []string{"envKey", "projectKey"}),
-		Run: func(ctx context.Context, args map[string]any) (string, error) {
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
 			envKey, projectKey := argStr(args, "envKey"), argStr(args, "projectKey")
+			if err := assertToolEnvVisible(c, envKey); err != nil {
+				return "", err
+			}
 			if envKey == "" || projectKey == "" {
 				return "", errors.New("缺少 envKey 或 projectKey")
 			}
@@ -280,8 +324,11 @@ func (a *AIService) toolDiagnoseService() aiTool {
 			"envKey":     map[string]any{"type": "string", "description": "环境的 env_key"},
 			"projectKey": map[string]any{"type": "string", "description": "项目的 project_key"},
 		}, []string{"envKey", "projectKey"}),
-		Run: func(ctx context.Context, args map[string]any) (string, error) {
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
 			envKey, projectKey := argStr(args, "envKey"), argStr(args, "projectKey")
+			if err := assertToolEnvVisible(c, envKey); err != nil {
+				return "", err
+			}
 			if envKey == "" || projectKey == "" {
 				return "", errors.New("缺少 envKey 或 projectKey")
 			}
@@ -337,8 +384,11 @@ func (a *AIService) toolListDeployments() aiTool {
 			"projectKey": map[string]any{"type": "string", "description": "可选"},
 			"limit":      map[string]any{"type": "integer", "description": "返回条数，默认 5，最多 20"},
 		}, nil),
-		Run: func(ctx context.Context, args map[string]any) (string, error) {
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
 			envKey, projectKey := argStr(args, "envKey"), argStr(args, "projectKey")
+			if err := assertToolEnvVisible(c, envKey); err != nil {
+				return "", err
+			}
 			if envKey == "" && projectKey == "" {
 				return "", errors.New("envKey 与 projectKey 至少要给一个")
 			}
@@ -375,7 +425,7 @@ func (a *AIService) toolListBuilds() aiTool {
 			"projectKey": map[string]any{"type": "string", "description": "项目的 project_key"},
 			"limit":      map[string]any{"type": "integer", "description": "返回条数，默认 5，最多 20"},
 		}, []string{"projectKey"}),
-		Run: func(ctx context.Context, args map[string]any) (string, error) {
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
 			projectKey := argStr(args, "projectKey")
 			if projectKey == "" {
 				return "", errors.New("缺少 projectKey")
@@ -410,8 +460,11 @@ func (a *AIService) toolClusterResources() aiTool {
 		Parameters: schema(map[string]any{
 			"envKey": map[string]any{"type": "string", "description": "环境的 env_key"},
 		}, []string{"envKey"}),
-		Run: func(ctx context.Context, args map[string]any) (string, error) {
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
 			envKey := argStr(args, "envKey")
+			if err := assertToolEnvVisible(c, envKey); err != nil {
+				return "", err
+			}
 			if envKey == "" {
 				return "", errors.New("缺少 envKey")
 			}
@@ -482,7 +535,7 @@ func (a *AIService) callTool(ctx context.Context, name, rawArgs string) AIToolRe
 		}
 	}
 
-	out, err := tool.Run(ctx, args)
+	out, err := tool.Run(ctx, CallerFrom(ctx), args)
 	if err != nil {
 		res.Error = err.Error()
 		res.Result = aiJSON(map[string]any{

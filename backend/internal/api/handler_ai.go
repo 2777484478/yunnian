@@ -47,7 +47,10 @@ func (h *handler) aiChat(c *gin.Context) {
 		}
 	}
 
-	ctx := c.Request.Context()
+	// ⚠️ 把 Caller 放进 ctx：AI 工具的可见性判断（哪些环境能查）要靠它。
+	// 不注入的话，工具侧拿到的是零值 Caller（User=nil）→ 一律不限制 →
+	// 有 ai:query 的人能通过「查一下正式区 xx 服务」读到 prod，绕过环境可见性。
+	ctx := service.WithCaller(c.Request.Context(), caller(c))
 	text, _, err := h.svc.AI.Run(ctx, pre,
 		func(delta string) error {
 			if !s.send("token", gin.H{"delta": delta}) {
