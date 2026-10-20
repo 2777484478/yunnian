@@ -95,38 +95,58 @@ const HarborImages: React.FC = () => {
     };
   }, [project, repo, page, pageSize, reloadAt]);
 
+  /**
+   * ⚠️ Digest / 大小 两列**只在真的有值时才出现**。
+   *
+   * Harbor v1 的 core 接口这两项都不给，于是整列只剩「—」—— 它占了近一半宽度、
+   * 一个字符的有效信息都没有，一屏看下去就是"半张表是空的"（2026-10-20 用户的原话：
+   * "页面展示效果太low了"）。再花哨的样式也补不回这件事，所以直接不渲染。
+   *
+   * v2 上这两项有值，列会自动出现 —— 同一个组件，两种 Harbor 各自呈现自己的真实能力。
+   */
+  const showDigest = rows.some((r) => !!r.digest);
+  const showSize = rows.some((r) => (r.size ?? 0) > 0);
+
+  /** 第一行按 push_time 倒序拿的，就是最新那个 —— 给它打个标 */
+  const latestTag = rows[0]?.tag;
+
   const columns: ColumnsType<HarborTagRow> = [
     {
       title: 'Tag',
       dataIndex: 'tag',
-      width: 220,
-      render: (v: string) => <span className="yn-harbor-tag yn-mono">{v}</span>,
+      ...(showSize ? { width: 240 } : {}),
+      render: (v: string) => (
+        <Space size={6}>
+          <span className="yn-harbor-tag yn-mono">{v}</span>
+          {v === latestTag ? <span className="yn-harbor-latest">最新</span> : null}
+        </Space>
+      ),
     },
-    {
-      title: 'Digest',
-      dataIndex: 'digest',
-      render: (v?: string) =>
-        v ? (
-          <Tooltip title={v}>
-            <span className="yn-mono" style={{ fontSize: 12, color: '#7a8290' }}>
-              {v.length > 26 ? `${v.slice(0, 26)}…` : v}
-            </span>
-          </Tooltip>
-        ) : (
-          // 只画弱化的 —，把原因挂 tooltip：v1 上每行都写同一句话会把这列糊掉
-          <Tooltip title="该 Harbor 版本的 core 接口不返回 digest（v1），需要 digest 请用 v2 的 artifacts 接口">
-            <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
-              —
-            </Text>
-          </Tooltip>
-        ),
-    },
-    {
-      title: '大小',
-      dataIndex: 'size',
-      width: 110,
-      render: (v: number) => (v ? humanSize(v) : '—'),
-    },
+    ...(showDigest
+      ? [
+          {
+            title: 'Digest',
+            dataIndex: 'digest',
+            render: (v?: string) => (
+              <Tooltip title={v}>
+                <span className="yn-mono" style={{ fontSize: 12, color: '#7a8290' }}>
+                  {v && v.length > 26 ? `${v.slice(0, 26)}…` : v}
+                </span>
+              </Tooltip>
+            ),
+          } as ColumnsType<HarborTagRow>[number],
+        ]
+      : []),
+    ...(showSize
+      ? [
+          {
+            title: '大小',
+            dataIndex: 'size',
+            width: 110,
+            render: (v: number) => (v ? humanSize(v) : '—'),
+          } as ColumnsType<HarborTagRow>[number],
+        ]
+      : []),
     {
       title: '时间',
       dataIndex: 'pushedAt',
@@ -229,6 +249,24 @@ const HarborImages: React.FC = () => {
         </div>
       ) : null}
 
+      {repo && rows.length ? (
+        <div className="yn-harbor-summary">
+          <span>
+            共 <b>{total}</b> 个 tag
+          </span>
+          <span className="yn-harbor-summary__sep" />
+          <span>
+            最新 <span className="yn-mono" style={{ color: '#1677ff', fontWeight: 500 }}>{latestTag}</span>
+          </span>
+          {rows[0]?.pushedAt ? (
+            <>
+              <span className="yn-harbor-summary__sep" />
+              <span>{ago(rows[0].pushedAt)}更新</span>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+
       {!repo ? (
         <div style={{ padding: '44px 0', textAlign: 'center' }}>
           <span style={{ fontSize: 13, color: '#8c8c95' }}>
@@ -238,6 +276,7 @@ const HarborImages: React.FC = () => {
       ) : (
         <Table<HarborTagRow>
           rowKey={(r) => `${r.tag}-${r.digest ?? ''}`}
+          className="yn-harbor-table"
           size="small"
           loading={loading}
           dataSource={rows}
