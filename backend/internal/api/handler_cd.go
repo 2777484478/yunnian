@@ -22,7 +22,7 @@ func (h *handler) listEnvironments(c *gin.Context) {
 		PageSize: q.PageSize,
 		SortBy:   q.SortBy,
 		Order:    q.Order,
-	})
+	}, caller(c))
 	if err != nil {
 		httpx.Fail(c, err)
 		return

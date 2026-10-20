@@ -349,3 +349,38 @@ func splitCSV(v string) []string {
 	}
 	return out
 }
+
+// VisibleEnvKeys 返回当前用户**能查看**的环境 key。
+//
+// 第二个返回值 restricted 表示"是否受限制"：
+//
+//	restricted=false → 全部可见（**没有配过可见性的人走这条**）
+//	restricted=true  → 只看 allowed 里的；allowed 为空 = 一个都看不到
+//
+// ⚠️ 为什么"没配过 = 全部可见"，而不是"没配过 = 看不到"：
+// 这条规则是**后加的**，存量角色（ops / dev / qa / readonly）身上都没有
+// `env:view:*`。若按"无权限即不可见"处理，升级当天所有人打开平台会是一片空白 ——
+// 那不是"更安全"，是把平台弄瞎了。要收紧就显式配，配了才生效。
+//
+// 权限点形态：
+//   - `*` 或 `env:*`        → 全部可见
+//   - `env:view:test` 等    → 只这些（可多个）
+//   - 一个都没有             → 全部可见（见上）
+func (c Caller) VisibleEnvKeys() (allowed []string, restricted bool) {
+	if c.User == nil {
+		return nil, false
+	}
+	if c.User.HasAnyPerm("*", "env:*") {
+		return nil, false
+	}
+	var keys []string
+	for _, p := range c.User.Permissions {
+		if rest, ok := strings.CutPrefix(p, "env:view:"); ok && rest != "" {
+			keys = append(keys, rest)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, false
+	}
+	return keys, true
+}

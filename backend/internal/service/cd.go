@@ -175,11 +175,20 @@ var envSortColumns = map[string]string{
 }
 
 // ListEnvironments 环境列表。
-func (s *CDService) ListEnvironments(ctx context.Context, q EnvironmentQuery) (*httpx.PageQuery, any, int64, error) {
+func (s *CDService) ListEnvironments(ctx context.Context, q EnvironmentQuery, c Caller) (*httpx.PageQuery, any, int64, error) {
 	pq := httpx.PageQuery{Page: q.Page, PageSize: q.PageSize, SortBy: q.SortBy, Order: q.Order, Keyword: q.Keyword}
 	column, desc := pq.Normalize(envSortColumns, "created_at")
 
 	db := s.db(ctx).Model(&model.Environment{})
+	// 环境可见性：配了 `env:view:<key>` 的人只看得见那几台。
+	// 规则见 VisibleEnvKeys —— **没配过的人保持全部可见**（向后兼容，否则所有存量角色会突然一片空白）。
+	if allowed, restricted := c.VisibleEnvKeys(); restricted {
+		if len(allowed) == 0 {
+			db = db.Where("1 = 0")
+		} else {
+			db = db.Where("env_key IN ?", allowed)
+		}
+	}
 	if kw := strings.TrimSpace(q.Keyword); kw != "" {
 		like := "%" + kw + "%"
 		db = db.Where("name LIKE ? OR env_key LIKE ? OR namespace LIKE ?", like, like, like)
