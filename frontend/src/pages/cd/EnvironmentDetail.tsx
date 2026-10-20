@@ -44,6 +44,7 @@ import {
 } from '@ant-design/icons';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { PageHeader, SectionCard, StatCard } from '@/components/ui';
+import DeployRiskBanner from '@/components/DeployRiskBanner';
 import { UsageBar } from '@/components/charts';
 import { LogPanel } from '@/components/LogPanel';
 import { KVFields } from '@/components/KVFields';
@@ -1873,6 +1874,18 @@ const EnvironmentDetail: React.FC = () => {
             description={`审批人：${env.approvers.join('、') || '未指定'}。审批通过后平台才会开始部署。`}
           />
         ) : null}
+
+        {/* 风险评估：跟着**第 1 步选的项目**走，选了就出。
+            放这里而不是每步都放一遍 —— 它是"这次发布整体有多险"，与第几步无关。
+
+            ⚠️ 这个入口之前漏了（2026-10-20 用户："这些部署入口，你没有做AI风险评分啊"）：
+            当时只接了拓扑页的部署弹窗，而这里是**另一个独立的部署向导**（环境已定）。
+            同一件事有多个入口时，横切能力（风险、通知、审计）必须逐个体检。 */}
+        <DeployRiskBanner
+          projectKey={Form.useWatch('projectKey', deployForm)}
+          envKey={key}
+          active={!!Form.useWatch('projectKey', deployForm)}
+        />
 
         <Form form={deployForm} layout="vertical" requiredMark="optional">
           {/* ⚠️ 各步骤的字段**必须一直挂载**，只切换显示 —— 不能条件卸载。
