@@ -64,22 +64,36 @@ const SystemRoles: React.FC = () => {
   const envApi = useApi(() => environmentApi.list(), []);
   const allEnvs = useMemo(() => envApi.data?.list ?? [], [envApi.data]);
 
-  /** 当前 draft 里已配的可见环境（`env:view:<key>` 的 key 部分） */
-  const visibleKeys = useMemo(
-    () => draft.filter((p) => p.startsWith('env:view:')).map((p) => p.slice('env:view:'.length)),
-    [draft],
-  );
-
   /**
-   * 改可见范围：**先摘掉 draft 里所有 env:view:*，再放入新的**。
+   * 环境可见范围用**独立 state**，不再"从 draft 里派生 + 写回 draft"。
    *
-   * 不这么做的话，取消勾选会留下旧 code —— 保存后"明明取消了他还看得见"，
-   * 而且界面上看不出来（那个 code 已经不在选项里了）。
+   * ⚠️ 之前那样做的结果就是**多选只能选一个**（2026-10-20 用户实测）：
+   * `visibleKeys` 是 `draft` 的派生值，而 `setVisibleKeys` 又依赖**渲染时快照的 draft**
+   * 去做过滤 —— 选第二个时，`onChange` 给的完整数组被写进 draft，但下一次渲染的
+   * 派生值可能与 Select 内部状态错位，表现为"选一个就把上一个顶掉"。
+   *
+   * 派生 + 回写同一个状态，本质是在拿 React 的渲染时序赌正确性。独立 state 不赌。
+   * 提交时才合并：`draft` 里其它权限 + `env:view:<key>`。
    */
-  const setVisibleKeys = (keys: string[]) => {
-    const kept = draft.filter((p) => !p.startsWith('env:view:'));
-    setDraft([...kept, ...keys.map((k) => `env:view:${k}`)]);
-  };
+  const [visibleDraft, setVisibleDraft] = useState<string[]>([]);
+
+  /** 切角色时把该角色已配的可见环境读进 visibleDraft（只在**换角色**时同步） */
+  useEffect(() => {
+    const r = roles.find((x) => x.key === active);
+    if (!r || r.perms.includes('*')) {
+      setVisibleDraft([]);
+      return;
+    }
+    setVisibleDraft(r.perms.filter((p) => p.startsWith('env:view:')).map((p) => p.slice('env:view:'.length)));
+    // 依赖只放 active：保存后 roles 会刷新，但那时不该把用户正在改的勾选冲掉
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
+  /** 合并成最终要提交的权限点数组 */
+  const mergedPerms = useMemo(
+    () => [...draft.filter((p) => !p.startsWith('env:view:')), ...visibleDraft.map((k) => `env:view:${k}`)],
+    [draft, visibleDraft],
+  );
 
   const load = async () => {
     setLoading(true);
@@ -107,10 +121,10 @@ const SystemRoles: React.FC = () => {
   const isSuper = !!role?.perms.includes('*');
   const dirty = useMemo(() => {
     if (!role || isSuper) return false;
-    const a = [...draft].sort().join(',');
+    const a = [...mergedPerms].sort().join(',');
     const b = [...role.perms].sort().join(',');
     return a !== b;
-  }, [draft, role, isSuper]);
+  }, [mergedPerms, role, isSuper]);
 
   const grouped = useMemo(() => {
     const q = kw.trim().toLowerCase();
@@ -129,7 +143,7 @@ const SystemRoles: React.FC = () => {
     if (!role) return;
     setSaving(true);
     try {
-      const updated = await roleApi.setPermissions(role.key, draft, false);
+      const updated = await roleApi.setPermissions(role.key, mergedPerms, false);
       setRoles((prev) => prev.map((r) => (r.key === role.key ? { ...r, ...updated } : r)));
       setDraft(updated.perms ?? draft);
       message.success(`已保存「${role.name}」的权限`);
@@ -303,8 +317,8 @@ const SystemRoles: React.FC = () => {
                       style={{ width: '100%' }}
                       placeholder={isSuper || draft.includes('env:*') ? '当前角色可见全部环境' : '选要开放给该角色的环境'}
                       disabled={!canWrite || isSuper || draft.includes('env:*')}
-                      value={visibleKeys}
-                      onChange={(v) => setVisibleKeys(v as string[])}
+                      value={visibleDraft}
+                      onChange={(v) => setVisibleDraft(v as string[])}
                       options={allEnvs.map((e) => ({ label: `${e.name}（${e.key}）`, value: e.key }))}
                       loading={envApi.loading}
                     />
