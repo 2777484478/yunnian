@@ -34,7 +34,6 @@ import {
   DownOutlined,
   ExpandOutlined,
   FileTextOutlined,
-  HistoryOutlined,
   MoreOutlined,
   ReloadOutlined,
   RollbackOutlined,
@@ -1309,9 +1308,11 @@ const EnvironmentDetail: React.FC = () => {
             <Button icon={<ReloadOutlined />} onClick={syncCluster} disabled={!canWrite}>
               同步集群
             </Button>
-            <Button icon={<HistoryOutlined />} onClick={() => setTab('deploys')}>
-              部署历史
-            </Button>
+            {/* 「部署历史」按钮已去掉（2026-10-20 用户："多余，有入口了"）：
+                它只是 setTab('deploys')，而页面下方的 Tabs 里本来就有「部署历史」这一栏 ——
+                同一个动作两个入口，其中一个还是纯重复，只会让这一排按钮变长。
+                「部署新服务」保留：拓扑页虽然也能部署，但这里**环境已经选好了**，少一步；
+                而且它是这一页唯一的主操作（primary），去掉后整排只剩"管理类"动作。 */}
             {/* 禁用有两个理由，都要说清：缺 deploy:{env} 权限，或该环境还没有纳管服务
                 （部署向导的项目下拉就是 env.projectKeys，空列表时无可选项；
                 后端对未纳管项目也是 40400「该环境尚未纳管此项目」）。 */}
@@ -1335,7 +1336,7 @@ const EnvironmentDetail: React.FC = () => {
             </DisabledTip>
             {/* 环境级动作：与列表页共用同一个组件（权限门控、实例数预检、二次确认
                 都只有一份）。用常规按钮而不是文字链接 —— 这一排已经有
-                「纳管项目 / 同步集群 / 部署历史」，两个裸的"编辑 / 删除"会分不清在编辑什么。 */}
+                「纳管项目 / 同步集群 / 部署新服务」，两个裸的"编辑 / 删除"会分不清在编辑什么。 */}
             <EnvironmentActions
               env={env}
               svcCount={servicesApi.error || servicesApi.loading ? null : services.length}
