@@ -89,11 +89,45 @@ const SystemRoles: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
+  /**
+   * 可部署环境：与"可见范围"同款多选，存 `deploy:<envKey>`。
+   *
+   * 后端部署时判的就是 `HasAnyPerm("deploy:"+env.EnvKey, "deploy:*", "*")`
+   * （`cd.go` 的发单校验），而 `deploy:test,staging` 这种枚举语法 `auth.Match` 也支持 ——
+   * 所以这里生成的 code 与种子里的老写法**语义完全一致**，只是换成按环境勾选更直观。
+   */
+  const [deployDraft, setDeployDraft] = useState<string[]>([]);
+
+  useEffect(() => {
+    const r = roles.find((x) => x.key === active);
+    if (!r || r.perms.includes('*') || r.perms.includes('deploy:*')) {
+      setDeployDraft([]);
+      return;
+    }
+    // 兼容老写法：deploy:test,staging → 拆成 [test, staging] 勾上
+    const keys: string[] = [];
+    r.perms.forEach((p) => {
+      if (!p.startsWith('deploy:') || p === 'deploy:read' || p === 'deploy:approve') return;
+      p.slice('deploy:'.length).split(',').forEach((k) => {
+        const t = k.trim();
+        if (t && !t.includes('*')) keys.push(t);
+      });
+    });
+    setDeployDraft([...new Set(keys)]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
   /** 合并成最终要提交的权限点数组 */
-  const mergedPerms = useMemo(
-    () => [...draft.filter((p) => !p.startsWith('env:view:')), ...visibleDraft.map((k) => `env:view:${k}`)],
-    [draft, visibleDraft],
-  );
+  const mergedPerms = useMemo(() => {
+    // 环境类的 deploy:* 由 deployDraft 统一生成，先从 draft 里摘掉，避免出现两份写法
+    const isEnvDeploy = (p: string) =>
+      p.startsWith('deploy:') && p !== 'deploy:read' && p !== 'deploy:approve' && !p.startsWith('deploy:*');
+    return [
+      ...draft.filter((p) => !p.startsWith('env:view:') && !isEnvDeploy(p)),
+      ...visibleDraft.map((k) => `env:view:${k}`),
+      ...deployDraft.map((k) => `deploy:${k}`),
+    ];
+  }, [draft, visibleDraft, deployDraft]);
 
   const load = async () => {
     setLoading(true);
@@ -121,15 +155,38 @@ const SystemRoles: React.FC = () => {
   const isSuper = !!role?.perms.includes('*');
   const dirty = useMemo(() => {
     if (!role || isSuper) return false;
-    const a = [...mergedPerms].sort().join(',');
-    const b = [...role.perms].sort().join(',');
-    return a !== b;
+    /**
+     * ⚠️ 比较前要**归一化环境类 deploy**：老的 `deploy:test,staging` 在界面上被拆成
+     * 两个勾选项，合并回去是 `deploy:test` + `deploy:staging` —— 语义相同、字符串不同。
+     * 不归一化的话，一打开角色就显示「未保存」，而用户什么都没动。
+     */
+    const norm = (ps: string[]) => {
+      const out = new Set<string>();
+      ps.forEach((p) => {
+        if (p.startsWith('deploy:') && p !== 'deploy:read' && p !== 'deploy:approve' && !p.startsWith('deploy:*')) {
+          p.slice('deploy:'.length).split(',').forEach((k) => {
+            const t = k.trim();
+            if (t) out.add('deploy:' + t);
+          });
+        } else {
+          out.add(p);
+        }
+      });
+      return [...out].sort().join(',');
+    };
+    return norm(mergedPerms) !== norm(role.perms);
   }, [mergedPerms, role, isSuper]);
 
   const grouped = useMemo(() => {
     const q = kw.trim().toLowerCase();
     const map = new Map<string, PermissionPoint[]>();
     points
+      // 环境类的 deploy:<envKey> 由上面的「可部署环境」多选表达 ——
+      // 在清单里再出现一次，就会出现"勾了多选又勾这个码"的两份写法。
+      .filter(
+        (p) =>
+          !(p.code.startsWith('deploy:') && p.code !== 'deploy:read' && p.code !== 'deploy:approve' && !p.code.startsWith('deploy:*')),
+      )
       .filter((p) => !q || p.code.toLowerCase().includes(q) || (p.name || '').toLowerCase().includes(q))
       .forEach((p) => {
         const arr = map.get(p.module) ?? [];
@@ -319,6 +376,27 @@ const SystemRoles: React.FC = () => {
                       disabled={!canWrite || isSuper || draft.includes('env:*')}
                       value={visibleDraft}
                       onChange={(v) => setVisibleDraft(v as string[])}
+                      options={allEnvs.map((e) => ({ label: `${e.name}（${e.key}）`, value: e.key }))}
+                      loading={envApi.loading}
+                    />
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 8px' }}>
+                      <span style={{ width: 3, height: 12, borderRadius: 2, background: '#d46b08', opacity: 0.7 }} />
+                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>可部署环境</span>
+                      <Text type="secondary" style={{ fontSize: 11.5 }}>
+                        勾了才能在这个环境发版；没勾的环境发单会被后端拒绝
+                      </Text>
+                    </div>
+                    <Select
+                      mode="multiple"
+                      allowClear
+                      showSearch
+                      optionFilterProp="label"
+                      style={{ width: '100%' }}
+                      placeholder={isSuper || draft.includes('deploy:*') ? '当前角色可部署全部环境' : '选允许该角色部署的环境'}
+                      disabled={!canWrite || isSuper || draft.includes('deploy:*')}
+                      value={deployDraft}
+                      onChange={(v) => setDeployDraft(v as string[])}
                       options={allEnvs.map((e) => ({ label: `${e.name}（${e.key}）`, value: e.key }))}
                       loading={envApi.loading}
                     />
