@@ -5,7 +5,7 @@ import { ArrowLeftOutlined, CopyOutlined, ReloadOutlined } from '@ant-design/ico
 import { SectionCard } from '@/components/ui';
 import { imageApi } from '@/api';
 import type { HarborRepoRow, HarborTagRow } from '@/api/ci';
-import { fmt, humanSize } from '@/utils/format';
+import { ago, fmt, humanSize } from '@/utils/format';
 
 const { Text } = Typography;
 
@@ -150,9 +150,8 @@ const HarborImages: React.FC = () => {
       dataIndex: 'tag',
       width: 240,
       render: (v: string) => (
-        <span className="yn-mono" style={{ fontWeight: 600 }}>
-          {v}
-        </span>
+        // 胶囊底 + 等宽：一行行 tag 要能被快速扫读，纯文字在白底上是一排一样的黑块
+        <span className="yn-harbor-tag yn-mono">{v}</span>
       ),
     },
     {
@@ -166,10 +165,14 @@ const HarborImages: React.FC = () => {
             </span>
           </Tooltip>
         ) : (
-          // v1 的 core 接口给不出 digest —— 如实写，不拿别的东西顶上
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            该 Harbor 未提供
-          </Text>
+          // ⚠️ 只画一个弱化的 —，把"为什么不显示"挂 tooltip。
+          // 原来每行都写"该 Harbor 未提供"：v1 上十几行全都一样，那不是在说明，
+          // 是在用同一句话把整列糊掉 —— 真正的信息（哪些行**有** digest）反而看不见了。
+          <Tooltip title="该 Harbor 版本的 core 接口不返回 digest（v1），需要 digest 请用 v2 的 artifacts 接口">
+            <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
+              —
+            </Text>
+          </Tooltip>
         ),
     },
     {
@@ -184,16 +187,18 @@ const HarborImages: React.FC = () => {
       width: 200,
       render: (v?: string, r?: HarborTagRow) =>
         v ? (
-          <span>
-            {fmt(v)}
-            {/* 时间口径说清楚：v1 只有构建时间，不是推送到仓库的时间 */}
-            {r?.timeSource && r.timeSource !== 'push' ? (
-              <Text type="secondary" style={{ fontSize: 11.5 }}>
-                {' '}
-                （{r.timeSource === 'build' ? '构建' : r.timeSource}）
-              </Text>
-            ) : null}
-          </span>
+          <Tooltip title={`${fmt(v)}${r?.timeSource === 'build' ? '（构建时间，不是推送时间）' : ''}`}>
+            <span>
+              {ago(v)}
+              {/* 时间口径说清楚：v1 只有构建时间，不是推送到仓库的时间 */}
+              {r?.timeSource && r.timeSource !== 'push' ? (
+                <Text type="secondary" style={{ fontSize: 11.5 }}>
+                  {' '}
+                  （{r.timeSource === 'build' ? '构建' : r.timeSource}）
+                </Text>
+              ) : null}
+            </span>
+          </Tooltip>
         ) : (
           <Text type="secondary" style={{ fontSize: 12 }}>
             —

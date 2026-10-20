@@ -1701,3 +1701,26 @@ body {
   border: 1px solid #99f6e4;
   cursor: help;
 }
+
+
+/* --------------------------------------------------------------------------- Harbor 视角的表格
+
+   这一页的内容就是"一堆 tag + 一堆—"：如果表头、行线、tag 都长一个样，
+   整屏会糊成一片，反而看不清"哪个 tag 是哪天的"。
+   所以做三件很轻的事：表头压一档、行线调浅、tag 给个胶囊底当视觉锚点。 */
+
+.yn-harbor-tag {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px 8px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  line-height: 19px;
+  font-weight: 600;
+  color: #1f2a44;
+  background: #f4f7fc;
+  border: 1px solid #e6ebf5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
