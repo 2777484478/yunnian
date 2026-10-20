@@ -203,6 +203,16 @@ type HarborConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	BaseURL  string `yaml:"baseUrl"`
 	Registry string `yaml:"registry"` // 用于拼装完整镜像地址的对外地址
+	// Project 是 Harbor 上的**仓库项目**（如 escloud）。
+	//
+	// 为什么单独一项、而不是直接用项目的 `image_name`：
+	// 平台的 image_name 分前后端（`backend/userv2`、`frontend/aio-doc`），
+	// 而 Harbor 上这些镜像**统一放在同一个 project 下**（`escloud/userv2`）。
+	// 拿 image_name 的第一段当 project 会变成去查 `backend/userv2` —— 那仓库不存在，
+	// 表现是"读取失败"，而真因只是路径拼错了（2026-10-20 用户报的）。
+	//
+	// 留空按 escloud。
+	Project string   `yaml:"project"`
 	// CoreAPIURL 是 Harbor 的 **Core 管理接口**地址，与上面的 BaseURL 是两条通道：
 	//   BaseURL   说 registry 组件（如 https://host:5000），走 /v2/，拿 manifest/digest；
 	//   CoreAPIURL 说 Core，拿 tag 列表（v2 还带推送时间）。

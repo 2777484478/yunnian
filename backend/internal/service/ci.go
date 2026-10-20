@@ -3278,14 +3278,15 @@ func (s *CIService) ListHarborTags(ctx context.Context, projectKey string, page,
 	if repo == "" {
 		return nil, 0, errs.StateConflict("该项目还没有配置镜像名，无法定位它在 Harbor 上的仓库")
 	}
-	// Harbor 的 API 把镜像拆成 project/repo 两段（如 escloud/aiobasic）。
-	// 没有 `/` 说明它只是单段名字，Harbor 上不可能存在这个仓库 —— 直接说清楚，
-	// 而不是拿它去拼一个必定 404 的请求。
-	slash := strings.Index(repo, "/")
-	if slash <= 0 || slash == len(repo)-1 {
-		return nil, 0, errs.StateConflict(fmt.Sprintf("镜像名 %q 不是「project/repo」两段式，无法在 Harbor 上定位", repo))
-	}
-	proj, name := repo[:slash], repo[slash+1:]
+	// ⚠️ Harbor 的路径**不能**直接用 image_name 拆。
+	//
+	// 平台把镜像名分前后端：`backend/userv2`、`frontend/aio-doc`；
+	// 而 Harbor 上这些镜像**统一放在一个 project 下**（`escloud/userv2`）。
+	// 早先按 `/` 拆第一段当 project → 去查 `backend/userv2` → 必然不存在，
+	// 报出来是"读取失败"，真因其实只是路径拼错（2026-10-20 用户报的）。
+	//
+	// 现在：repo 只取**最后一段**，project 由配置给（默认 escloud）。
+	// `escloud/aio-mcp-server` 这种本来就已经对的，拆出来仍是不变的。
 
 	// ⚠️ 必须走 LoadHarborConfig：Harbor 的连接参数在「系统管理 → 集成」里改，
 	// 落库后覆盖 config.yaml。直接用 Cfg.Integrations.Harbor 会拿到启动时的旧值，
@@ -3297,10 +3298,21 @@ func (s *CIService) ListHarborTags(ctx context.Context, projectKey string, page,
 	if !hs.Cfg.Enabled {
 		return nil, 0, errs.StateConflict("Harbor 未接入：请先在「系统管理 → 集成」里启用镜像仓库并填好地址")
 	}
+	proj := strings.TrimSpace(hs.Cfg.Project)
+	if proj == "" {
+		proj = "escloud"
+	}
+	name := repo[strings.LastIndex(repo, "/")+1:]
+	if name == "" {
+		return nil, 0, errs.StateConflict(fmt.Sprintf("镜像名 %q 取不出仓库名，无法在 Harbor 上定位", repo))
+	}
+
 	core := integration.NewHarborCore(hs.Cfg)
 	tags, total, err := core.ListTags(ctx, proj, name, page, pageSize)
 	if err != nil {
-		return nil, 0, upstreamError(err, "读取 Harbor 镜像 tag 失败")
+		// 文案带上**实际查的路径**：拼错路径和"仓库真的没有"报的错长得一样，
+		// 不写出来就只能靠猜。
+		return nil, 0, upstreamError(err, fmt.Sprintf("读取 Harbor 仓库 %s/%s 失败", proj, name))
 	}
 	out := make([]HarborTagDTO, 0, len(tags))
 	for _, t := range tags {

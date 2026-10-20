@@ -11,6 +11,22 @@ import { fmt, humanSize } from '@/utils/format';
 const { Text } = Typography;
 
 /**
+ * Harbor 上的仓库项目名，默认 `escloud`。
+ *
+ * ⚠️ 平台的 `imageName` 分前后端（`backend/userv2`、`frontend/aio-doc`），
+ * 但 Harbor 上这些镜像**统一放在 escloud 下**（`escloud/userv2`）——
+ * 直接拿 imageName 拼地址会显示成 `backend/userv2`，而那仓库根本不存在
+ * （2026-10-20 用户报的就是这个）。所以地址 = `registry + escloud + 镜像名最后一段`。
+ *
+ * 后端有一份同名配置（`harbor.project`），默认值也是 escloud ——
+ * 两边必须一致；以后要改成可配，两处一起改。
+ */
+const HARBOR_PROJECT = 'escloud';
+
+/** `backend/userv2` → `userv2`；`escloud/aio-mcp-server` → `aio-mcp-server` */
+const repoOf = (imageName?: string) => (imageName || '').split('/').filter(Boolean).pop() || '';
+
+/**
  * 「Harbor 仓库」视角：**实时**列仓库里某个项目镜像的真实 tag。
  *
  * 为什么它必须与「平台构建记录」分开（2026-10-20 用户提"镜像版本好像没接入 harbor"）：
@@ -129,7 +145,7 @@ const HarborImages: React.FC = () => {
           type="text"
           icon={<CopyOutlined />}
           onClick={() => {
-            const full = `${project?.registry ?? ''}/${project?.imageName ?? ''}:${r.tag}`.replace(/^\/+/, '');
+            const full = `${project?.registry ?? ''}/${HARBOR_PROJECT}/${repoOf(project?.imageName)}:${r.tag}`.replace(/^\/+/, '');
             navigator.clipboard?.writeText(full);
           }}
         >
@@ -165,7 +181,7 @@ const HarborImages: React.FC = () => {
           </Button>
           {project ? (
             <Tag style={{ marginInlineEnd: 0 }} className="yn-mono">
-              {project.registry}/{project.imageName}
+              {project.registry}/{HARBOR_PROJECT}/{repoOf(project.imageName)}
             </Tag>
           ) : null}
         </Space>
