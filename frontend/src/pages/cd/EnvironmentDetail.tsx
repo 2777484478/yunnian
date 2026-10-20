@@ -579,6 +579,8 @@ const EnvironmentDetail: React.FC = () => {
   // 被选中的项目名。镜像候选由 `ImageSourcePicker` 自己按来源去取
   // （平台构建组问 /images、仓库组问 /registries/harbor/tags），
   // 这里不再预先拉一份 —— 那会在每次打开弹窗时白打一次接口。
+  // ⚠️ 风险条用的就是它 —— 不要另起一个 `Form.useWatch`：
+  // hook 写在条件渲染的弹窗里会让 hook 数量变化，React 直接抛 #310（2026-10-20 白屏过的原因）。
   const [deployProjectKey, setDeployProjectKey] = useState<string | undefined>();
 
   // 执行中的实时日志：只有拿到部署单 id 后才连
@@ -1882,9 +1884,9 @@ const EnvironmentDetail: React.FC = () => {
             当时只接了拓扑页的部署弹窗，而这里是**另一个独立的部署向导**（环境已定）。
             同一件事有多个入口时，横切能力（风险、通知、审计）必须逐个体检。 */}
         <DeployRiskBanner
-          projectKey={Form.useWatch('projectKey', deployForm)}
+          projectKey={deployProjectKey}
           envKey={key}
-          active={!!Form.useWatch('projectKey', deployForm)}
+          active={!!deployProjectKey}
         />
 
         <Form form={deployForm} layout="vertical" requiredMark="optional">
