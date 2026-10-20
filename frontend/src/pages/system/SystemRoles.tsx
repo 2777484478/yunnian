@@ -124,7 +124,7 @@ const SystemRoles: React.FC = () => {
         breadcrumb={[{ title: '系统管理' }, { title: '角色权限' }]}
         title="角色权限"
         subTitle="ROLES & PERMISSIONS"
-        description="配置每个角色拥有哪些权限点。改动对**下一次请求**生效（权限在每次请求时现查，不缓存在令牌里）"
+        description="配置每个角色拥有哪些权限点。改动对下一次请求生效（权限在每次请求时现查，不缓存在令牌里）"
       />
 
       {error ? (
@@ -156,26 +156,48 @@ const SystemRoles: React.FC = () => {
                       setDraft(r.perms);
                     }}
                     style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 9,
                       padding: '8px 10px',
-                      borderRadius: 6,
+                      borderRadius: 8,
                       cursor: 'pointer',
                       background: on ? '#eaf3ff' : 'transparent',
                       border: `1px solid ${on ? '#c4ddff' : 'transparent'}`,
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: 13, fontWeight: on ? 500 : 400, color: on ? '#0958d9' : undefined }}>
-                        {r.name}
-                      </span>
-                      {r.perms.includes('*') ? (
-                        <Tooltip title="拥有全部权限（通配 *），不逐项配置">
-                          <LockOutlined style={{ fontSize: 11, color: '#9aa0aa' }} />
-                        </Tooltip>
-                      ) : null}
+                    <div
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 8,
+                        flex: 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: 13,
+                        fontWeight: 600,
+                        color: on ? '#0958d9' : '#5a6478',
+                        background: on ? '#d3e7ff' : '#f1f4f9',
+                      }}
+                    >
+                      {r.name.slice(0, 1)}
                     </div>
-                    <Text type="secondary" style={{ fontSize: 11.5 }}>
-                      {r.key} · {r.users} 人
-                    </Text>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span style={{ fontSize: 13, fontWeight: on ? 500 : 400, color: on ? '#0958d9' : '#1f2a44' }}>
+                          {r.name}
+                        </span>
+                        {r.perms.includes('*') ? (
+                          <Tooltip title="拥有全部权限（通配 *），不逐项配置">
+                            <LockOutlined style={{ fontSize: 11, color: '#9aa0aa' }} />
+                          </Tooltip>
+                        ) : null}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: '#8c8c95', marginTop: 1 }}>
+                        {r.perms.includes('*') ? '全部权限' : `${r.perms.length} 项权限`} · {r.users} 人
+                      </div>
+                    </div>
                   </div>
                 );
               })}
@@ -192,13 +214,15 @@ const SystemRoles: React.FC = () => {
             <>
               <div className="yn-filter-bar">
                 <Space size={12} wrap>
-                  <span style={{ fontSize: 13 }}>
-                    <b>{role.name}</b>
-                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <b style={{ fontSize: 14, color: '#1f2a44' }}>{role.name}</b>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
                       {role.desc}
                     </Text>
                   </span>
-                  <Tag style={{ marginInlineEnd: 0 }}>{draft.length} 个权限点</Tag>
+                  <Tag color={isSuper ? 'red' : 'blue'} style={{ marginInlineEnd: 0 }}>
+                    {isSuper ? '全部权限' : `${draft.length} / ${points.length} 个权限点`}
+                  </Tag>
                   {dirty ? <Tag color="orange" style={{ marginInlineEnd: 0 }}>未保存</Tag> : null}
                   <Input
                     allowClear
@@ -235,8 +259,20 @@ const SystemRoles: React.FC = () => {
                   ) : (
                     grouped.map(([mod, list]) => (
                       <div key={mod} style={{ marginBottom: 18 }}>
-                        <div style={{ fontSize: 12, color: '#5a6478', marginBottom: 8 }}>
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            fontSize: 12.5,
+                            fontWeight: 500,
+                            color: '#1f2a44',
+                            marginBottom: 8,
+                          }}
+                        >
+                          <span style={{ width: 3, height: 12, borderRadius: 2, background: '#1677ff', opacity: 0.7 }} />
                           {MODULE_LABEL[mod] ?? mod}
+                          <span style={{ fontSize: 11.5, color: '#b0b6c2', fontWeight: 400 }}>{list.length}</span>
                         </div>
                         <Checkbox.Group
                           value={draft}
@@ -246,6 +282,25 @@ const SystemRoles: React.FC = () => {
                           {list.map((p) => (
                             <Checkbox key={p.code} value={p.code} disabled={!canWrite}>
                               <span style={{ fontSize: 12.5 }}>{p.name || p.code}</span>
+                              {/* 通配权限（`build:*` 这类）单独标一下：它一项顶一片，
+                                  和 `build:read` 并排摆着却不区分，很容易以为勾了它还要再勾一遍 */}
+                              {p.code.endsWith(':*') || p.code === '*' ? (
+                                <Tooltip title="通配权限：包含该模块下所有具体权限，不需要再逐个勾">
+                                  <span
+                                    style={{
+                                      marginLeft: 6,
+                                      fontSize: 10.5,
+                                      color: '#d46b08',
+                                      background: '#fff7e6',
+                                      border: '1px solid #ffe7ba',
+                                      borderRadius: 3,
+                                      padding: '0 4px',
+                                    }}
+                                  >
+                                    通配
+                                  </span>
+                                </Tooltip>
+                              ) : null}
                               <Tooltip title={p.description || p.code}>
                                 <span className="yn-mono" style={{ fontSize: 11, color: '#b0b6c2', marginLeft: 6 }}>
                                   {p.code}

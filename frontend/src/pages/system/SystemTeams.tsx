@@ -1,14 +1,12 @@
 import React, { useState } from 'react';
-import { App as AntApp, Button, Form, Input, InputNumber, Modal, Space, Switch, Table, Tag, Typography } from 'antd';
-import type { ColumnsType } from 'antd/es/table';
+import { App as AntApp, Button, Form, Input, InputNumber, Modal, Space, Switch, Tag } from 'antd';
 import { DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
-import { PageHeader, SectionCard } from '@/components/ui';
+import { PageHeader } from '@/components/ui';
 import { teamApi } from '@/api/team';
 import type { Team } from '@/api/team';
 import { hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
 
-const { Text } = Typography;
 
 /**
  * 团队主数据管理。
@@ -84,53 +82,12 @@ const SystemTeams: React.FC = () => {
     });
   };
 
-  const columns: ColumnsType<Team> = [
-    {
-      title: '团队',
-      dataIndex: 'name',
-      width: 200,
-      render: (v: string, r) => (
-        <Space size={6}>
-          <span style={{ fontWeight: 500 }}>{v}</span>
-          {!r.enabled ? <Tag>已停用</Tag> : null}
-        </Space>
-      ),
-    },
-    {
-      title: '说明',
-      dataIndex: 'description',
-      render: (v?: string) => v || <Text type="secondary">—</Text>,
-    },
-    {
-      title: '项目数',
-      dataIndex: 'projectCount',
-      width: 100,
-      render: (v: number) => (v > 0 ? <Tag color="blue">{v}</Tag> : <Text type="secondary">0</Text>),
-    },
-    { title: '排序', dataIndex: 'sort', width: 80 },
-    {
-      title: '操作',
-      key: 'act',
-      width: 150,
-      render: (_: unknown, r) => (
-        <Space size={4}>
-          <Button size="small" type="link" icon={<EditOutlined />} disabled={!canWrite} onClick={() => openEdit(r)}>
-            编辑
-          </Button>
-          <Button
-            size="small"
-            type="link"
-            danger
-            icon={<DeleteOutlined />}
-            disabled={!canWrite}
-            onClick={() => remove(r)}
-          >
-            删除
-          </Button>
-        </Space>
-      ),
-    },
-  ];
+  const totalProjects = teams.reduce((n, t) => n + t.projectCount, 0);
+  const maxProjects = Math.max(1, ...teams.map((t) => t.projectCount));
+
+  /** 首字头像的配色：按团队名稳定取色（同一个团队永远同一个颜色） */
+  const AVATAR_COLORS = ['#1677ff', '#13a8a8', '#722ed1', '#d46b08', '#1590ff', '#c41d7f'];
+  const colorOf = (name: string) => AVATAR_COLORS[[...name].reduce((a, ch) => a + ch.charCodeAt(0), 0) % AVATAR_COLORS.length];
 
   return (
     <div>
@@ -146,16 +103,121 @@ const SystemTeams: React.FC = () => {
         }
       />
 
-      <SectionCard bodyStyle={{ padding: 0 }}>
-        <Table<Team>
-          rowKey={(r) => r.id}
-          size="small"
-          loading={listApi.loading}
-          dataSource={teams}
-          columns={columns}
-          pagination={false}
-        />
-      </SectionCard>
+      {/* 概览：团队数 / 关联项目 / 项目最多的团队 */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+          gap: 12,
+          marginBottom: 16,
+        }}
+      >
+        {[
+          { label: '团队总数', value: teams.length, unit: '个', accent: '#1677ff' },
+          { label: '关联项目', value: totalProjects, unit: '个', accent: '#13a8a8' },
+          {
+            label: '项目最多的团队',
+            value: teams.reduce<Team | null>((a, b) => (!a || b.projectCount > a.projectCount ? b : a), null)?.name ?? '—',
+            unit: '',
+            accent: '#722ed1',
+          },
+        ].map((c) => (
+          <div
+            key={c.label}
+            style={{
+              padding: '14px 16px',
+              background: '#fff',
+              border: '1px solid #eef1f6',
+              borderRadius: 10,
+              borderLeft: `3px solid ${c.accent}`,
+            }}
+          >
+            <div style={{ fontSize: 12, color: '#8c8c95', marginBottom: 6 }}>{c.label}</div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+              <span style={{ fontSize: 22, fontWeight: 600, color: '#1f2a44', lineHeight: 1.1 }}>{c.value}</span>
+              {c.unit ? <span style={{ fontSize: 12, color: '#8c8c95' }}>{c.unit}</span> : null}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+          gap: 14,
+        }}
+      >
+        {teams.map((t) => {
+          const pct = Math.round((t.projectCount / maxProjects) * 100);
+          const color = colorOf(t.name);
+          return (
+            <div
+              key={t.id}
+              style={{
+                background: '#fff',
+                border: '1px solid #eef1f6',
+                borderRadius: 10,
+                padding: '14px 16px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 10,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div
+                  style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 9,
+                    background: `${color}14`,
+                    color,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 15,
+                    fontWeight: 600,
+                    flex: 'none',
+                  }}
+                >
+                  {t.name.slice(0, 1)}
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 14, fontWeight: 500, color: '#1f2a44' }}>{t.name}</span>
+                    {!t.enabled ? <Tag style={{ marginInlineEnd: 0 }}>已停用</Tag> : null}
+                  </div>
+                  <div style={{ fontSize: 12, color: '#8c8c95', marginTop: 2 }}>
+                    {t.description || '未填写说明'}
+                  </div>
+                </div>
+              </div>
+
+              {/* 项目占比条：一眼看出哪个团队盘子最大 */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#5a6478', marginBottom: 4 }}>
+                  <span>
+                    <b style={{ color: '#1f2a44' }}>{t.projectCount}</b> 个项目
+                  </span>
+                  <span style={{ color: '#b0b6c2' }}>排序 {t.sort}</span>
+                </div>
+                <div style={{ height: 5, borderRadius: 3, background: '#f1f4f9', overflow: 'hidden' }}>
+                  <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 3 }} />
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4, marginTop: -2 }}>
+                <Button size="small" type="text" icon={<EditOutlined />} disabled={!canWrite} onClick={() => openEdit(t)}>
+                  编辑
+                </Button>
+                <Button size="small" type="text" danger icon={<DeleteOutlined />} disabled={!canWrite} onClick={() => remove(t)}>
+                  删除
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
       <Modal
         open={open}
