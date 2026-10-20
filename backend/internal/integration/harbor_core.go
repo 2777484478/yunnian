@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -458,6 +459,91 @@ func (c *HarborCore) SearchRepos(ctx context.Context, keyword string) ([]HarborR
 	return refs, nil
 }
 
+// ListRepositories 列某个 Harbor project 下的**全部仓库**。
+//
+// 为什么要它（2026-10-20 用户提"加一个读取 harbor 项目的所有接口，点击显示所有项目"）：
+// 早先只能"先选平台项目 → 再去查它对应的仓库"，用户想直接看仓库里有什么，
+// 得先在脑子里做一次"项目 ↔ 仓库"的映射，还得祈祷 image_name 拼对了。
+// 这个接口直接把 project 下的仓库列出来（含**平台根本不认识**的镜像）。
+//
+// v2 走标准分页接口 /projects/{p}/repositories（带 X-Total-Count）；
+// v1 没有对应的分页接口，用 search 倒全部再本地过滤+切页。
+func (c *HarborCore) ListRepositories(ctx context.Context, project string, page, pageSize int) ([]HarborRepoRef, int, error) {
+	project = strings.Trim(strings.TrimSpace(project), "/")
+	if project == "" {
+		return nil, 0, fmt.Errorf("缺少 Harbor 项目名")
+	}
+	if _, _, err := c.detect(ctx); err != nil {
+		return nil, 0, err
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 100
+	}
+
+	switch c.apiVersion {
+	case "v2":
+		path := fmt.Sprintf("/api/v2.0/projects/%s/repositories?page=%d&page_size=%d",
+			url.PathEscape(project), page, pageSize)
+		var rows []struct {
+			Name          string `json:"name"` // 完整名，如 escloud/userv2
+			ArtifactCount int    `json:"artifact_count"`
+		}
+		status, total, err := c.getJSONWithTotal(ctx, path, &rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		switch {
+		case status == http.StatusNotFound:
+			return nil, 0, fmt.Errorf("Harbor 里没有 %q 这个项目（HTTP 404）", project)
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			return nil, 0, fmt.Errorf("读取 Harbor 项目 %q 的仓库列表被拒绝（HTTP %d）：检查账号权限", project, status)
+		case status >= 400:
+			return nil, 0, fmt.Errorf("读取 Harbor 项目 %q 的仓库列表失败：HTTP %d", project, status)
+		}
+		refs := make([]HarborRepoRef, 0, len(rows))
+		for _, r := range rows {
+			full := strings.TrimSpace(r.Name)
+			if full == "" {
+				continue
+			}
+			refs = append(refs, HarborRepoRef{FullName: full, ProjectName: project, TagCount: r.ArtifactCount})
+		}
+		if total >= 0 {
+			return refs, total, nil
+		}
+		return refs, len(refs), nil
+
+	case "v1":
+		// v1 只有 search：q 为空 = 全部仓库。倒全部后本地按 project 过滤、再切页。
+		all, err := c.SearchRepos(ctx, "")
+		if err != nil {
+			return nil, 0, err
+		}
+		mine := make([]HarborRepoRef, 0, len(all))
+		for _, r := range all {
+			if strings.EqualFold(r.ProjectName, project) {
+				mine = append(mine, r)
+			}
+		}
+		total := len(mine)
+		start := (page - 1) * pageSize
+		if start >= total {
+			return []HarborRepoRef{}, total, nil
+		}
+		end := start + pageSize
+		if end > total {
+			end = total
+		}
+		return mine[start:end], total, nil
+
+	default:
+		return nil, 0, fmt.Errorf("%s 上没有 Harbor 管理接口（/api/v2.0/systeminfo 与 /api/systeminfo 都返回 404）：无法列出仓库", c.base)
+	}
+}
+
 // ListTags 列出某个仓库的 tag。
 //
 // project 与 repo 必须分开给：Harbor 的 project 是路径第一段，repo 是其余部分。
@@ -508,7 +594,7 @@ func (c *HarborCore) listTagsV2(ctx context.Context, project, repo string, page,
 			PushTime json.RawMessage `json:"push_time"`
 		} `json:"tags"`
 	}
-	status, err := c.getJSON(ctx, path, &artifacts)
+	status, total, err := c.getJSONWithTotal(ctx, path, &artifacts)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -533,6 +619,11 @@ func (c *HarborCore) listTagsV2(ctx context.Context, project, repo string, page,
 			}
 			out = append(out, item)
 		}
+	}
+	// ⚠️ total 优先用 X-Total-Count（真实全量）；拿不到才退回本页条数。
+	// 早先一律 len(out)，分页器会把"本页 100 条"当成"总共 100 条"。
+	if total >= 0 {
+		return out, total, nil
 	}
 	return out, len(out), nil
 }
@@ -699,6 +790,45 @@ func harborTime(raw json.RawMessage) (time.Time, bool) {
 
 // getJSON 发一次 GET 并把 JSON 解到 out。返回 HTTP 状态码 ——
 // 401/403/404 都是**有信息量的答案**，不能笼统当错误丢掉。
+// getJSONWithTotal 同 getJSON，但额外带出 X-Total-Count。
+//
+// 为什么需要它：Harbor v2 的分页接口把**真实总数**放在这个响应头里，
+// 而响应体只有当前页。早先 `listTagsV2` 拿 len(out) 当 total ——
+// 那其实是"本页条数"，分页器会以为只有一页（v2.15 上尤其明显）。
+func (c *HarborCore) getJSONWithTotal(ctx context.Context, path string, out any) (int, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("构造请求失败：%w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.username != "" || c.password != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, 0, UpstreamError("Harbor", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	total := -1
+	if v := strings.TrimSpace(resp.Header.Get("X-Total-Count")); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil {
+			total = n
+		}
+	}
+	if resp.StatusCode >= 400 {
+		return resp.StatusCode, total, nil
+	}
+	if out == nil {
+		return resp.StatusCode, total, nil
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return resp.StatusCode, total, fmt.Errorf("解析 %s 的响应失败（不是 Harbor JSON？）：%w", path, err)
+	}
+	return resp.StatusCode, total, nil
+}
+
 func (c *HarborCore) getJSON(ctx context.Context, path string, out any) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {

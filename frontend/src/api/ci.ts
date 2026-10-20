@@ -211,6 +211,15 @@ export interface ImageQuery {
   pageSize?: number;
 }
 
+export interface HarborRepoRow {
+  /** 「project/repo」全名，如 escloud/userv2 */
+  fullName: string;
+  /** 只是 repo 那一段 */
+  name: string;
+  /** tag 数；v1 可能不回收，0 不代表"没有 tag" */
+  tagCount: number;
+}
+
 export interface HarborTagRow {
   tag: string;
   digest?: string;
@@ -231,8 +240,18 @@ export const imageApi = {
    * 这个直接问仓库 —— Jenkins 推的、别人手工 push 的、更早的历史 tag 都在这里。
    * 必须给 projectKey：Harbor 按仓库查，没有"全部项目的 tag"。
    */
-  harborTags: async (projectKey: string, page = 1, pageSize = 20): Promise<PageResult<HarborTagRow>> =>
-    unwrapPage<HarborTagRow>(await http.get('/images/harbor', params({ projectKey, page, pageSize }))),
+  harborTags: async (project: string, repo: string, page = 1, pageSize = 20): Promise<PageResult<HarborTagRow>> =>
+    unwrapPage<HarborTagRow>(await http.get('/images/harbor', params({ project, repo, page, pageSize }))),
+
+  /**
+   * 列 Harbor 某个 **project** 下的全部仓库（不依赖平台项目记录）。
+   *
+   * 这是"Harbor 视角"的入口：先看仓库里有什么，再点进去看某个仓库的 tag。
+   * 早先只能"先选平台项目 → 查它对应的仓库"，等于要求用户先做一次
+   * "项目 ↔ 仓库"的心算，还要求 image_name 恰好拼对。
+   */
+  harborRepos: async (project: string, page = 1, pageSize = 50): Promise<PageResult<HarborRepoRow>> =>
+    unwrapPage<HarborRepoRow>(await http.get('/images/harbor/repos', params({ project, page, pageSize }))),
 
   get: (id: string) => http.get<ImageRecord>(`/images/${id}`),
 

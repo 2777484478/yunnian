@@ -3250,47 +3250,18 @@ type HarborTagDTO struct {
 	TimeSource string `json:"timeSource,omitempty"`
 }
 
-// ListHarborTags 实时读 Harbor 上某个项目镜像的 tag 列表。
+// ListHarborTags 实时读 Harbor 上**某个仓库**的 tag 列表。
 //
 // 为什么需要它（2026-10-20 用户提"镜像版本好像没接入 harbor"）：
 // `/images` 只列**平台自己构建并登记过**的镜像（`image_record` 表）。
 // Jenkins 推上去的、别人手工 push 的、更早的历史 tag，在那里一个都看不到 ——
 // 而页面标题就叫"镜像版本"，用户自然会以为那是仓库里的全部。
 //
-// 这个接口直接问仓库，给的是**真实存在**的 tag。
-//
-// ⚠️ 两套数据**不合并**：混在一屏会让人分不清"平台构建的"和"仓库里有的"，
-// 而这两件事的回答完全不同（前者能点进去看日志，后者只能看 digest）。
-func (s *CIService) ListHarborTags(ctx context.Context, projectKey string, page, pageSize int) ([]HarborTagDTO, int, error) {
-	key := strings.TrimSpace(projectKey)
-	if key == "" {
-		// 必须选项目：Harbor 是按仓库查的，没有"全部项目的 tag"这种请求。
-		return nil, 0, errs.Invalid("请先选择项目：Harbor 视角按项目去查它对应的仓库")
-	}
-	var p model.Project
-	if err := s.db(ctx).Where("project_key = ?", key).Order("id").First(&p).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, 0, errs.NotFoundf("项目 %s 不存在", key)
-		}
-		return nil, 0, errs.Internalf(err, "查询项目失败")
-	}
-	repo := strings.Trim(strings.TrimSpace(p.ImageName), "/")
-	if repo == "" {
-		return nil, 0, errs.StateConflict("该项目还没有配置镜像名，无法定位它在 Harbor 上的仓库")
-	}
-	// ⚠️ Harbor 的路径**不能**直接用 image_name 拆。
-	//
-	// 平台把镜像名分前后端：`backend/userv2`、`frontend/aio-doc`；
-	// 而 Harbor 上这些镜像**统一放在一个 project 下**（`escloud/userv2`）。
-	// 早先按 `/` 拆第一段当 project → 去查 `backend/userv2` → 必然不存在，
-	// 报出来是"读取失败"，真因其实只是路径拼错（2026-10-20 用户报的）。
-	//
-	// 现在：repo 只取**最后一段**，project 由配置给（默认 escloud）。
-	// `escloud/aio-mcp-server` 这种本来就已经对的，拆出来仍是不变的。
-
-	// ⚠️ 必须走 LoadHarborConfig：Harbor 的连接参数在「系统管理 → 集成」里改，
-	// 落库后覆盖 config.yaml。直接用 Cfg.Integrations.Harbor 会拿到启动时的旧值，
-	// 表现是"设置页填了地址、这里还是报未接入"。
+// 这里**不再从平台项目反推仓库**：直接给 Harbor 的 project + repo。
+// 早先按 `image_name` 拆，而平台的 image_name 分前后端（`backend/userv2`），
+// Harbor 上却在 escloud 下 —— 拆出来的路径根本不存在，报"读取失败"。
+// 让调用方显式给 project（默认 escloud）+ repo（仓库列表里点进来的），比猜可靠。
+func (s *CIService) ListHarborTags(ctx context.Context, project, repo string, page, pageSize int) ([]HarborTagDTO, int, error) {
 	hs, err := store.LoadHarborConfig(ctx, s.db(ctx), s.deps.Sealer, s.deps.Cfg.Integration.Harbor)
 	if err != nil {
 		return nil, 0, errs.Internalf(err, "读取 Harbor 配置失败")
@@ -3298,19 +3269,23 @@ func (s *CIService) ListHarborTags(ctx context.Context, projectKey string, page,
 	if !hs.Cfg.Enabled {
 		return nil, 0, errs.StateConflict("Harbor 未接入：请先在「系统管理 → 集成」里启用镜像仓库并填好地址")
 	}
-	proj := strings.TrimSpace(hs.Cfg.Project)
+
+	proj := strings.Trim(strings.TrimSpace(project), "/")
+	if proj == "" {
+		proj = strings.TrimSpace(hs.Cfg.Project)
+	}
 	if proj == "" {
 		proj = "escloud"
 	}
-	name := repo[strings.LastIndex(repo, "/")+1:]
+	name := strings.Trim(strings.TrimSpace(repo), "/")
 	if name == "" {
-		return nil, 0, errs.StateConflict(fmt.Sprintf("镜像名 %q 取不出仓库名，无法在 Harbor 上定位", repo))
+		return nil, 0, errs.Invalid("缺少仓库名：请从仓库列表里点一个仓库")
 	}
 
 	core := integration.NewHarborCore(hs.Cfg)
 	tags, total, err := core.ListTags(ctx, proj, name, page, pageSize)
 	if err != nil {
-		// 文案带上**实际查的路径**：拼错路径和"仓库真的没有"报的错长得一样，
+		// 文案带上**实际查的路径**：路径拼错和"仓库真的没有"报的错长得一样，
 		// 不写出来就只能靠猜。
 		return nil, 0, upstreamError(err, fmt.Sprintf("读取 Harbor 仓库 %s/%s 失败", proj, name))
 	}
@@ -3321,6 +3296,54 @@ func (s *CIService) ListHarborTags(ctx context.Context, projectKey string, page,
 			d.PushedAt = formatTime(t.Time)
 		}
 		out = append(out, d)
+	}
+	return out, total, nil
+}
+
+// HarborRepoDTO Harbor 上的一个仓库（实时查询）。
+type HarborRepoDTO struct {
+	// FullName 是「project/repo」全名，如 escloud/userv2
+	FullName string `json:"fullName"`
+	// Name 只是 repo 那一段（escloud/userv2 → userv2），前端展示与复制都用它更方便
+	Name     string `json:"name"`
+	TagCount int    `json:"tagCount"`
+}
+
+// ListHarborRepos 列某个 Harbor 项目下的**全部仓库**。
+//
+// 用户的话："加一个读取 harbor 项目的所有接口，点击显示所有项目选择 escloud"。
+// 早先只能"先选平台项目 → 再查它对应的仓库"—— 想直接浏览仓库里有什么，
+// 得先在脑子里做一次"项目 ↔ 仓库"的映射，还得祈祷 image_name 拼对了。
+// 这个接口不依赖平台项目：直接问 Harbor 某个 project 下有什么仓库，
+// 包括**平台根本不认识**的镜像。
+func (s *CIService) ListHarborRepos(ctx context.Context, project string, page, pageSize int) ([]HarborRepoDTO, int, error) {
+	hs, err := store.LoadHarborConfig(ctx, s.db(ctx), s.deps.Sealer, s.deps.Cfg.Integration.Harbor)
+	if err != nil {
+		return nil, 0, errs.Internalf(err, "读取 Harbor 配置失败")
+	}
+	if !hs.Cfg.Enabled {
+		return nil, 0, errs.StateConflict("Harbor 未接入：请先在「系统管理 → 集成」里启用镜像仓库并填好地址")
+	}
+	proj := strings.Trim(strings.TrimSpace(project), "/")
+	if proj == "" {
+		proj = strings.TrimSpace(hs.Cfg.Project)
+	}
+	if proj == "" {
+		proj = "escloud"
+	}
+
+	core := integration.NewHarborCore(hs.Cfg)
+	refs, total, err := core.ListRepositories(ctx, proj, page, pageSize)
+	if err != nil {
+		return nil, 0, upstreamError(err, fmt.Sprintf("读取 Harbor 项目 %q 的仓库列表失败", proj))
+	}
+	out := make([]HarborRepoDTO, 0, len(refs))
+	for _, r := range refs {
+		name := r.FullName
+		if i := strings.LastIndex(name, "/"); i >= 0 {
+			name = name[i+1:]
+		}
+		out = append(out, HarborRepoDTO{FullName: r.FullName, Name: name, TagCount: r.TagCount})
 	}
 	return out, total, nil
 }
