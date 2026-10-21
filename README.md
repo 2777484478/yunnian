@@ -25,6 +25,7 @@
   - [源码部署](#源码部署)
   - [环境要求](#环境要求)
   - [本地开发](#本地开发)
+  - [离线部署（服务器无外网）](#离线部署服务器无外网)
 - [工作原理](#工作原理)
 - [安全机制](#安全机制)
 - [项目结构](#项目结构)
@@ -270,6 +271,82 @@ cd backend && ./scripts/smoke.sh
 
 > 部署 / 回滚段**默认不跑** —— 要跑得显式 `SMOKE_WRITE=1`，且动手前会先打印"改谁、改成什么"。
 > 集群写入只打靶 `default/nginx-demo`。
+
+### 离线部署（服务器无外网）
+
+目标服务器拉不了 Docker Hub、也 clone 不了 GitHub 时，用**导包**的方式：
+在**有外网的机器**上构建 + 打包，拷过去导入。
+
+**第一步：在有外网的机器上打包**（会构建应用镜像，并连同依赖与构建用基础镜像一起导出）
+
+```bash
+# ⚠️ PLATFORM 要填目标服务器的架构，不是打包机的
+PLATFORM=linux/amd64 ./scripts/export-offline.sh /tmp/yunnian-offline
+```
+
+> ⚠️ **这一步最容易忽略、后果最难查**：开发机多半是 Apple Silicon（`arm64`），
+> 而服务器多半是 `x86_64`。**不设 `PLATFORM` 会按打包机架构导出** ——
+> 到了服务器上 `docker load` 完全正常，但 `docker compose up` 时容器起不来，
+> 日志里只有一句 `exec format error`，看不出跟架构有关。
+> 服务器是 x86 就写 `PLATFORM=linux/amd64`；不确定就先在服务器上跑 `uname -m`。
+
+产物：
+
+```text
+/tmp/yunnian-offline/
+├── images/yunnian-offline.tar   # 应用 + MySQL + Redis + 构建基础镜像（实测约 450 MB）
+├── images/ARCH                  # 导出时的目标架构，导入端用它挡「包导错了」
+├── yunnian-src.tar.gz           # 源码（不含 .git / node_modules / 二进制）
+├── docker-compose.yml
+├── .env.example
+├── import-offline.sh
+└── README-离线部署.txt
+```
+
+**第二步：拷到服务器**
+
+```bash
+scp -r /tmp/yunnian-offline user@server:/tmp/
+```
+
+**第三步：在服务器上导入并启动**
+
+```bash
+cd /tmp/yunnian-offline
+./import-offline.sh                      # 导入镜像 + 校验架构与镜像齐全
+
+tar xzf yunnian-src.tar.gz -C /opt
+cd /opt/yunnian
+cp /tmp/yunnian-offline/.env.example .env
+vim .env                                 # 填三个密钥
+
+docker compose up -d --no-build
+```
+
+> ⚠️ **`--no-build` 必须加**。`docker-compose.yml` 里有 `build:` 段，
+> 不带这个参数 compose 会尝试重新构建 —— 而构建的第一步就是拉基础镜像，
+> 在无外网的服务器上直接失败。
+>
+> ⚠️ **`images/ARCH` 是给导入端做兜底的**：`import-offline.sh` 会把它和本机 `uname -m`
+> 比一次，不一致直接拒绝导入并说明原因 —— 免得你 load 完、起容器、翻日志，
+> 最后才从一个 `exec format error` 里猜出是架构问题。
+> 架构不匹配时不要硬来，回到第一步用 `PLATFORM=` 重新导出。
+>
+> ⚠️ **平台自己的「自建构建」也需要基础镜像**。离线包已带上
+> `node:22-alpine` / `golang:1.26-alpine` / `alpine:3.20`，但**项目 Dockerfile 里
+> 其它 `FROM` 镜像要另外补**。做法有两种：
+> 1. 在导出机器上 `docker pull` 那些镜像，再 `docker save` 一起带过去；
+> 2. 或者在内网搭一个 registry（Harbor），把基础镜像推进去，
+>    并在构建脚本里把 `FROM` 改成内网地址（`FROM harbor.local/library/golang:1.22`）。
+
+> 💡 **实测参考**（Apple Silicon 机器上跑 `PLATFORM=linux/amd64`）：
+> 完整导出约 2–4 分钟，产物 `yunnian-offline.tar` 约 450 MB、源码包约 23 MB。
+> 比「各镜像大小之和」小很多是正常的 —— 那几个 Alpine 系镜像共享大部分层，`docker save` 会去重。
+
+> 💡 **无外网 ≠ 用不了平台功能**：构建代码从**内网 GitLab** clone、
+> 镜像推到**内网 Harbor**，这两条都不需要外网。真正需要外网的只有
+> 「拉基础镜像」和「模型通道调外部 API」两件事 —— 后者可以在
+> 「系统管理 › 模型设置」里换成内网自建模型服务（任意 OpenAI 兼容接口）。
 
 * * *
 
