@@ -11,7 +11,7 @@
 [![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1?logo=mysql&logoColor=white)](https://www.mysql.com/)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-20.10-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![License](https://img.shields.io/badge/License-Unspecified-lightgrey)](#许可证)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 * * *
 
@@ -336,6 +336,9 @@ K8s 在 `progressDeadlineSeconds`（默认 600s）到点就判卡死，而镜像
 
 ## 许可证
 
-见 [LICENSE](./LICENSE)。
+[MIT](./LICENSE) © 2026 Digiwin
 
 仓库**不含生产密钥**。部署前请按上面的说明注入自己的密钥。
+
+> MIT 覆盖的是**本仓库的代码**，不改变你与模型服务商、Harbor、GitLab 等
+> 第三方之间的协议 —— 那些仍按各自的条款走。
