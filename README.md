@@ -138,6 +138,26 @@ docker compose logs -f app
 
 > ⚠️ `app` 容器挂载了宿主机的 `/var/run/docker.sock` —— 平台的"自建构建"就是靠它调用宿主机的 docker daemon。**这等于把宿主机的 root 权限交给了平台容器**，请只在可信环境这么做。
 
+> ⚠️ **首次启动会自动写入演示数据**（`database.seed: true`）：20 个示例项目、5 个环境、
+> 若干构建/部署记录，以及 **`admin` / `ops` / `guest` + 20 个开发账号，密码全部是 `changeme`**。
+> 这是为了让界面一打开就有内容可看，但**生产环境必须处理**：
+>
+> 1. 登录后立刻改掉 `admin` 的密码（「系统设置 › 个人设置」）
+> 2. 停用或删除用不上的演示账号（「系统管理 › 用户」，支持删除）
+> 3. 删掉示例项目（「CI › 项目管理」，或用下面的 SQL 批量软删）
+>
+> ```sql
+> -- 先确认要删的是哪些（演示项目的 owner 是"张伟/李静/王强…"这批演示账号）
+> SELECT project_key, name FROM project WHERE deleted_at IS NULL;
+> -- 确认无误后软删全部项目与示例环境
+> UPDATE project SET deleted_at = NOW() WHERE deleted_at IS NULL;
+> UPDATE environment SET deleted_at = NOW() WHERE deleted_at IS NULL;
+> ```
+>
+> 已有数据时 `seed` 会整段跳过，**不会覆盖**你后来建的东西。
+> 想彻底不灌演示数据：`YUNNIAN_DB_SEED=false`，但那样库里**一个账号都没有**，
+> 需要自己写库建管理员 —— 一般不建议新装时关掉。
+
 停服务 / 清数据：
 
 ```bash
@@ -156,8 +176,15 @@ cd yunnian
 # ① 依赖（MySQL 8 + Redis 7）
 docker compose -f docker-compose.dev.yml up -d
 
-# ② 后端
+# ② 后端 —— ⚠️ 新 clone 的仓库**没有 config.yaml**（被 .gitignore 忽略），要先从模板复制
 cd backend
+cp configs/config.yaml.example configs/config.yaml
+
+# 然后把 configs/config.yaml 里的 database.dsn 改成上面 docker-compose.dev.yml 那套账号：
+#   dsn: "yunnian:changeme@tcp(127.0.0.1:3306)/yunnian?charset=utf8mb4&parseTime=true&loc=Local"
+# 模板里写的是 "user:password@tcp(...)" 占位符，不改会报 Access denied。
+# （也可以不改文件，直接用环境变量覆盖：YUNNIAN_DB_DSN="yunnian:changeme@tcp(...)"）
+
 go build -o bin/yunnian-server ./cmd/server
 YUNNIAN_ENV=prod \
 YUNNIAN_JWT_SECRET="$(openssl rand -base64 48)" \
@@ -316,9 +343,13 @@ openssl rand -base64 32   # → YUNNIAN_MASTER_KEY
 平台需要能调用 docker daemon。容器部署时已挂载 `/var/run/docker.sock`；
 源码部署时确认当前用户能执行 `docker ps`。
 
-**Harbor 读不到 digest**
+**Harbor 读不到 digest / 构建日志里刷超时**
 平台的 Harbor 走 `/v2/`（OCI Distribution 协议），Core 管理接口与它通常同端口。
-确认 `integration.harbor.registry` 与 `baseUrl` 指向**同一个仓库** —— 平台只核对同仓库的镜像。
+先确认 `integration.harbor.registry` 与 `baseUrl` 指向**同一个仓库** —— 平台只核对同仓库的镜像。
+
+⚠️ 配置模板里 `integration.harbor.enabled` 默认是 **`true`**、地址是 `registry.example.com`
+（示例值）。**没有真实 Harbor 时请把它改成 `false`**，否则每次构建都会去连一个不存在的域名，
+日志里会刷一串连接超时 —— 构建本身不受影响，但很难看出"这只是示例配置"。
 
 **部署总是 `ROLLOUT_STUCK`（滚动更新卡死）**
 K8s 在 `progressDeadlineSeconds`（默认 600s）到点就判卡死，而镜像拉得慢时 Pod
