@@ -23,6 +23,13 @@ RUN npm run build
 # ---------- ② 后端 ----------
 FROM golang:1.26-alpine AS backend
 WORKDIR /src
+# ⚠️ Go 模块代理：默认的 proxy.golang.org 在国内会直连超时
+#   （实测：`dial tcp 142.250.73.113:443: i/o timeout`，卡了 331 秒才失败）。
+#   注意 daemon.json 里的 proxies 代理**不一定注入到 build 容器**，
+#   所以"拉镜像没问题、构建照样卡"是常见现象 —— 换国内镜像源最省事。
+#   `,direct` 是兜底：镜像站挂了就直接回源。
+#   完全隔离的内网（连国内也出不去）需要改用 --network=host + 宿主代理。
+ENV GOPROXY=https://goproxy.cn,direct
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 COPY backend/ ./
