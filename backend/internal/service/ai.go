@@ -356,8 +356,21 @@ func (a *AIService) platformOverview(ctx context.Context) []string {
 // 名录很小（环境个位数、项目几十条），一次给全比多一轮便宜得多。
 func (a *AIService) roster(ctx context.Context) []string {
 	db := a.db(ctx)
+	// ⚠️ 环境名录也要按**可见性**过滤。
+	//
+	// 之前只过滤了 list_environments 工具，起始快照里的 roster 却是全量 ——
+	// 于是"看不到正式区"的人问 AI「有哪些环境」，AI 照样把正式区念出来。
+	// 名录是模型"知道有哪些环境"的来源，漏了它等于门只锁了一半。
+	envQ := db.Model(&model.Environment{})
+	if allowed, restricted := CallerFrom(ctx).VisibleEnvKeys(); restricted {
+		if len(allowed) == 0 {
+			envQ = envQ.Where("1 = 0")
+		} else {
+			envQ = envQ.Where("env_key IN ?", allowed)
+		}
+	}
 	var envs []model.Environment
-	_ = db.Order("stage_order asc, id asc").Limit(50).Find(&envs).Error
+	_ = envQ.Order("stage_order asc, id asc").Limit(50).Find(&envs).Error
 	envParts := make([]string, 0, len(envs))
 	for _, e := range envs {
 		envParts = append(envParts, fmt.Sprintf("%s=%s", e.EnvKey, e.Name))
