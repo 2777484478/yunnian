@@ -36,6 +36,7 @@ kubeconfig
 # ---- 本地环境变量 ----
 .env
 .env.*
+!.env.example
 
 # ---- 部署产物（JDK 运行包 / 许可文件） ----
 deploy/

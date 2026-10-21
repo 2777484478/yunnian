@@ -1,0 +1,110 @@
+# ---------------------------------------------------------------------------
+# YunNian 云辇 · 一体化部署（应用 + MySQL + Redis）
+#
+#   docker compose up -d --build
+#   docker compose logs -f app
+#   docker compose down            # 停服务，保留数据
+#   docker compose down -v         # 连数据一起清掉
+#
+# ⚠️ 三个必填的密钥**没有默认值**，缺一个就起不来：
+#   YUNNIAN_JWT_SECRET / YUNNIAN_MASTER_KEY / MYSQL_ROOT_PASSWORD
+#   生成方式见 README 的「安装与部署」一节。
+#   为什么不给默认值：开发用的默认密钥是明文公开的，app.env=prod 时平台会
+#   主动拒绝启动 —— 这是故意的，别用"临时改一下"绕过。
+# ---------------------------------------------------------------------------
+name: yunnian
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: yunnian:latest
+    container_name: yunnian-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${YUNNIAN_PORT:-8080}:8080"
+    environment:
+      TZ: "Asia/Shanghai"
+      # app.env=prod 会让平台检查"你还在用开发密钥"并拒绝启动
+      YUNNIAN_ENV: "prod"
+      YUNNIAN_STATIC_DIR: "/app/frontend/dist"
+      YUNNIAN_DB_DSN: "yunnian:${MYSQL_PASSWORD:-changeme}@tcp(mysql:3306)/yunnian?charset=utf8mb4&parseTime=true&loc=Local"
+      YUNNIAN_REDIS_ADDR: "redis:6379"
+      YUNNIAN_JWT_SECRET: "${YUNNIAN_JWT_SECRET:?必须设置：openssl rand -base64 48}"
+      YUNNIAN_MASTER_KEY: "${YUNNIAN_MASTER_KEY:?必须设置：openssl rand -base64 32}"
+      # 平台自建构建需要复用宿主机的 docker daemon
+    volumes:
+      - yunnian-data:/app/data
+      # 让容器内的 docker CLI 能调用宿主机的 daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  mysql:
+    image: mysql:8.0
+    container_name: yunnian-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?必须设置}"
+      MYSQL_DATABASE: "yunnian"
+      MYSQL_USER: "yunnian"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-changeme}"
+      TZ: "Asia/Shanghai"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --default-authentication-plugin=mysql_native_password
+      - --explicit_defaults_for_timestamp=ON
+      - --max_connections=500
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: yunnian-redis
+    restart: unless-stopped
+    environment:
+      TZ: "Asia/Shanghai"
+    # appendonly：部署锁若不持久化，重启期间可能同一服务并发部署
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  yunnian-data:
+    name: yunnian-data
+  mysql-data:
+    name: yunnian-mysql-data
+  redis-data:
+    name: yunnian-redis-data

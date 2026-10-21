@@ -1,153 +1,308 @@
 # YunNian 云辇 · AI 运维管理发布平台
 
-内部 CI/CD 管理平台。第一阶段目标：**CI 镜像构建管理** + **CD 环境部署管理**，
-统一纳管公司 20 个项目（前端 10 / 后端 10）。
+> 内部 CI/CD 管理平台 —— 镜像构建 + 环境部署 + 发布拓扑，把"构建产物运到各环境"这条链路收进一个控制台。
+
+自建构建**真跑 docker**（构建成功 = 仓库里真有镜像，digest 从 push 输出读回）、写集群的动作**统一收敛到 AppRelease CR**（直改 Deployment 会被 operator 秒拉回）、AI 助手**只能查不能改**（工具清单里没有任何写接口）。后端 Go 1.26 单栈，前端 React 18 + Ant Design 5，**一个进程**对外服务。
 
 > **名称**：`YunNian` 对应中文 **云辇**（「辇」为载运之器，取"把构建产物运到各环境"之意）。
-> Logo 为橙色渐变圆角方块 + 白色云（矢量），用于页面标识与浏览器标签页图标；
-> 详见 `docs/04-前端设计.md` 的「品牌标识与 Logo」。
 
----
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1?logo=mysql&logoColor=white)](https://www.mysql.com/)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Docker](https://img.shields.io/badge/Docker-20.10-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/License-Unspecified-lightgrey)](#许可证)
 
-## 当前进度
+* * *
 
-| 模块 | 状态 |
+## 目录
+
+- [功能特性](#功能特性)
+- [安装与部署](#安装与部署)
+  - [一键部署（推荐）](#一键部署推荐)
+  - [源码部署](#源码部署)
+  - [环境要求](#环境要求)
+  - [本地开发](#本地开发)
+- [工作原理](#工作原理)
+- [安全机制](#安全机制)
+- [项目结构](#项目结构)
+- [常见问题](#常见问题)
+- [许可证](#许可证)
+
+* * *
+
+## 功能特性
+
+### 镜像构建（CI）
+
+| 功能 | 说明 |
 | --- | --- |
-| 前端（React 18 + TS + Vite + AntD 5，18 个业务页面） | ✅ 已实现并接入真实接口（`src/mock` 已删除） |
-| 后端（Go 1.26 + Gin + GORM + MySQL 8 + Redis 7） | ✅ 已实现，冒烟 50/50 通过（详见 [`backend/README.md`](./backend/README.md)） |
-| 设计文档（架构 / DDL / API / 前端 / 时序 / 排期） | ✅ 已随实现同步修订；**排期见 [`docs/06`](./docs/06-MVP排期建议.md)** |
+| **自建构建** | 平台进程内真跑 `git clone → docker build → docker push`；digest 从 push 输出逐字读回，架构从 `docker image inspect` 读回 |
+| **自定义脚本** | 项目自己写 shell，平台只注入 `YUNNIAN_*` 变量与 Git 凭据；默认脚本覆盖 clone / 编译 / 打包 / 推送全流程 |
+| **Jenkins 接入** | 复用公司已有 Jenkins：平台负责触发、拉日志、同步状态；产物版本靠解析日志里的 `docker push` 得出，**读不到就留空，不猜版本号** |
+| **实时日志** | SSE 推送，支持断线续传（`Last-Event-ID`）；可取消、可重试 |
+| **失败真因落库** | 构建/部署的失败原因写进 `error_message` 列，平台重启后仍然可查（不是只留在易失的日志流里） |
+| **AI 归因** | 模型优先、规则兜底；给出的是"缺哪个配置 / 哪个探针没过"，不是一串错误码 |
+| **镜像台账** | 镜像版本页可按项目/环境检索；另有「Harbor 仓库」视角直接读仓库真实 tag（含非平台推送的） |
 
-后端实现范围：`docs/03` 的 13 个模块全部落地（认证/用户角色/项目/构建/镜像/环境/服务实例/
-部署/回滚/审计/通知/模型通道/AI/Webhook），含多条 SSE 实时流（构建、部署、回滚、Pod 日志、AI 问答）。
-共 **24 张表**；未落地的少数项在 `backend/README.md` 的「已知的未落地项」逐条说明。
+### 环境部署（CD）
 
-> 前端先做出来是为了确认交互与视觉方向，随后逐页替换为 `@/api` —— `frontend/src/mock/`
-> 已整体删除，页面上没有残留的示例数据。
-> ⚠️ 后端 DTO 以 `frontend/src/types/index.ts` 为对齐基准（例如项目统计是扁平的
-> `totalBuilds` / `successRate`，不是 `docs/03` 示例里的 `stats` 对象），改接口时两边一起改。
+| 功能 | 说明 |
+| --- | --- |
+| **发布拓扑** | 以环境为节点呈现项目分布，一眼看出哪个环境缺哪个服务、哪个服务起不来 |
+| **批量发布** | 一次发多个服务（同一环境）；**编排在后端**，关掉浏览器后面的单照样创建 |
+| **审批流** | 需要审批的环境发单后停在 `pending_approval`，审批通过才开始滚动 |
+| **部署前风险评分** | 建单前算 0–100 分：历史失败率、回滚次数、重复发布、正式区、同环境在飞部署；**纯计算**，每分都能对上账 |
+| **环境可见范围** | 角色可配"能看哪几台 / 能部署哪几台"；未授权的环境在列表里直接**看不到**，直连接口 403，AI 也问不出来 |
+| **回滚** | 手工回滚到指定历史版本；回滚目标必须校验"属于本项目" |
+| **失败不回滚** | 部署失败**不自动回滚**（回滚本身也是一次发版，同样会失败）；恢复交给人走手工链路 |
+| **Pod 日志** | 按服务实例实时拉 Pod 日志，SSE 推送 |
 
----
+### 平台治理
 
-## 目录结构
+| 功能 | 说明 |
+| --- | --- |
+| **用户与角色** | 5 个内置角色、31 个权限点，权限点支持 `env:*` / `deploy:test,staging` 通配与枚举 |
+| **团队主数据** | 项目归属团队；用户数据权限按团队反查（不再是自由字符串） |
+| **通知** | 邮件（SMTP）与钉钉（加签）**真投递**；订阅矩阵生效；结果回写 `last_sent_at` / `fail_count` / `last_error` |
+| **AI 运维助手** | 8 个**只读**工具自查集群；模型能自己取数，不靠"上下文里没有"就答查不到 |
+| **模型通道** | 密钥 AES-256-GCM 加密存储、脱敏回显；可设平台默认通道 |
+| **操作审计** | 自动埋点 + 多条件检索 + 异步导出 |
+| **Webhook** | GitLab / GitHub 共享密钥 + HMAC 校验；**留空则回调直接 403**，不允许无签名触发构建 |
+| **集群接入** | kubeconfig 导入、加密落库、只读探测、命名空间列表 |
 
-```
-YunNian/
-├── frontend/               # React 18 + TS + Vite + Ant Design 5
-│   ├── src/
-│   │   ├── api/            # 真实接口层（请求封装、登录态、SSE 订阅）
-│   │   ├── pages/          # 18 个业务页面
-│   │   ├── components/     # PageHeader / StatCard / StatusTag / LogPanel / charts / KVFields
-│   │   ├── layouts/        # 顶栏 + 侧边菜单
-│   │   ├── types/          # 领域模型（与后端 DTO 对齐）
-│   │   └── styles/         # 设计 Token + 全局样式
-│   └── dist/index.html     # 构建产物：自包含单文件，双击即可打开
-├── backend/                # Go 后端（详见 backend/README.md）
-│   ├── cmd/server/         # 入口
-│   ├── configs/            # 配置
-│   ├── scripts/smoke.sh    # 冒烟脚本（50 项断言）
-│   └── internal/           # api / service / store / model / auth / cache / queue / integration …
-├── docker-compose.dev.yml  # 本地依赖：MySQL 8 + Redis 7
-└── docs/                   # 设计文档
-```
+* * *
 
----
+## 安装与部署
 
-## 快速部署
+### 一键部署（推荐）
 
-从零把一个 YunNian 实例跑起来，需要 4 样东西：**MySQL 8、Redis 7、Go 1.26、Node 18+**。
-MySQL/Redis 用仓库自带的 `docker-compose.dev.yml` 一条命令拉起；Go/Node 装在本机。
-
-### 前置依赖
-
-| 依赖 | 版本 | 用途 |
-| --- | --- | --- |
-| Go | 1.26+ | 编译后端 |
-| Node.js | 18+（建议 20/22） | 构建前端 |
-| MySQL | 8.0 | 业务库（24 张表，首次启动自动建） |
-| Redis | 7 | 会话 / 队列 / 部署锁 / 日志流缓冲 |
-| Docker（可选） | — | 用 `docker-compose.dev.yml` 拉 MySQL/Redis 时用到 |
-
-### 第 1 步 · 准备配置
+一条命令拉起 **应用 + MySQL 8 + Redis 7**：
 
 ```bash
-cd backend/configs
-cp config.yaml.example config.yaml   # 填入真实 DSN 密码、JWT 密钥、发信 SMTP 等
+git clone https://github.com/2777484478/yunnian.git
+cd yunnian
+
+# 三个密钥必须先生成 —— 没有默认值，缺一个就起不来
+export YUNNIAN_JWT_SECRET="$(openssl rand -base64 48)"
+export YUNNIAN_MASTER_KEY="$(openssl rand -base64 32)"
+export MYSQL_ROOT_PASSWORD="$(openssl rand -base64 24)"
+
+docker compose up -d --build
+docker compose logs -f app
 ```
 
-`config.yaml.example` 里需要改的项都是显式占位符：DSN 是 `user:password@tcp(...)`、
-JWT/主密钥是 `yunnian-dev-only-*`、SMTP 授权码是 `CHANGE_ME`。按注释逐项替换即可。
-`config.yaml` 已被 `.gitignore` 排除，不会入库。
+等 `app` 变成 `healthy`，浏览器打开 `http://<服务器IP>:8080`。
 
-### 第 2 步 · 启动 MySQL + Redis
+| 项 | 值 |
+| --- | --- |
+| 默认账号 | `admin` |
+| 默认密码 | `changeme` —— **首次登录后立刻改** |
+| 端口 | `8080`（改 `YUNNIAN_PORT` 换） |
+
+> ⚠️ 密钥**不要写进 `docker-compose.yml` 并提交**。放在宿主的 `.env` 里更省事：
+> `cp .env.example .env` → 填好 → `docker compose up -d`（compose 会自动读同目录的 `.env`）。
+
+> ⚠️ `app` 容器挂载了宿主机的 `/var/run/docker.sock` —— 平台的"自建构建"就是靠它调用宿主机的 docker daemon。**这等于把宿主机的 root 权限交给了平台容器**，请只在可信环境这么做。
+
+停服务 / 清数据：
 
 ```bash
+docker compose down      # 停服务，保留数据卷
+docker compose down -v   # 连数据一起清掉
+```
+
+### 源码部署
+
+不想用容器、或要改代码：
+
+```bash
+git clone https://github.com/2777484478/yunnian.git
+cd yunnian
+
+# ① 依赖（MySQL 8 + Redis 7）
 docker compose -f docker-compose.dev.yml up -d
-```
 
-端口 3306 / 6379，账号 `yunnian` / `changeme`（与 `config.yaml.example` 里的 DSN 占位一致，
-改密码时**两边一起改**）。
-
-### 第 3 步 · 启动后端
-
-```bash
+# ② 后端
 cd backend
 go build -o bin/yunnian-server ./cmd/server
-./bin/yunnian-server -config configs/config.yaml
-```
+YUNNIAN_ENV=prod \
+YUNNIAN_JWT_SECRET="$(openssl rand -base64 48)" \
+YUNNIAN_MASTER_KEY="$(openssl rand -base64 32)" \
+./bin/yunnian-server
 
-首次启动会**自动建表（GORM AutoMigrate）+ 灌种子数据**（默认账号 / 角色 / 权限 / 演示项目），
-无需手工导入任何 SQL。表结构参考见 [`docs/schema.sql`](./docs/schema.sql)。
-
-后端默认监听 `:8080`，接口前缀 `/api/v1`。
-
-### 第 4 步 · 启动前端
-
-```bash
+# ③ 前端（另开一个终端）
 cd frontend
-npm install
-npm run build        # → frontend/dist（自包含单文件）
+npm ci
+npm run dev        # 开发模式，:5173，代理到后端 :8080
 ```
 
-后端会托管 `frontend/dist` 作为静态资源，构建完直接开 http://127.0.0.1:8080 即可。
-开发时用 `npm run dev`（http://127.0.0.1:5173，`/api` 走 Vite 代理到 `:8080`）。
-
-### 默认账号
-
-| 账号 | 角色 | 权限 |
-| --- | --- | --- |
-| `admin` / `changeme` | 超级管理员 | 全部权限 |
-| `ops` / `changeme` | 运维 | 环境 / 部署 / 回滚 / 扩缩容、构建、镜像、审计、日志、AI 查询 |
-| `guest` / `changeme` | 只读 | 仅查看 |
-
-另有 5 个内置角色（admin / ops / dev / qa / readonly）与 40+ 权限点，由
-`backend/internal/store/seed.go` 在首次启动时自动灌入，密码统一为 `changeme`
-（`seedPassword` 常量，生产部署请务必改成强密码）。
-
-### 冒烟自检
+生产环境也可以只编译前端产物、由后端托管（单进程）：
 
 ```bash
-cd backend && bash scripts/smoke.sh   # 需先起后端；50 项断言
+cd frontend && npm ci && npm run build     # 产物在 frontend/dist
+cd ../backend && go build -o bin/yunnian-server ./cmd/server
+# 配置里 app.staticDir 指向 ../frontend/dist，后端会一并托管
 ```
 
----
+### 环境要求
 
-## 页面清单
+| 组件 | 版本 | 说明 |
+| --- | --- | --- |
+| Go | ≥ 1.26 | 仅编译时需要 |
+| Node.js | ≥ 20 | 仅编译前端时需要 |
+| MySQL | 8.0 | `utf8mb4`；`autoMigrate` 会自动建表 |
+| Redis | 7 | **可关**：关掉后日志流 / 分布式锁 / 失败计数自动退回进程内实现 |
+| Docker | ≥ 20.10 | 「自建构建」需要（`runner.executor=docker`） |
 
-| 分组 | 页面 |
+单机即可，**不需要独立 Runner 节点**。
+
+### 本地开发
+
+```bash
+# 依赖
+docker compose -f docker-compose.dev.yml up -d
+
+# 后端
+cd backend && go run ./cmd/server
+
+# 前端
+cd frontend && npm run dev
+```
+
+冒烟测试（只读模式，不会真的发版）：
+
+```bash
+cd backend && ./scripts/smoke.sh
+```
+
+> 部署 / 回滚段**默认不跑** —— 要跑得显式 `SMOKE_WRITE=1`，且动手前会先打印"改谁、改成什么"。
+> 集群写入只打靶 `default/nginx-demo`。
+
+* * *
+
+## 工作原理
+
+### 构建链路
+
+```
+① 领任务        队列取出构建单（并发上限来自「系统管理 › 运行参数」）
+② clone         按项目凭据拉代码（脚本项目走自定义脚本）
+③ 编译          可选：独立编译容器（编译镜像可配）
+④ docker build  本机即构建机，真跑 docker
+⑤ push          推到 Harbor，digest 从 push 输出读回
+⑥ 登记          写 image_record（digest / 大小 / 架构）
+```
+
+### 部署链路
+
+```
+① 预检          镜像是否存在（只拒 404 tag，其余放行）
+② 风险评分      历史失败率 / 回滚 / 正式区 / 并发 → 0–100 分
+③ 建单          命中审批环境 → 停在 pending_approval
+④ 下发          写 AppRelease CR，**不直改 Deployment**
+⑤ 等待          轮询 CR 状态；K8s 报 ProgressDeadlineExceeded → ROLLOUT_STUCK
+⑥ 收尾          落终态 + 失败真因 + 通知
+```
+
+### 写集群为什么统一走 CR
+
+平台直接改 Deployment 会被 operator **秒拉回**（operator 以 CR 为准）。
+所以所有写操作都收敛到 `AppRelease` CR：
+
+- HPA 托管的负载**拒绝扩缩容**（改了也白改）
+- 部署失败**不回滚**：回滚本身也是一次发版，它同样会失败，届时集群被改到第三个状态
+- 「平台库的值不是真相」：现在是什么**必须读集群**；读不到就如实说读不到，**不许回退库值**
+
+* * *
+
+## 安全机制
+
+| 面 | 做法 |
 | --- | --- |
-| 概览 | 运维发布总览（指标卡、构建趋势、结果分布、最近构建、环境健康、待处理） |
-| CI 镜像构建 | 项目管理 · 项目详情 · Jenkins Job（只读）· 构建记录（实时日志 + AI 诊断）· 镜像版本 |
-| CD 环境部署 | 发布拓扑（按阶段排序）· 环境管理（卡片/表格双视图）· 环境详情（服务/部署历史/回滚/环境变量）· 部署记录（含审批）· 回滚记录 |
-| AI | AI 运维助手（自然语言查询 + 只读工具取数 + 结构化结果卡片） |
-| 治理 | 操作审计 |
-| 系统管理 | 用户与权限 · 通知渠道 · 第三方集成 · 集群接入 · 模型设置 |
+| 密钥存储 | JWT 密钥、加密主密钥、模型通道密钥走环境变量注入；`app.env=prod` 时检测到开发密钥**直接拒绝启动** |
+| 凭证加密 | kubeconfig、Git 凭据、模型密钥用 AES-256-GCM 加密落库，接口只回"有没有"，不回明文 |
+| 权限模型 | 31 个权限点 + `env:*` / `deploy:test,staging` 通配与枚举；环境可见范围可按环境收敛 |
+| AI 只读 | 工具清单里**只有 8 个读工具**，没有写接口 —— 模型说"我帮你重启了"也没有东西可调 |
+| Webhook | 共享密钥 + HMAC 校验；**留空则回调接口直接 403**（免鉴权的 webhook 等于给公网开了构建触发器） |
+| 审计 | 变更类操作自动埋点，记录操作人、对象、前后值 |
+| 部署失败 | 不自动回滚，但会在日志流里明说"工作负载停在本次变更后的镜像上" |
 
-交互亮点：一键编译弹窗（分支 / 参数覆盖 / 历史构建）、**实时流式日志面板**（终端观感、关键字过滤、跟随滚动、复制导出）、
-部署向导（三步 + 进度 + 步骤 + 日志）、回滚弹窗（历史版本单选 + 必填原因）、服务操作菜单 8 项（部署/日志/重新部署/回滚/设置参数/扩缩容/重启/下线）。
+> ⚠️ **仓库里不含生产密钥**，但 `backend/configs/config.yaml` 是本地开发用的示例配置，
+> 其中邮箱授权码等属于**历史遗留**。换环境部署时一律用环境变量覆盖，不要沿用。
 
----
+* * *
 
-## 文档
+## 项目结构
 
-见 [`docs/README.md`](./docs/README.md) —— 含架构设计、数据库 DDL、API 设计、前端设计、时序图、MVP 排期，
-以及**需要拍板的关键决策清单**。
+```text
+yunnian/
+├── backend/                  Go 单栈后端
+│   ├── cmd/server/            入口（装配、启动补偿、运行时设置）
+│   ├── internal/
+│   │   ├── api/               HTTP 层（路由、中间件、handler）
+│   │   ├── service/           业务层（构建、部署、用户、AI、通知…）
+│   │   ├── integration/       下游通道（Harbor / K8s / Jenkins / Git）
+│   │   ├── model/             GORM 模型
+│   │   ├── store/             迁移、种子、配置读写
+│   │   └── config/            配置加载（yaml → 环境变量）
+│   ├── configs/               配置模板
+│   └── scripts/               冒烟测试、启动脚本
+├── frontend/                 React 18 + TS + Vite + AntD 5
+│   ├── src/
+│   │   ├── api/               接口封装
+│   │   ├── components/        通用组件
+│   │   ├── layouts/           布局与导航
+│   │   ├── pages/             业务页面（CI / CD / 系统管理）
+│   │   └── types/             与后端 DTO 对齐的类型
+│   └── vite.config.ts         构建配置（产物为单文件）
+├── docs/                     设计文档（架构 / DDL / API / 前端 / 时序 / 排期）
+├── deploy/                   辅助镜像（编译环境镜像）
+├── Dockerfile                生产镜像（多阶段）
+├── docker-compose.yml        一体化部署
+└── docker-compose.dev.yml    仅本地依赖（MySQL / Redis）
+```
+
+* * *
+
+## 常见问题
+
+**部署后打不开页面 / 502**
+先看 `docker compose logs app`。`app` 依赖 MySQL 与 Redis 健康后才启动，
+用 `docker compose ps` 确认三个服务都是 `healthy`。
+
+**启动报"你还在用开发密钥"**
+`YUNNIAN_ENV=prod` 时平台会拒绝使用仓库里的示例密钥。注入随机值：
+
+```bash
+openssl rand -base64 48   # → YUNNIAN_JWT_SECRET
+openssl rand -base64 32   # → YUNNIAN_MASTER_KEY
+```
+
+**"自建构建"报 docker 相关错误**
+平台需要能调用 docker daemon。容器部署时已挂载 `/var/run/docker.sock`；
+源码部署时确认当前用户能执行 `docker ps`。
+
+**Harbor 读不到 digest**
+平台的 Harbor 走 `/v2/`（OCI Distribution 协议），Core 管理接口与它通常同端口。
+确认 `integration.harbor.registry` 与 `baseUrl` 指向**同一个仓库** —— 平台只核对同仓库的镜像。
+
+**部署总是 `ROLLOUT_STUCK`（滚动更新卡死）**
+K8s 在 `progressDeadlineSeconds`（默认 600s）到点就判卡死，而镜像拉得慢时 Pod
+常常在 600s **之后**才起来。平台已在失败后继续观察并标出「失败后已就绪」，
+但根因要改工作负载上的 `progressDeadlineSeconds`。
+
+**改了 Go 代码但行为没变**
+`go build ./...` **不产二进制**。要 `go build -o bin/yunnian-server ./cmd/server`
+再重启 —— 跑旧二进制是假绿的最常见来源。
+
+**Redis 能关掉吗**
+能。关掉后日志流、部署锁、失败计数自动退回进程内实现（单机够用，多实例部署时不要关）。
+
+* * *
+
+## 许可证
+
+**暂未指定许可证** —— 在补上之前，默认保留所有权利。
+
+仓库**不含生产密钥**。部署前请按上面的说明注入自己的密钥。
