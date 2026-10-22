@@ -38,11 +38,24 @@ services:
       YUNNIAN_REDIS_ADDR: "redis:6379"
       YUNNIAN_JWT_SECRET: "${YUNNIAN_JWT_SECRET:?必须设置：openssl rand -base64 48}"
       YUNNIAN_MASTER_KEY: "${YUNNIAN_MASTER_KEY:?必须设置：openssl rand -base64 32}"
+      # ⚠️ 构建工作目录必须**容器内与宿主同路径**（原因见下方 volumes 注释）。
+      # 默认 /opt/yunnian-build；macOS 本地若也用容器跑构建，改成 $HOME/yunnian-build。
+      YUNNIAN_HOST_BASE: "${YUNNIAN_BUILD_BASE:-/opt/yunnian-build}"
       # 平台自建构建需要复用宿主机的 docker daemon
     volumes:
       - yunnian-data:/app/data
       # 让容器内的 docker CLI 能调用宿主机的 daemon
       - /var/run/docker.sock:/var/run/docker.sock
+      # ⚠️ 构建工作目录，**必须容器内与宿主同一个绝对路径**。
+      #
+      # 为什么：平台的构建脚本在这里面执行（容器内），它先 `git clone` 到
+      # $YUNNIAN_HOST_BASE/src/<项目>，再 `docker run -v <那个路径>:/src` 跑 mvn。
+      # 而 `-v` 是**宿主 daemon** 解析的 —— 若容器内路径宿主上不存在，
+      # Docker 会静默建一个**空目录**挂进去，于是 mvn 报：
+      #     there is no POM in this directory (/src)
+      # 这个报错完全看不出是"路径错位"，而是像"仓库里没有 pom.xml"。
+      # 同路径挂载之后，两边指向同一份目录，问题消失。
+      - ${YUNNIAN_BUILD_BASE:-/opt/yunnian-build}:${YUNNIAN_BUILD_BASE:-/opt/yunnian-build}
     # ⚠️ 光挂 socket 不够：docker.sock 是 `srw-rw---- root:docker`，
     # 只有 root 和 docker 组能读写。而容器里以 uid 1000(yunnian) 运行，
     # 不在 docker 组 → 每次构建都报 `permission denied ... docker.sock`。
