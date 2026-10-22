@@ -312,22 +312,28 @@ const DeployList: React.FC = () => {
           {v === 'failed' || v === 'interrupted' ? (
             <FailureReason message={r.errorMessage} code={r.errorCode} tone={v === 'interrupted' ? 'warning' : 'error'} />
           ) : null}
-          {/* 失败后集群自己好了。
-              必须在**这一列**标出来：用户看到红色的「失败」就会以为服务还挂着，
-              而实际 Pod 早就起来了 —— 这个标记是他决定"要不要再发一次"的关键信息。
-              状态不改（失败是当时的事实），只补一句"事后已就绪"。 */}
+          {/* 判了终态之后集群自己好了（失败 / 被中断都有可能）。
+              必须在**这一列**标出来：用户看到红色的「失败」或橙色的「已中断」，
+              就会以为服务还挂着，而实际 Pod 早就起来了 ——
+              这个标记是他决定"要不要再发一次"的关键信息。
+              状态不改（失败/中断是当时的事实），只补一句"事后已就绪"。
+
+              ⚠️ 文案不要写死"失败"：`interrupted`（平台重启打断观察）同样会填 recoveredAt，
+              而集群侧其实继续把 rollout 滚完了。说"失败后"会让中断单读起来自相矛盾。 */}
           {r.recoveredAt ? (
             <Tooltip
               title={
                 <span>
-                  判失败后（{fmt(r.recoveredAt)}）集群内已就绪：镜像最终拉完了、Pod 起来了。
+                  判为{r.status === 'interrupted' ? '中断' : '失败'}后（{fmt(r.recoveredAt)}）
+                  集群内已就绪：镜像最终拉完了、Pod 起来了。
                   <br />
-                  状态仍记为失败 —— 失败是当时的事实；这条只是事后事实，供你判断要不要重发。
+                  状态仍记为{r.status === 'interrupted' ? '中断' : '失败'} ——
+                  那是当时的事实；这条只是事后事实，供你判断要不要重发。
                 </span>
               }
             >
               <span className="yn-deploy-recovered">
-                <CheckCircleOutlined /> 失败后已就绪
+                <CheckCircleOutlined /> 事后已就绪
               </span>
             </Tooltip>
           ) : null}
