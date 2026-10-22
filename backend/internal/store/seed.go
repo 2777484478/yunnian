@@ -193,8 +193,52 @@ func Seed(db *gorm.DB, cfg *config.Config) error {
 		return nil
 	}
 
-	// 全部种子用户共用同一个密码哈希：只算一次 bcrypt，避免启动时做 20+ 次哈希运算。
-	// 生产环境务必给每个账号分配独立密码。
+	hash, err := bcrypt.GenerateFromPassword([]byte(seedPassword), bcryptCost(cfg))
+	if err != nil {
+		return fmt.Errorf("生成初始密码失败: %w", err)
+	}
+	seeder := &seeder{hash: string(hash), now: time.Now()}
+
+	// 只建**运行必需**的东西：角色、权限目录、一个能登录的管理员。
+	//
+	// 20 个示例项目、8 个环境、几万条构建日志这些演示数据在 SeedDemo 里，
+	// 默认不跑 —— 真实部署时它们只会是噪音，还得手工一条条删。
+	steps := []struct {
+		name string
+		fn   func(*gorm.DB) error
+	}{
+		{"角色与权限", seeder.rbac},
+		{"管理员账号", seeder.adminUser},
+	}
+
+	for _, s := range steps {
+		if err := db.Transaction(s.fn); err != nil {
+			return fmt.Errorf("初始化「%s」失败: %w", s.name, err)
+		}
+		slog.Info("初始化完成", "step", s.name)
+	}
+
+	slog.Info("初始化完成：只有表结构 + 管理员账号",
+		"username", "admin", "note", "如需演示数据请设 database.seedDemo=true 后重装")
+	return nil
+}
+
+// SeedDemo 写入演示数据：20 个示例项目、环境、构建/部署记录、演示账号。
+//
+// 默认**不跑**（`database.seedDemo=false`）。它存在的意义是本地开发时
+// 界面一打开就有内容可看；生产环境把这些灌进去，用户第一件事就是想办法清掉。
+//
+// 幂等：已有项目就跳过，不会重复写。
+func SeedDemo(db *gorm.DB, cfg *config.Config) error {
+	var count int64
+	if err := db.Model(&model.Project{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("统计项目失败: %w", err)
+	}
+	if count > 0 {
+		slog.Info("演示数据已存在，跳过", "projects", count)
+		return nil
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(seedPassword), bcryptCost(cfg))
 	if err != nil {
 		return fmt.Errorf("生成初始密码失败: %w", err)
@@ -205,8 +249,7 @@ func Seed(db *gorm.DB, cfg *config.Config) error {
 		name string
 		fn   func(*gorm.DB) error
 	}{
-		{"角色与权限", seeder.rbac},
-		{"用户", seeder.users},
+		{"演示账号", seeder.users},
 		{"项目", seeder.projects},
 		{"环境", seeder.environments},
 		{"构建与镜像", seeder.buildsAndImages},
@@ -218,13 +261,46 @@ func Seed(db *gorm.DB, cfg *config.Config) error {
 
 	for _, s := range steps {
 		if err := db.Transaction(s.fn); err != nil {
-			return fmt.Errorf("初始化「%s」失败: %w", s.name, err)
+			return fmt.Errorf("写入演示数据「%s」失败: %w", s.name, err)
 		}
-		slog.Info("种子数据写入完成", "step", s.name)
+		slog.Info("演示数据写入完成", "step", s.name)
 	}
 
-	slog.Info("种子数据初始化完成",
+	slog.Info("演示数据初始化完成",
 		"projects", len(projectSpecs), "environments", len(envSpecs), "demoUser", seedDemoUsername)
+	return nil
+}
+
+// adminUser 只建管理员账号 —— 新装后唯一的登录入口。
+//
+// 刻意不填 Team / LastLoginAt / LastLoginIP：
+// 那些是演示数据的痕迹，真实部署第一天不该出现「昨天登录过、来自 10.20.31.x」。
+func (s *seeder) adminUser(tx *gorm.DB) error {
+	s.init()
+
+	var roleID uint64
+	if err := tx.Model(&model.Role{}).Where("code = ?", "admin").Pluck("id", &roleID).Error; err != nil {
+		return fmt.Errorf("查询管理员角色失败: %w", err)
+	}
+	if roleID == 0 {
+		return fmt.Errorf("找不到 admin 角色，rbac 初始化可能失败")
+	}
+
+	u := model.User{
+		Username:     "admin",
+		PasswordHash: s.hash,
+		Name:         "系统管理员",
+		Email:        "admin@yunnian.cn",
+		Phone:        "13800000002",
+		Enabled:      true,
+	}
+	if err := tx.Create(&u).Error; err != nil {
+		return fmt.Errorf("创建管理员失败: %w", err)
+	}
+	s.userIDs[u.Name] = u.ID
+	if err := tx.Create(&model.UserRole{UserID: u.ID, RoleID: roleID}).Error; err != nil {
+		return fmt.Errorf("绑定管理员角色失败: %w", err)
+	}
 	return nil
 }
 
@@ -377,6 +453,10 @@ func (s *seeder) rbac(tx *gorm.DB) error {
 // --------------------------------------------------------------------------- 用户
 
 func (s *seeder) users(tx *gorm.DB) error {
+	// ⚠️ 必须自己 init：SeedDemo 里 users 是第一步，不像原先藏在 rbac 之后，
+	// 否则 s.userIDs 是 nil，写 s.userIDs[名字] 会 panic（assignment to entry in nil map）。
+	s.init()
+
 	type userSpec struct {
 		Username, Name, Email, Phone, Role, Team string
 		Enabled                                  bool
@@ -419,6 +499,13 @@ func (s *seeder) users(tx *gorm.DB) error {
 
 	for _, sp := range specs {
 		last := s.now.AddDate(0, 0, -1).Add(time.Duration(-devIndex*37) * time.Minute)
+		// 已存在就复用（Seed 建过 admin；SeedDemo 可能在其之后才跑）
+		var existing model.User
+		if err := tx.Where("username = ?", sp.Username).First(&existing).Error; err == nil {
+			s.userIDs[existing.Name] = existing.ID
+			s.ownerIDs = append(s.ownerIDs, existing.ID)
+			continue
+		}
 		u := model.User{
 			Username:     sp.Username,
 			PasswordHash: s.hash,

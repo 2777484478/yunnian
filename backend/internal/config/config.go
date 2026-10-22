@@ -87,6 +87,9 @@ type DatabaseConfig struct {
 	SlowThreshold   Duration `yaml:"slowThreshold"`
 	AutoMigrate     bool     `yaml:"autoMigrate"`
 	Seed            bool     `yaml:"seed"`
+	// SeedDemo 是否在首次启动时写入演示数据（20 个示例项目 / 环境 / 构建记录）。
+	// 默认 false：真实部署只需要表结构 + 管理员账号。
+	SeedDemo        bool     `yaml:"seedDemo"`
 }
 
 // RedisConfig Redis 参数。enabled=false 时全部能力退回进程内实现
@@ -364,6 +367,7 @@ func Default() *Config {
 			SlowThreshold:   Duration(300 * time.Millisecond),
 			AutoMigrate:     true,
 			Seed:            true,
+			SeedDemo:        false,
 		},
 		Redis: RedisConfig{
 			Addr:          "127.0.0.1:6379",
@@ -474,6 +478,7 @@ func applyEnvOverrides(c *Config) {
 	setString(&c.Database.SQLitePath, "YUNNIAN_DB_SQLITE_PATH")
 	setBool(&c.Database.AutoMigrate, "YUNNIAN_DB_AUTO_MIGRATE")
 	setBool(&c.Database.Seed, "YUNNIAN_DB_SEED")
+	setBool(&c.Database.SeedDemo, "YUNNIAN_DB_SEED_DEMO")
 
 	setBool(&c.Redis.Enabled, "YUNNIAN_REDIS_ENABLED")
 	setString(&c.Redis.Addr, "YUNNIAN_REDIS_ADDR")

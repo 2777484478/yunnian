@@ -37,6 +37,9 @@ database:
   # 首次启动写入种子数据（20 个项目 / 5 个环境 / 构建与部署记录）。
   # 已有用户数据时会自动跳过，不会覆盖。
   seed: true
+  # 是否写入演示数据（20 个示例项目 / 环境 / 构建与部署记录）。
+  # 默认 false —— 真实部署只需要表结构 + admin 账号。
+  seedDemo: false
 
 redis:
   # 本地 Docker 起的 Redis 7（见 docker-compose.dev.yml）。无密码。

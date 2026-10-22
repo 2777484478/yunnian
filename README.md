@@ -165,30 +165,17 @@ docker compose logs -f app
 | 默认密码 | `changeme` —— **首次登录后立刻改** |
 | 端口 | `8080`（改 `YUNNIAN_PORT` 换） |
 
+> 💡 **首次启动只建表结构 + 一个管理员账号**：5 个内置角色、31 个权限点、`admin`。
+> **没有任何示例项目、环境或构建记录** —— 真实部署不需要那些噪音。
+>
+> 想本地开发时界面一打开就有内容可看：`YUNNIAN_DB_SEED_DEMO=true docker compose up -d`
+> （会额外写入 20 个示例项目、5 个环境、若干构建/部署记录，以及 `ops` / `guest` 和 20 个开发账号，
+> 密码同样都是 `changeme`）。
+
 > ⚠️ 密钥**不要写进 `docker-compose.yml` 并提交**。放在宿主的 `.env` 里更省事：
 > `cp .env.example .env` → 填好 → `docker compose up -d`（compose 会自动读同目录的 `.env`）。
 
 > ⚠️ `app` 容器挂载了宿主机的 `/var/run/docker.sock` —— 平台的"自建构建"就是靠它调用宿主机的 docker daemon。**这等于把宿主机的 root 权限交给了平台容器**，请只在可信环境这么做。
-
-> ⚠️ **首次启动会自动写入演示数据**（`database.seed: true`）：20 个示例项目、5 个环境、
-> 若干构建/部署记录，以及 **`admin` / `ops` / `guest` + 20 个开发账号，密码全部是 `changeme`**。
-> 这是为了让界面一打开就有内容可看，但**生产环境必须处理**：
->
-> 1. 登录后立刻改掉 `admin` 的密码（「系统设置 › 个人设置」）
-> 2. 停用或删除用不上的演示账号（「系统管理 › 用户」，支持删除）
-> 3. 删掉示例项目（「CI › 项目管理」，或用下面的 SQL 批量软删）
->
-> ```sql
-> -- 先确认要删的是哪些（演示项目的 owner 是"张伟/李静/王强…"这批演示账号）
-> SELECT project_key, name FROM project WHERE deleted_at IS NULL;
-> -- 确认无误后软删全部项目与示例环境
-> UPDATE project SET deleted_at = NOW() WHERE deleted_at IS NULL;
-> UPDATE environment SET deleted_at = NOW() WHERE deleted_at IS NULL;
-> ```
->
-> 已有数据时 `seed` 会整段跳过，**不会覆盖**你后来建的东西。
-> 想彻底不灌演示数据：`YUNNIAN_DB_SEED=false`，但那样库里**一个账号都没有**，
-> 需要自己写库建管理员 —— 一般不建议新装时关掉。
 
 停服务 / 清数据：
 

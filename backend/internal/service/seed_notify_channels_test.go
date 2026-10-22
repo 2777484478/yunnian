@@ -26,8 +26,13 @@ import (
 func TestSeedNotifyChannelsAreDeliverable(t *testing.T) {
 	db := newTestDB(t)
 
+	// 与真实启动同一个顺序：先 Seed（角色/权限/管理员），再 SeedDemo（演示数据）。
+	// 单跑 SeedDemo 会报「用户 ops 引用了未定义的角色 ops」—— 角色是 Seed 建的。
 	if err := store.Seed(db, config.Default()); err != nil {
 		t.Fatalf("执行种子失败: %v", err)
+	}
+	if err := store.SeedDemo(db, config.Default()); err != nil {
+		t.Fatalf("写入演示数据失败: %v", err)
 	}
 
 	var rows []model.NotifyChannel

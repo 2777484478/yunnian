@@ -91,6 +91,14 @@ func run() error {
 		if err := store.Seed(db, cfg); err != nil {
 			return fmt.Errorf("种子数据初始化失败: %w", err)
 		}
+
+		// 演示数据默认不写（database.seedDemo=false）。
+		// 真实部署只需要表结构 + 管理员；演示数据只会变成要手工清的噪音。
+		if cfg.Database.SeedDemo {
+			if err := store.SeedDemo(db, cfg); err != nil {
+				slog.Warn("写入演示数据失败（不影响启动）", "err", err)
+			}
+		}
 	}
 
 	ctx := context.Background()
