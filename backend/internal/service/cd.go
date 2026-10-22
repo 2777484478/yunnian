@@ -2112,12 +2112,21 @@ func (s *CDService) ApproveDeployment(ctx context.Context, id uint64, remark str
 	if rec.Status != "pending_approval" {
 		return nil, errs.StateConflict("该部署单当前状态为「" + statusWordDeploy(rec.Status) + "」，无需审批")
 	}
+	selfApproved := false
 	if c.User != nil {
 		if err := s.ensureApprover(ctx, rec.EnvID, c); err != nil {
 			return nil, err
 		}
 		// 自己提交自己审批要拦：审批的意义就在于第二双眼睛。
-		if rec.OperatorID == c.User.ID {
+		//
+		// **但超级管理员（`*`）例外。** 原因很实际：很多部署里只有 admin 一个账号，
+		// 而"部署需审批"是可开的环境选项 —— 两条一叠加，admin 提交的单就再也没人能批，
+		// 单子永久卡在 pending_approval。这不是安全，是死锁。
+		//
+		// 豁免的同时在审计里标注「自审」，把这件事留在记录里可追溯，
+		// 而不是靠"禁止自审"制造一个谁都不动的状态。
+		selfApproved = rec.OperatorID == c.User.ID
+		if selfApproved && !c.User.HasAnyPerm("*") {
 			return nil, errs.Forbidden("不能审批自己提交的部署单")
 		}
 	}
@@ -2142,7 +2151,8 @@ func (s *CDService) ApproveDeployment(ctx context.Context, id uint64, remark str
 	s.audit(ctx, c, auditInput{
 		Module: "CD", Action: "deploy:approve", TargetType: "deployment",
 		TargetID: &id, TargetName: rec.DeployNo,
-		Detail: fmt.Sprintf("审批通过 %s%s", rec.DeployNo, remarkSuffix(remark)),
+		Detail: fmt.Sprintf("审批通过 %s%s%s", rec.DeployNo, remarkSuffix(remark),
+			map[bool]string{true: "（自审：提交人与审批人相同）"}[selfApproved]),
 	})
 	return s.GetDeployment(ctx, id)
 }
