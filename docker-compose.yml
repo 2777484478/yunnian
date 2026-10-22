@@ -56,6 +56,18 @@ services:
       # 这个报错完全看不出是"路径错位"，而是像"仓库里没有 pom.xml"。
       # 同路径挂载之后，两边指向同一份目录，问题消失。
       - ${YUNNIAN_BUILD_BASE:-/opt/yunnian-build}:${YUNNIAN_BUILD_BASE:-/opt/yunnian-build}
+      # 镜像仓库登录态（docker push 用）。
+      #
+      # 为什么必需：构建脚本在**本容器内**执行 `docker push`，它读的是容器自己的
+      # `~/.docker/config.json` —— 在宿主机上 `docker login` 是**另一份**，传不进来。
+      # 没有这份文件时 push 报 `denied: requested access to the resource is denied`，
+      # 而错误看起来像"账号密码错了"，实际是"容器里根本没登录过"。
+      #
+      # 挂成 bind mount 而不是留容器层：容器一重建（改 compose / 升级镜像）就丢。
+      # 宿主上准备：
+      #   mkdir -p /opt/yunnian-docker
+      #   cp /root/.docker/config.json /opt/yunnian-docker/ && chown -R 1000:1000 /opt/yunnian-docker
+      - ${YUNNIAN_DOCKER_CONFIG:-/opt/yunnian-docker}:/home/yunnian/.docker
     # ⚠️ 光挂 socket 不够：docker.sock 是 `srw-rw---- root:docker`，
     # 只有 root 和 docker 组能读写。而容器里以 uid 1000(yunnian) 运行，
     # 不在 docker 组 → 每次构建都报 `permission denied ... docker.sock`。
