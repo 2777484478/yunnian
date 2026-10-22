@@ -1873,7 +1873,7 @@ func (s *CDService) runDeploy(taskCtx context.Context, deployID uint64) {
 		// 在宣布之后才起来。起一个后台观察，真自愈了就把时间记下来 ——
 		// 状态不动，只让页面能标「失败后已就绪」。
 		if code == "ROLLOUT_STUCK" {
-			go s.watchRecoveredAfterFailure(deployID, req.WorkloadRef)
+			go s.watchRecoveredAfterFailure(deployID, req.WorkloadRef, rec.Image, rec.Replicas)
 		}
 		// 服务回到"异常"而不是"部署中"：部署中是个瞬态，留着会让用户以为还在进行。
 		if err := s.db(finCtx).Model(&model.ServiceInstance{}).Where("id = ?", svc.ID).
@@ -1942,9 +1942,12 @@ func (s *CDService) runDeploy(taskCtx context.Context, deployID uint64) {
 //
 // 观察窗口 5 分钟、20 秒一次：足够覆盖"差一点拉完"，又不至于为一个已失败的单
 // 长期占着 goroutine。读不到状态时**继续看**（读不到 ≠ 没好）。
-func (s *CDService) watchRecoveredAfterFailure(deployID uint64, ref integration.WorkloadRef) {
+func (s *CDService) watchRecoveredAfterFailure(deployID uint64, ref integration.WorkloadRef, expectImage string, expectReplicas int) {
 	// 独立 ctx：这个观察与部署任务的生死无关 —— 走到这里时部署 ctx 往往已经超时/取消了。
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	//
+	// 10 分钟而不是 5 分钟：走这条路的场景本身就慢（镜像拉取 / 启动慢），
+	// 平台重启后还要等 operator 重新接管，5 分钟经常不够。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	tick := time.NewTicker(20 * time.Second)
@@ -1956,16 +1959,74 @@ func (s *CDService) watchRecoveredAfterFailure(deployID uint64, ref integration.
 			return
 		case <-tick.C:
 			st, err := s.deps.Up.Cluster.Describe(ctx, ref)
-			if err != nil || st == nil || st.Status != "running" {
+			if err != nil || st == nil || !st.Exists || st.Status != "running" {
 				continue
 			}
+			// ⚠️ 只看 `Status == running` 不够。
+			//
+			// 1 副本 + `maxUnavailable` 向下取整为 0 时，旧 Pod 不会被杀；
+			// 新镜像起不来的情况下集群依然是 running —— 那跑的是**上一版**。
+			// 所以还要确认「跑的就是这次要发的那一版」。
+			//
+			// Image 取自容器 spec，apply 成功就会变成新值，因此它主要防的是
+			// "spec 压根没更新"这种更少见的情形；真正有信息量的是就绪副本数。
+			if expectImage != "" && st.Image != expectImage {
+				continue
+			}
+			if expectReplicas > 0 && st.ReadyReplicas < expectReplicas {
+				continue
+			}
+			fin := now()
 			if err := s.db(ctx).Model(&model.DeployRecord{}).Where("id = ?", deployID).
-				Update("recovered_at", now()).Error; err != nil {
+				Update("recovered_at", fin).Error; err != nil {
 				s.log("cd").Warn("记录部署自愈时间失败", "deployId", deployID, "err", err)
+				return
+			}
+			// 顺手把服务实例从「部署中 / 异常」拉回 running。
+			//
+			// 中断或卡死的部署**不会自己收尾**，这里可能是唯一会把 status 修正回去的地方。
+			// 只在确认新版本真就绪时做，并用 WHERE 限定原状态，
+			// 避免覆盖掉别人（比如刚重发的一单）刚写进去的新状态。
+			var rec model.DeployRecord
+			if err := s.db(ctx).First(&rec, deployID).Error; err == nil && rec.ServiceID != 0 {
+				if err := s.db(ctx).Model(&model.ServiceInstance{}).
+					Where("id = ? AND status IN ?", rec.ServiceID, []string{"deploying", "error"}).
+					Updates(map[string]any{
+						"status":           "running",
+						"ready_replicas":   rec.Replicas,
+						"current_image":    rec.Image,
+						"current_tag":      tagOfImage(rec.Image),
+						"current_image_id": rec.ImageRecID,
+						"last_deploy_id":   rec.ID,
+						"updated_at":       fin,
+					}).Error; err != nil {
+					s.log("cd").Warn("修正服务实例状态失败", "serviceId", rec.ServiceID, "err", err)
+				}
 			}
 			return
 		}
 	}
+}
+
+// watchRecoveredByDeploy 按部署单里的 env/service 反查工作负载，再起恢复观察。
+//
+// 重启后内存里的 `req.WorkloadRef` 早就没了，只能从库里重建：
+// env_id → Environment（集群引用），service_id → ServiceInstance（工作负载名）。
+func (s *CDService) watchRecoveredByDeploy(rec model.DeployRecord) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var env model.Environment
+	if err := s.db(ctx).First(&env, rec.EnvID).Error; err != nil {
+		s.log("cd").Warn("查询环境失败，跳过恢复观察", "deployId", rec.ID, "err", err)
+		return
+	}
+	var svc model.ServiceInstance
+	if err := s.db(ctx).First(&svc, rec.ServiceID).Error; err != nil {
+		s.log("cd").Warn("查询服务实例失败，跳过恢复观察", "deployId", rec.ID, "err", err)
+		return
+	}
+	s.watchRecoveredAfterFailure(rec.ID, workloadRefOf(&env, svc.WorkloadName), rec.Image, rec.Replicas)
 }
 
 func (s *CDService) failDeploy(ctx context.Context, deployID uint64, code, reason string, diag *AIDiagnosisDTO) {
@@ -2299,6 +2360,25 @@ func (s *CDService) ReconcileInterrupted(ctx context.Context) (int64, error) {
 	if err := s.db(ctx).Model(&model.RollbackRecord{}).Where("deploy_id IN ?", ids).
 		Update("status", "interrupted").Error; err != nil {
 		s.log("cd.reconcile").Warn("标记中断的回滚记录失败", "err", err)
+	}
+
+	// 标记完立刻起「事后就绪」观察。
+	//
+	// 被中断的只是**平台侧的观察**，不是集群侧的动作：AppRelease 早已下发，
+	// operator 会继续把它滚完。镜像拉取慢 / 启动慢的场景里，中断的下一秒
+	// 集群可能就已经就绪了 —— 而用户看到的却是「已中断」，会以为要重做一遍。
+	//
+	// 实测（2026-10-22）：`DP202610220004` 被标 interrupted，而
+	// `GET /environments/pre-aliyun/services` 返回 `readyReplicas=1/1`、状态却卡在 deploying。
+	//
+	// ⚠️ 这里起的 goroutine 用**自己的 ctx**（见 watchRecoveredByDeploy），
+	// 不受启动补偿那 20 秒超时的约束 —— 观察窗口本来就是分钟级的。
+	for _, r := range rows {
+		if r.ServiceID == 0 {
+			// 没有服务实例就没有工作负载可查，起观察只会空转。
+			continue
+		}
+		go s.watchRecoveredByDeploy(r)
 	}
 
 	// 最后才告警：库先写对，再发通知。

@@ -141,7 +141,10 @@ type DeployRecord struct {
 	ApprovedAt   *time.Time `json:"-"`
 	RejectReason string     `gorm:"size:512" json:"-"`
 	ParentDeploy *uint64    `gorm:"column:parent_deploy_id" json:"-"`
-	// RecoveredAt 判失败**之后**集群自己就绪了的时间（只有 ROLLOUT_STUCK 会填）。
+	// RecoveredAt 判终态**之后**集群自己就绪了的时间。
+	//
+	// 两种终态会填：`failed`（ROLLOUT_STUCK，即进度截止时间到了但 Pod 后来才起来）
+	// 和 `interrupted`（平台重启打断了观察，而集群侧其实继续滚完了 —— 2026-10-22 补）。
 	//
 	// 为什么要有它：K8s 在 progressDeadlineSeconds 到点就宣布 rollout 卡死，
 	// 而"镜像拉得慢"的场景里 Pod 常常在宣布**之后**才拉完并起来 ——
