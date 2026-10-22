@@ -141,10 +141,23 @@ echo "===== [4/6] 编译（在编译容器里跑，构建机不用装 JDK/Maven�
 #    daemon 会在**宿主**上找这个路径；临时工作目录那种每次都变的路径它会找不到，
 #    报的错还和"目录不存在"毫不相干。
 # 容器用完即删（--rm），但**镜像不删** —— 下次继续用同一个 maven 镜像编译别的代码。
+# ⚠️ `--user $(id -u):$(id -g)` 不能省 —— 否则会埋一个"下一轮才炸"的雷：
+#    编译容器默认以 root 运行，它跑 mvn 生成的 `target/` 全部属于 root；
+#    而下一轮构建由 uid 1000 执行 `git clean -xfd` 清理工作区，
+#    **删不掉 root 的文件** → 满屏 `warning: failed to remove .../target/*.jar:
+#    Permission denied`，最终这个 warning 被当成失败原因报出来。
+#    也就是说：第一次构建可能"看起来成功"，失败出现在**第二次**，
+#    因果隔了一轮，非常难查。让两边 uid 一致，从根上消除。
+#
+# 但 `--user` 之后容器内就不是 root 了，`/root/.m2` 写不进去 —— 所以 HOME 改到 /tmp，
+# 并把 m2 缓存挂到 `/tmp/.m2/repository`（maven 读 $HOME/.m2）。
+# /tmp 在容器内一定可写，不受镜像里有没有这个 uid 影响。
 docker run --rm \
   --platform "$YUNNIAN_PLATFORM" \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp \
   -v "$CODE_DIR":/src -w /src \
-  -v "$M2_DIR":/root/.m2/repository \
+  -v "$M2_DIR":/tmp/.m2/repository \
   "$BUILD_IMAGE" \
   sh -c "$BUILD_CMD"
 
