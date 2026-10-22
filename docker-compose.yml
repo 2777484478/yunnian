@@ -43,6 +43,16 @@ services:
       - yunnian-data:/app/data
       # 让容器内的 docker CLI 能调用宿主机的 daemon
       - /var/run/docker.sock:/var/run/docker.sock
+    # ⚠️ 光挂 socket 不够：docker.sock 是 `srw-rw---- root:docker`，
+    # 只有 root 和 docker 组能读写。而容器里以 uid 1000(yunnian) 运行，
+    # 不在 docker 组 → 每次构建都报 `permission denied ... docker.sock`。
+    #
+    # 这里把宿主 docker 组的 GID 补给容器进程。**GID 因系统而异**
+    # （Ubuntu 常见 999/998、CentOS 994），用前先确认：
+    #   stat -c %g /var/run/docker.sock
+    # 然后写进 .env：DOCKER_GID=994
+    group_add:
+      - "${DOCKER_GID:-994}"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 15s
