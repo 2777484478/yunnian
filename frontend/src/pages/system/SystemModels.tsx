@@ -659,7 +659,19 @@ const SystemModels: React.FC = () => {
                     <Tooltip title={p.isDefault ? '已是平台默认通道' : '设为平台默认通道'}>
                       <Button
                         size="small"
-                        icon={p.isDefault ? <StarFilled /> : <StarOutlined />}
+                        /**
+                         * ⚠️ 星标要显式给颜色。默认它继承按钮文字色（#00000073），
+                         * 而"已是默认"时按钮又是 disabled 状态（更淡到 0.25 透明度），
+                         * 结果就是「平台默认」这个最重要的状态反而最看不见。
+                         * 内联 style 的优先级高于 disabled 态色，所以颜色能保住。
+                         */
+                        icon={
+                          p.isDefault ? (
+                            <StarFilled style={{ color: '#1677ff' }} />
+                          ) : (
+                            <StarOutlined />
+                          )
+                        }
                         disabled={!canWrite || p.isDefault}
                         onClick={() => setDefault(p)}
                       />

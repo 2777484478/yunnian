@@ -288,12 +288,32 @@ const ClusterAccess: React.FC = () => {
     {
       title: 'K8s 版本',
       dataIndex: 'k8sVersion',
-      width: 108,
+      /**
+       * ⚠️ 宽度要装得下真实版本号。
+       * 云厂商的版本串很长（如 `v1.31.9-aliyun.1` 19 个字符），
+       * 原来 108px 装不下，<Tag> 又默认 nowrap，就直接溢出到右边「节点」列上，
+       * 出现「v1.31.9-aliyun.1 和 1/1 就绪 叠在一起」的观感。
+       *
+       * 两手一起：列宽放到 152，同时给 Tag 加截断兜底 ——
+       * 万一以后有更长的版本串（比如 `-eks-1.2.3` 之类），
+       * 截断 + hover 看全文，好过压到隔壁列。
+       */
+      width: 152,
       render: (v: string) =>
         v ? (
-          <Tag className="yn-mono" style={{ marginInlineEnd: 0 }}>
-            {v}
-          </Tag>
+          <Tooltip title={v}>
+            <Tag
+              className="yn-mono"
+              style={{
+                marginInlineEnd: 0,
+                maxWidth: '100%',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {v}
+            </Tag>
+          </Tooltip>
         ) : (
           <Text type="secondary">{DASH}</Text>
         ),
