@@ -148,14 +148,25 @@ ConfigMap、以及可直接执行的 `kubectl` 命令。
 git clone https://github.com/2777484478/yunnian.git
 cd yunnian
 
-# 三个密钥必须先生成 —— 没有默认值，缺一个就起不来
-export YUNNIAN_JWT_SECRET="$(openssl rand -base64 48)"
-export YUNNIAN_MASTER_KEY="$(openssl rand -base64 32)"
-export MYSQL_ROOT_PASSWORD="$(openssl rand -base64 24)"
+# ① 生成 .env —— 三个密钥没有默认值，缺一个就起不来
+cat > .env <<EOF
+YUNNIAN_JWT_SECRET=$(openssl rand -base64 48)
+YUNNIAN_MASTER_KEY=$(openssl rand -base64 32)
+MYSQL_ROOT_PASSWORD=$(openssl rand -base64 24)
+MYSQL_PASSWORD=changeme
+YUNNIAN_PORT=8080
+EOF
+chmod 600 .env
 
+# ② 起服务（compose 会自动读同目录的 .env）
 docker compose up -d --build
 docker compose logs -f app
 ```
+
+> 💡 **为什么用 `.env` 而不是 `export`**：`export` 只在当前 shell 会话里有效 ——
+> 关掉终端、重开机、换个会话再 `docker compose up` 时变量就没了，
+> 而 `docker-compose.yml` 里写的是 `${YUNNIAN_MASTER_KEY:?必须设置}`，会直接拒绝启动。
+> 落成文件一次就好，重启不用再 export 一遍。
 
 等 `app` 变成 `healthy`，浏览器打开 `http://<服务器IP>:8080`。
 
@@ -172,8 +183,19 @@ docker compose logs -f app
 > （会额外写入 20 个示例项目、5 个环境、若干构建/部署记录，以及 `ops` / `guest` 和 20 个开发账号，
 > 密码同样都是 `changeme`）。
 
-> ⚠️ 密钥**不要写进 `docker-compose.yml` 并提交**。放在宿主的 `.env` 里更省事：
-> `cp .env.example .env` → 填好 → `docker compose up -d`（compose 会自动读同目录的 `.env`）。
+> ⚠️ **`.env` 不要提交到仓库**（`.gitignore` 已包含），密钥也不要写进 `docker-compose.yml`。
+
+> 📌 **只想临时跑一下**（不落文件）：也可以直接 `export`，但**仅对当前终端有效**——
+>
+> ```bash
+> export YUNNIAN_JWT_SECRET="$(openssl rand -base64 48)"
+> export YUNNIAN_MASTER_KEY="$(openssl rand -base64 32)"
+> export MYSQL_ROOT_PASSWORD="$(openssl rand -base64 24)"
+> docker compose up -d --build
+> ```
+>
+> 代价是：**关掉终端后再 `docker compose up` 会报"必须设置"**，得重新 export。
+> 长期部署请用上面的 `.env`。
 
 > ⚠️ `app` 容器挂载了宿主机的 `/var/run/docker.sock` —— 平台的"自建构建"就是靠它调用宿主机的 docker daemon。**这等于把宿主机的 root 权限交给了平台容器**，请只在可信环境这么做。
 
