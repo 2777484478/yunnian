@@ -41,9 +41,20 @@ docker run --rm \
   sh -c "$BUILD_CMD"
 
 echo "===== [4/5] 打包镜像 ====="
-# `--provenance=false` 不能删，理由见后端模板同一行的注释（BuildKit 的
+# `--provenance=false` 不能删，理由见后端模板同一行的长注释（BuildKit 的
 # attestation 会让产物变成 manifest list，推到 Harbor 报 manifest invalid）。
-docker build --platform "$YUNNIAN_PLATFORM" --provenance=false -f "$DOCKERFILE" -t "$YUNNIAN_IMAGE" .
+#
+# 但**只在 buildx 可用时才给**：buildx 是插件不是内建命令，精简环境里可能没有，
+# 那时 docker build 会退回 legacy builder，而 legacy 不认这个参数，
+# 直接报 `unknown flag: --provenance` 把构建打断。
+PROVENANCE_FLAG=""
+if docker buildx version >/dev/null 2>&1; then
+  PROVENANCE_FLAG="--provenance=false"
+else
+  echo "（当前环境没有 buildx 插件，docker build 将使用 legacy builder；已跳过 --provenance）"
+fi
+# $PROVENANCE_FLAG 故意不加引号：为空时要完全消失，而不是传一个空参数。
+docker build --platform "$YUNNIAN_PLATFORM" $PROVENANCE_FLAG -f "$DOCKERFILE" -t "$YUNNIAN_IMAGE" .
 
 echo "===== [5/5] 推送镜像 ====="
 docker push "$YUNNIAN_IMAGE"

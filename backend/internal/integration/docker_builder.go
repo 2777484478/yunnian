@@ -299,7 +299,17 @@ func (b *DockerBuilder) Build(ctx context.Context, req BuildRequest, sink func(l
 	// `--provenance=false`：BuildKit 默认会给镜像挂上 attestation，于是推上去的是一个
 	// **manifest list**（含一个 unknown/unknown 平台条目）。单架构镜像变成列表本身无害，
 	// 但 Harbor 界面会多出莫名条目、部分老 kubelet 会挑不到平台。这里关掉，保持朴素单架构。
-	buildArgs = append(buildArgs, "--provenance=false")
+	//
+	// ⚠️ 但**只有 buildx 可用时才能给这个参数**：buildx 是 docker 的插件，不是内建命令，
+	// 精简的运行环境里可能只有 docker 二进制、没有 cli-plugins 目录。此时 `docker build`
+	// 会静默退回 legacy builder，而 legacy 不认 `--provenance`，直接报
+	// `unknown flag: --provenance` + `See 'docker build --help'` —— 报错完全看不出是
+	// "构建器选错了"。legacy 本来也不生成 attestation，所以不带它同样安全。
+	if b.hasBuildx(ctx) {
+		buildArgs = append(buildArgs, "--provenance=false")
+	} else if err := sink("cmd", "（当前环境没有 buildx 插件，docker build 将使用 legacy builder；已跳过 --provenance）"); err != nil {
+		return nil, err
+	}
 	buildArgs = append(buildArgs, ctxDir)
 	if err := stage("打包镜像", ErrCodeDockerBuild, Cmd{Dir: ws, Name: "docker", Args: buildArgs}); err != nil {
 		return nil, err
@@ -401,6 +411,23 @@ func (b *DockerBuilder) resolveDockerfile(req BuildRequest, ws string) (dockerfi
 }
 
 // capture 跑一条"只想知道结果、不关心输出"的命令。
+// hasBuildx 判断 docker CLI 是否带 buildx 插件。
+//
+// 为什么需要判断：`buildx` 不是 docker 的内建子命令，而是一个 CLI 插件
+// （装在 `cli-plugins/docker-buildx`）。容器化的运行环境里常常只拷了 docker
+// 二进制、没带插件目录，于是 `docker build` 悄悄退回 legacy builder。
+// 而 legacy 不认识 `--provenance` 这类 BuildKit 专属参数，一句
+// `unknown flag` 就把整个构建打断，且报错指向的是参数而不是"构建器"。
+//
+// 探测本身很便宜（一次本地子进程），失败一律当作"没有 buildx"处理。
+func (b *DockerBuilder) hasBuildx(ctx context.Context) bool {
+	if b.run == nil {
+		return false
+	}
+	_, err := b.capture(ctx, Cmd{Name: "docker", Args: []string{"buildx", "version"}})
+	return err == nil
+}
+
 func (b *DockerBuilder) capture(ctx context.Context, c Cmd) (string, error) {
 	var sb strings.Builder
 	err := b.run(ctx, c, func(_, line string) error {

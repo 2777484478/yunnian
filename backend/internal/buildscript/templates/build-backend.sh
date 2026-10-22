@@ -188,12 +188,33 @@ echo "--- 本次使用的 Dockerfile ---"
 cat "$CTX/Dockerfile"
 echo "-----------------------------"
 
-# ⚠️ `--provenance=false` 不能删。BuildKit 默认会给镜像挂上 attestation，
-# 于是产出的其实是一个 **manifest list**（多出一个 unknown/unknown 平台条目）。
-# 本地看不出任何异常，但 `docker push` 到老一些的 registry（含 Harbor）会直接
-# 报 `error from registry: manifest invalid` —— 失败点离原因很远，很难查。
-# 平台自己的「自带 Dockerfile」构建路径同样带着这个参数。
-docker build --platform "$YUNNIAN_PLATFORM" --provenance=false -f "$CTX/Dockerfile" -t "$YUNNIAN_IMAGE" "$CTX"
+# ⚠️ `--provenance=false` 不能删 —— **但只在 BuildKit 可用时才给**。
+#
+# 两个事实叠在一起，才让这里必须判断：
+#   ① BuildKit 默认给镜像挂 attestation，产出实际是 **manifest list**
+#      （多一个 unknown/unknown 平台条目）。本地看不出异常，但 push 到老一些的
+#      registry（含 Harbor）会直接报 `error from registry: manifest invalid`，
+#      失败点离原因很远。所以要 `--provenance=false`。
+#   ② **legacy builder 不认识这个参数**，会报 `unknown flag: --provenance`
+#      然后整个构建失败，报错还带着一句 `See 'docker build --help'` ——
+#      完全看不出是"构建器选错了"。
+#
+# 什么时候会掉进 ②：`buildx` 是 docker 的**插件**，不是 CLI 自带命令。
+# 平台在容器里跑脚本，容器里只有 docker 二进制、没有 cli-plugins 目录，
+# 于是 `docker build` 静默退回 legacy builder（还会打一行 DEPRECATED 提示）。
+# 这时 `--provenance` 就成了致命参数。
+#
+# 所以先探测：有 buildx 才带；没有就不带 —— legacy builder 本来也不生成
+# attestation，不需要这个参数，产出的就是单 manifest，registry 能正常接收。
+PROVENANCE_FLAG=""
+if docker buildx version >/dev/null 2>&1; then
+  PROVENANCE_FLAG="--provenance=false"
+else
+  echo "（当前环境没有 buildx 插件，docker build 将使用 legacy builder；已跳过 --provenance）"
+fi
+
+# 注意 $PROVENANCE_FLAG 故意不加引号：为空时要完全消失，而不是传一个空参数。
+docker build --platform "$YUNNIAN_PLATFORM" $PROVENANCE_FLAG -f "$CTX/Dockerfile" -t "$YUNNIAN_IMAGE" "$CTX"
 
 echo "===== [6/6] 推送镜像 ====="
 docker push "$YUNNIAN_IMAGE"
