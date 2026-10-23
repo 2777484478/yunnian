@@ -37,6 +37,7 @@ import {
   MoreOutlined,
   ReloadOutlined,
   RollbackOutlined,
+  SearchOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
   SwapOutlined,
@@ -1210,6 +1211,27 @@ const EnvironmentDetail: React.FC = () => {
   const activeTab = searchParams.get('tab') ?? 'services';
   const setTab = (t: string) => setSearchParams({ tab: t });
 
+  // 服务列表的关键字搜索：**纯前端过滤**。
+  //
+  // 为什么不走后端已有的 `keyword` 参数（`GET /environments/{key}/services?keyword=`）：
+  //   ① 这个接口是**一次性全量返回**的（不分页），数据本来就在内存里，
+  //      本地过滤零延迟，还能立刻给出"筛出几个"；
+  //   ② 后端那次查询会连带重读集群实时状态（liveStates：4 秒超时、并发 6 个
+  //      Describe），**每敲一个字就发一次请求** = 输入卡顿 + 把集群 API 打满。
+  //
+  // 匹配三个字段而不是只匹配项目名：排查时更常见的诉求是"哪个服务跑着某个版本"，
+  // 所以 tag 也要能搜。
+  const [svcKw, setSvcKw] = useState('');
+  const shownServices = useMemo(() => {
+    const kw = svcKw.trim().toLowerCase();
+    if (!kw) return services;
+    return services.filter((s) =>
+      `${s.projectKey ?? ''} ${s.projectName ?? ''} ${s.tag ?? ''}`
+        .toLowerCase()
+        .includes(kw),
+    );
+  }, [services, svcKw]);
+
   // 环境本身加载失败 / 不存在：给出可操作的空态，而不是白屏
   if (!envApi.loading && !env && envApi.error) {
     return (
@@ -1567,14 +1589,49 @@ const EnvironmentDetail: React.FC = () => {
             items={[
               {
                 key: 'services',
-                label: `服务列表 ${services.length}`,
+                // 有筛选时显示「3/15」：只说 3 会让人以为服务变少了，
+                // 只说 15 又看不出筛选生效了。
+                label:
+                  svcKw.trim() && shownServices.length !== services.length
+                    ? `服务列表 ${shownServices.length}/${services.length}`
+                    : `服务列表 ${services.length}`,
                 children: (
                   <SectionCard bodyStyle={{ padding: 0 }}>
+                    {/* 搜索栏。只在服务列表这一栏出现 —— 部署历史/回滚记录各有各的
+                        语义，共用一个关键字框会让人以为搜的是全页。 */}
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 12,
+                        padding: '12px 16px',
+                        borderBottom: '1px solid var(--yn-border)',
+                      }}
+                    >
+                      <Input
+                        allowClear
+                        value={svcKw}
+                        onChange={(e) => setSvcKw(e.target.value)}
+                        placeholder="搜索项目 / 服务 / 镜像标签（如 aio-mcp 或 2.2.0.1023）"
+                        prefix={<SearchOutlined style={{ color: '#b5bac4' }} />}
+                        style={{ maxWidth: 380 }}
+                      />
+                      <span style={{ fontSize: 12, color: '#9aa0aa' }}>
+                        {svcKw.trim()
+                          ? `筛出 ${shownServices.length} / ${services.length} 个服务`
+                          : `共 ${services.length} 个服务`}
+                      </span>
+                      {svcKw.trim() ? (
+                        <Button type="link" size="small" onClick={() => setSvcKw('')}>
+                          清除
+                        </Button>
+                      ) : null}
+                    </div>
                     <Table<EnvService>
                       rowKey="id"
                       size="middle"
                       loading={servicesApi.loading}
-                      dataSource={services}
+                      dataSource={shownServices}
                       columns={serviceColumns}
                       scroll={{ x: 1120 }}
                       expandable={{
