@@ -401,6 +401,15 @@ export interface ServiceLive {
   /** 真的有用量数据的 Pod 数 / 匹配到的 Pod 总数（刚起的 Pod 要等几十秒才有数据） */
   usagePods?: number;
   usagePodTotal?: number;
+  /**
+   * 该服务名下所有 Pod 的容器重启次数**之和**（kubectl 的 RESTARTS 列）。
+   *
+   * 与 `metricsAvailable` 无关：这是 Pod 对象自带的字段，
+   * 没装 metrics-server 时也有值 —— 而那时它恰恰是最该看的东西。
+   */
+  restarts?: number;
+  /** 最新 Pod 的创建时间（RFC3339）。空 = 没有 Pod。口径是**实例**年龄，不是 Deployment 的。 */
+  podStartedAt?: string;
   message: string;
 }
 

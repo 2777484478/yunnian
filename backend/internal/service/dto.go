@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -395,6 +396,14 @@ type ServiceLiveDTO struct {
 	// 或凭据无权读。此时 CPUUsage/MemUsage 为空串、两个百分比为 -1，界面显示 "—"。
 	// **绝不能显示成 0** —— 那会被读成"这个服务几乎不占资源"，与事实正好相反。
 	MetricsAvailable bool `json:"metricsAvailable"`
+	// Restarts 名下所有 Pod 的容器重启次数之和（kubectl 的 RESTARTS 列）。
+	//
+	// 与 MetricsAvailable 无关：没装 metrics-server 也要有值。
+	Restarts int `json:"restarts"`
+	// PodStartedAt 最新 Pod 的创建时间（RFC3339）。空串 = 没有 Pod 可查。
+	//
+	// 名字带 Pod 前缀是为了说清口径：这是**实例**的年龄，不是 Deployment 的。
+	PodStartedAt string `json:"podStartedAt"`
 	// CPUUsage / MemUsage 该工作负载名下所有 Pod 的**合计**用量（CPU 毫核、内存 Mi/Gi）。
 	CPUUsage string `json:"cpuUsage"`
 	MemUsage string `json:"memUsage"`
@@ -467,6 +476,13 @@ func liveOf(state *integration.WorkloadState, usage integration.WorkloadUsage, e
 //
 // 用量与百分比**必须一起定**，不能各写各的：百分比要有"基准"，基准就是容器声明的 limit。
 func applyUsage(d *ServiceLiveDTO, u integration.WorkloadUsage, cpuReq, cpuLimit, memReq, memLimit string) {
+	// ⚠️ 这两项要在 Available 判断**之前**填：RESTARTS / AGE 来自 Pod 对象本身，
+	// 跟 metrics-server 在不在无关。放在后面会让"没装 metrics"连带把重启次数也吞掉 ——
+	// 而重启恰恰是那时候最该看见的东西。
+	d.Restarts = u.Restarts
+	if !u.NewestPodAt.IsZero() {
+		d.PodStartedAt = u.NewestPodAt.Format(time.RFC3339)
+	}
 	if !u.Available {
 		// 没读到：留空 + -1，界面显示 "—"。**不填 0**。
 		d.CPUUsagePercent, d.MemUsagePercent = -1, -1

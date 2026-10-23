@@ -743,6 +743,15 @@ func aggregateUsage(
 						continue
 					}
 					u.Pods++
+					// 重启次数与 Pod 年龄都不来自 metrics，所以放在
+					// `usage` 命中判断**之外** —— 没装 metrics-server 时
+					// 这两个数字仍然应该看得见。
+					for _, cs := range p.Status.ContainerStatuses {
+						u.Restarts += int(cs.RestartCount)
+					}
+					if p.CreationTimestamp.Time.After(u.NewestPodAt) {
+						u.NewestPodAt = p.CreationTimestamp.Time
+					}
 					if e, ok := usage[p.Name]; ok {
 						u.UsagePods++
 						u.CPUMilli += e.cpuMilli

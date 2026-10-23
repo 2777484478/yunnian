@@ -73,7 +73,7 @@ import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { useApi } from '@/hooks/useApi';
 import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
 import { useLogStream } from '@/hooks/useLogStream';
-import { cores, gib, humanDuration, pad2 } from '@/utils/format';
+import { cores, gib, humanDuration, k8sAge, pad2 } from '@/utils/format';
 import type {
   DeployRecord,
   DeployVersion,
@@ -1040,6 +1040,51 @@ const EnvironmentDetail: React.FC = () => {
       },
     },
     {
+      // RESTARTS —— kubectl get pods 那一列。
+      //
+      // 单独成列而不是塞进 tooltip：`重启 > 0` 是 CrashLoopBackOff / OOMKilled
+      // 最直接的信号，而**状态列的「运行中」在容器反复重启时照样显示运行中**
+      // （kubectl 也一样）—— 不单列出来就完全看不见。
+      title: '重启',
+      key: 'restarts',
+      width: 72,
+      render: (_, r) => {
+        const lv = liveState(r);
+        if (!lv) return <Text type="secondary">—</Text>;
+        const n = lv.restarts ?? 0;
+        return (
+          <Tooltip title={n > 0 ? '容器重启过：查日志确认是崩溃还是被 OOM' : '自 Pod 启动以来未重启'}>
+            <span
+              style={{
+                color: n > 0 ? '#cf1322' : undefined,
+                fontWeight: n > 0 ? 600 : undefined,
+              }}
+            >
+              {n}
+            </span>
+          </Tooltip>
+        );
+      },
+    },
+    {
+      // AGE —— 取**最新 Pod** 的创建时间。
+      //
+      // 不用 Deployment 的创建时间：滚动更新之后，"当前这版实例起来多久了"
+      // 才是排查时想知道的那个数。tooltip 里把口径写清楚。
+      title: '运行时长',
+      key: 'age',
+      width: 96,
+      render: (_, r) => {
+        const lv = liveState(r);
+        if (!lv || !lv.podStartedAt) return <Text type="secondary">—</Text>;
+        return (
+          <Tooltip title={`最新 Pod 启动于 ${lv.podStartedAt}`}>
+            <span>{k8sAge(lv.podStartedAt)}</span>
+          </Tooltip>
+        );
+      },
+    },
+    {
       // 名字里必须带「声明」：这一列是容器**声明的规格**（request / limit），
       // 与旁边「负载（实时）」是两回事。平台曾经把声明值当用量展示过 ——
       // 那种错不会报错，只会让人对着一个"看着很正常"的数字下错结论。
@@ -1633,7 +1678,7 @@ const EnvironmentDetail: React.FC = () => {
                       loading={servicesApi.loading}
                       dataSource={shownServices}
                       columns={serviceColumns}
-                      scroll={{ x: 1120 }}
+                      scroll={{ x: 1290 }}
                       expandable={{
                         expandedRowRender: (r) => {
                           const lv = liveState(r);

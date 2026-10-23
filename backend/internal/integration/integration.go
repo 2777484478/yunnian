@@ -175,6 +175,22 @@ type WorkloadUsage struct {
 	// false 时上面的数值恒为 0 —— 那是"没读到"，不是"用量为 0"，界面显示 "—"。
 	// 与 ClusterState.MetricsAvailable 同一口径。
 	Available bool `json:"available"`
+
+	// Restarts 该工作负载名下**所有 Pod 的容器重启次数之和**。
+	//
+	// 取自 `Pod.Status.ContainerStatuses[].RestartCount`，**与 metrics 无关** ——
+	// 所以 Available=false 时它依然有值（没装 metrics-server 也该看得见重启）。
+	//
+	// 为什么值得单列：`RESTARTS > 0` 是 CrashLoopBackOff / OOMKilled 最直接的信号，
+	// 而状态列的 `Running` 在容器反复重启时**照样显示 Running**（kubectl 也一样）。
+	Restarts int `json:"restarts"`
+
+	// NewestPodAt 最新一个 Pod 的创建时间。
+	//
+	// 取"最新"而不是"最早"或 Deployment 的创建时间：滚动更新之后，
+	// 当前版本的实例就是最新那批 Pod —— 这个数字回答的是
+	// "现在跑着的这一版起来多久了"。零值表示没匹配到 Pod。
+	NewestPodAt time.Time `json:"-"`
 }
 
 // ApplyRequest 一次镜像更新请求。

@@ -53,6 +53,27 @@ export function humanDuration(sec: number | null | undefined): string {
   return s ? `${m}m${s}s` : `${m}m`;
 }
 
+/**
+ * 时间戳 → kubectl 口径的年龄（`45s` / `12m` / `7h58m` / `11d` / `49d`）。
+ *
+ * 为什么不复用 `humanDuration`：那个是给"部署耗时"用的，只到分钟级
+ * （`720m`），而 Pod 的年龄动辄几十天，`4320m` 没法看。
+ *
+ * 分档刻意跟 `kubectl get pods` 的 AGE 一致，用户不用在两种口径间换算。
+ */
+export function k8sAge(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '—';
+  const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h${min % 60}m`;
+  return `${Math.floor(h / 24)}d`;
+}
+
 /** 字节 → 人类可读（镜像体积展示用） */
 export function humanSize(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return '-';
