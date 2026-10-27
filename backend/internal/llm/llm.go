@@ -150,6 +150,9 @@ type chatRequest struct {
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Temperature float64   `json:"temperature,omitempty"`
 	Tools       []Tool    `json:"tools,omitempty"`
+	// ToolChoice 只在需要时下发（空则完全不出现在请求体里）。
+	// "required" = 强制模型这一轮必须发起工具调用。
+	ToolChoice string `json:"tool_choice,omitempty"`
 }
 
 type chatResponse struct {
@@ -251,6 +254,21 @@ type Step struct {
 func (c *Client) ChatStreamStep(
 	ctx context.Context, msgs []Message, tools []Tool, onDelta func(string) error,
 ) (Step, error) {
+	return c.ChatStreamStepWithChoice(ctx, msgs, tools, "", onDelta)
+}
+
+// ChatStreamStepWithChoice 与 ChatStreamStep 相同，但可以指定 tool_choice。
+//
+// 为什么保留原方法：绝大多数调用点不需要强制调用工具，签名里多一个恒空的参数
+// 只会让每个调用点都要想一下"这里该填什么"。
+//
+// toolChoice 传 "required" 的意义：让模型这一轮**必须**发起工具调用。
+// 用来兜住"模型把工具调用过程写进正文、然后编数据"这类行为 —— 
+// 提示词约束只能降低概率，tool_choice 是机制层面的保证。
+// 传空串则与原来完全一致（请求体里不会出现 tool_choice 字段）。
+func (c *Client) ChatStreamStepWithChoice(
+	ctx context.Context, msgs []Message, tools []Tool, toolChoice string, onDelta func(string) error,
+) (Step, error) {
 	var step Step
 	body, err := json.Marshal(chatRequest{
 		Model:       c.modelName(),
@@ -259,6 +277,7 @@ func (c *Client) ChatStreamStep(
 		MaxTokens:   c.cfg.MaxTokens,
 		Temperature: c.cfg.Temperature,
 		Tools:       tools,
+		ToolChoice:  toolChoice,
 	})
 	if err != nil {
 		return step, err

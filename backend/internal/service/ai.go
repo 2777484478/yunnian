@@ -142,7 +142,9 @@ func (a *AIService) Prepare(ctx context.Context, in ChatInput, c Caller) (*ChatS
 			Role: "system",
 			Content: "以下是平台**此刻**的只读事实快照（发起本次提问时查询所得）。" +
 				"它比上文历史里的任何结论都新，两者冲突时以它为准。" +
-				"它只是**起点**：快照里没有的数据去调工具查，不要因为快照里没有就说「查不到」。\n" +
+				"它只是**起点**：快照里没有的数据去调工具查，不要因为快照里没有就说「查不到」。" +
+				"注意：上文历史里你自己回答过的具体版本号 / 镜像 / 副本数，可能已经过期或当时未经验证，" +
+				"不能当作本轮的事实来源。\n" +
 				strings.Join(facts, "\n"),
 		})
 	}
@@ -184,14 +186,44 @@ func (a *AIService) Run(
 	}
 
 	total := 0
+	// forceAuto 一旦置位就退回"不强制"的模式（见下面的降级分支）。
+	forceAuto := false
 	for round := 0; round < aiMaxToolRounds; round++ {
-		step, err := sess.client.ChatStreamStep(ctx, sess.messages, sess.tools, emit)
+		// **首轮强制调用工具**（tool_choice=required）。
+		//
+		// 为什么需要机制层的保证，而不是只靠提示词：
+		// 实测（2026-10-27）同一条提问，新会话里模型乖乖调了 list_env_services；
+		// 而在有 24 条历史的老会话里，它把「我先用 get_service_status 查询」写成了正文，
+		// 然后编了一个不存在的镜像地址（registry.cn-hangzhou.aliyuncs.com/xxx/...）。
+		// 历史回放只带正文、不带 tool_calls（见 loadHistory），模型从历史里学到的
+		// 模式就是"直接作答"，提示词压不住。tool_choice 能。
+		//
+		// 只强制**第一轮**：拿到工具结果之后的轮次必须允许它收尾作答，
+		// 否则会一直要工具、永远不给出答案。
+		choice := ""
+		if round == 0 && len(sess.tools) > 0 && !forceAuto {
+			choice = "required"
+		}
+		step, err := sess.client.ChatStreamStepWithChoice(ctx, sess.messages, sess.tools, choice, emit)
+		if err != nil && choice == "required" {
+			// 部分兼容实现不认 tool_choice，直接 400。
+			// 这个增强不能把整个助手搞挂 —— 退回自动再试一次，并留日志。
+			forceAuto = true
+			a.log("ai").Warn("通道不接受 tool_choice=required，已退回自动模式",
+				"model", sess.model, "err", err)
+			step, err = sess.client.ChatStreamStep(ctx, sess.messages, sess.tools, emit)
+		}
 		total += step.Usage.TotalTokens
 		if err != nil {
 			return text.String(), total, upstreamError(err, "模型通道 %s 调用失败", sess.model)
 		}
 		if len(step.ToolCalls) == 0 {
 			// 没有工具调用 = 这一轮就是最终答复，正文已经流完了。
+			if choice == "required" {
+				// 参数被收下却没照做（少数实现会静默忽略）。不重试：
+				// 重试只会再拿一次同样的结果，把等待时间翻倍。
+				a.log("ai").Warn("已要求必须调用工具，但模型仍未发起调用", "model", sess.model)
+			}
 			return text.String(), total, nil
 		}
 
@@ -269,7 +301,17 @@ const aiSystemPrompt = `你是 YunNian 云辇平台的运维助手，服务于�
 7. 关于故障：按「现象 → 依据（引用具体的 Pod 状态 / 事件 / 日志行）→ 建议排查动作」组织，
    建议要具体到可执行的一步。证据不足时说清楚还缺什么，不要编造原因。
 8. 若用户明显想做变更操作（发布、回滚、扩容），说明平台里对应的入口，并提醒需要相应权限。
-9. 回答用中文，分点陈述，不要长篇铺垫。`
+9. 回答用中文，分点陈述，不要长篇铺垫。
+10. **绝不把工具调用写进正文。** 需要数据就直接发起工具调用；
+    正文里出现「我先用 get_service_status 查询一下」「查询结果如下」「执行第一步」这类
+    **描述调用过程或伪造结果**的句子，等于在编 —— 真实数据只能来自工具返回。
+    你拿不到工具返回值时，如实说「需要查一下」，而不是编一个值。
+11. **历史对话里你自己说过的版本号 / 镜像地址 / 副本数 / 部署单号可能已过期**，
+    那是当时的事实，不是现在的。本轮问到的具体状态，必须重新调工具确认，
+    不要拿历史里的数字直接回答 —— 这包括你自己上一轮说过的话。
+12. 工具返回里若带 linked=false，表示该服务**没有纳管到该环境**，
+    数据是用 project_key 当工作负载名直查集群得到的。
+    此时「存在」意味着集群里有、但平台不跟踪它（可能手工部署），要原样说明。`
 
 // collectFacts 采集起始只读事实。
 //

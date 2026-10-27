@@ -367,12 +367,16 @@ const AiAssistant: React.FC = () => {
    *
    * 不用 antd 的 onPressEnter：它内部只判 keyCode===13，组词中的回车照样触发。
    */
-  const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const onInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== 'Enter') return;
     const native = e.nativeEvent as KeyboardEvent & { keyCode?: number };
     // 三道判据缺一不可：自维护的组词态、浏览器自报的组词态、以及老浏览器
     // 在组词期一律给 229 的约定。任一命中就当成"正在选字"，不发送。
     if (composingRef.current || native.isComposing || native.keyCode === 229) return;
+    // **Shift+Enter 换行。** 输入框现在是多行的，必须留一个"换行不发送"的出口，
+    // 否则用户想写一段多行的排查描述时，每次回车都会把半句话发出去。
+    // 不拦、也不 preventDefault，交给 textarea 的默认行为插入换行符。
+    if (e.shiftKey) return;
     e.preventDefault();
     if (!streaming) ask(input);
   };
@@ -709,13 +713,25 @@ const AiAssistant: React.FC = () => {
               </span>
             ))}
           </div>
-          <Space.Compact style={{ width: '100%' }}>
-            <Input
+          {/* 这里刻意**不用** Space.Compact：它的子元素是等高拉伸的，
+              输入框长高时按钮会被一起拉成一条竖块。普通 flex + flex-end
+              让按钮固定在底部，长文本往上长。 */}
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, width: '100%' }}>
+            <Input.TextArea
               size="large"
-              placeholder="例如：帮我看看测试区192 demouser 服务现在什么状态"
+              placeholder="例如：帮我看看测试区192 demouser 服务现在什么状态（Shift+Enter 换行）"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onInputKeyDown}
+              // 按内容自动长高，1~8 行；超过 8 行内部滚动。
+              // 之前是单行 Input（底层 <input>），天生不会换行也不会撑高 ——
+              // 输入长文本只能横向滚动，看不到自己写了什么。
+              autoSize={{ minRows: 1, maxRows: 8 }}
+              // 关掉浏览器自带的右下角拖拽手柄：高度由 autoSize 管，
+              // 手动拖出来的高度会与 autoSize 打架（输入一变就被重置，看着像跳动）。
+              // ⚠️ TextArea 不支持 allowClear（antd 5.21 的类型里没有这个属性），
+              // 要清空只能全选删除 —— 换来的是多行自适应，值得。
+              style={{ resize: 'none', flex: '1 1 auto' }}
               // 组词开始/结束。结束时刻意延后一个 tick 复位：
               // 中文输入法确认候选词的那次回车，compositionend 会先于 keydown 到达，
               // 立即复位就等于失去了这道守卫。
@@ -731,7 +747,7 @@ const AiAssistant: React.FC = () => {
               disabled={streaming}
             />
             {streaming ? (
-              <Button size="large" danger icon={<StopOutlined />} onClick={stop}>
+              <Button size="large" danger icon={<StopOutlined />} onClick={stop} style={{ flex: 'none' }}>
                 停止
               </Button>
             ) : (
@@ -742,11 +758,12 @@ const AiAssistant: React.FC = () => {
                 onClick={() => ask(input)}
                 loading={false}
                 disabled={!input.trim()}
+                style={{ flex: 'none' }}
               >
                 发送
               </Button>
             )}
-          </Space.Compact>
+          </div>
           <div
             style={{
               marginTop: 8,

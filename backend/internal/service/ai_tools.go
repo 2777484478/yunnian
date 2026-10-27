@@ -275,16 +275,23 @@ func (a *AIService) toolGetServiceStatus() aiTool {
 			if err != nil {
 				return jsonText(failResult(err))
 			}
-			svc, err := a.aiServiceInstance(ctx, envKey, projectKey)
+			workload, linked, err := a.aiWorkloadOf(ctx, envKey, projectKey)
 			if err != nil {
 				return jsonText(failResult(err))
 			}
 			res := map[string]any{
 				"ok": true, "envKey": envKey, "projectKey": projectKey,
 				"cluster": env.Cluster, "namespace": env.Namespace,
-				"workload": svc.WorkloadName,
+				"workload": workload, "linked": linked,
 			}
-			state, err := a.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, svc.WorkloadName))
+			if !linked {
+				// 这条必须给：否则模型/用户会把"集群里存在但没纳管"读成
+				// "它是本环境的正常服务"—— 两者在运维上处置完全不同。
+				res["linkedNote"] = "该服务**没有纳管到本环境**：下面是用 project_key 当工作负载名" +
+					"去集群里查到的结果（平台约定两者同名）。若 exists=true，说明集群里确实有这个工作负载，" +
+					"但平台不跟踪它 —— 可能是在集群里手工部署的，不受本平台的发布管理。"
+			}
+			state, err := a.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, workload))
 			if err != nil {
 				// 「没读到」必须与「不存在」分开说：混为一谈会让用户以为集群里没这个服务。
 				res["clusterReadError"] = err.Error()
@@ -336,11 +343,11 @@ func (a *AIService) toolDiagnoseService() aiTool {
 			if err != nil {
 				return jsonText(failResult(err))
 			}
-			svc, err := a.aiServiceInstance(ctx, envKey, projectKey)
+			workload, linked, err := a.aiWorkloadOf(ctx, envKey, projectKey)
 			if err != nil {
 				return jsonText(failResult(err))
 			}
-			ev, err := a.deps.Up.Cluster.DiagnoseFailure(ctx, workloadRefOf(env, svc.WorkloadName))
+			ev, err := a.deps.Up.Cluster.DiagnoseFailure(ctx, workloadRefOf(env, workload))
 			if err != nil {
 				return jsonText(failResult(fmt.Errorf("集群侧取证失败（权限 / 网络 / 超时）：%w", err)))
 			}
@@ -359,7 +366,12 @@ func (a *AIService) toolDiagnoseService() aiTool {
 			}
 			res := map[string]any{
 				"ok": true, "envKey": envKey, "projectKey": projectKey,
+				"workload": workload, "linked": linked,
 				"notReadyPods": pods, "events": ev.Events,
+			}
+			if !linked {
+				res["linkedNote"] = "该服务没有纳管到本环境，这里是用 project_key 当工作负载名查到的集群侧证据；" +
+					"它不受本平台的发布管理。"
 			}
 			if len(ev.Notes) > 0 {
 				res["notes"] = ev.Notes
@@ -593,6 +605,38 @@ func (a *AIService) aiEnvByKey(ctx context.Context, key string) (*model.Environm
 		return nil, err
 	}
 	return &e, nil
+}
+
+// aiWorkloadOf 解析「要查哪个工作负载」，并说明它是否已纳管。
+//
+// 为什么要允许**未纳管也查**：所有集群读取原本都以 service_instance 为入口
+// （要先纳管才知道 workload_name），于是"集群里有没有某个未纳管的工作负载"
+// 这个问题，平台自己都答不了 —— 而它恰恰是有价值的运维信号：
+// 集群里存在、但平台不跟踪 = 有人手工部署过东西。
+//
+// 实测（2026-10-27，155 上线库）：51 条服务实例的 workload_name **全部等于**
+// project_key，无一例外。所以未纳管时退回 projectKey 不是猜测，
+// 而是平台自己的命名约定；查的是一个**按名字 Get** 的资源，不是 List，不需要额外权限。
+//
+// 注意：只有"没有纳管记录"才回退。数据库真出错要如实报错 ——
+// 静默退回 projectKey 会去查一个可能根本不该查的名字，比报错更难查。
+func (a *AIService) aiWorkloadOf(ctx context.Context, envKey, projectKey string) (string, bool, error) {
+	var s model.ServiceInstance
+	err := a.db(ctx).Where("env_key = ? AND project_key = ?", envKey, projectKey).First(&s).Error
+	if err == nil {
+		// 纳管记录存在但 workload_name 为空（历史数据）时同样退回 projectKey。
+		if n := strings.TrimSpace(s.WorkloadName); n != "" {
+			return n, true, nil
+		}
+		return projectKey, true, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", false, err
+	}
+	if strings.TrimSpace(projectKey) == "" {
+		return "", false, errors.New("缺少 projectKey")
+	}
+	return projectKey, false, nil
 }
 
 // aiServiceInstance 取服务实例（含集群里的工作负载名，工具查集群要用）。
