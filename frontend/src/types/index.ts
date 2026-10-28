@@ -135,6 +135,26 @@ export interface ProjectManifest {
   updatedAt: string;
 }
 
+/** 导入结果里的一项（后端逐条报告，不是"成功 N 个"这种笼统结论）。 */
+export interface ManifestImportItem {
+  /** 在文件里是第几个资源（从 1 开始），解析失败时靠它定位 */
+  index: number;
+  kind: string;
+  name: string;
+  /** created / updated / skipped / failed */
+  action: 'created' | 'updated' | 'skipped' | 'failed';
+  reason: string;
+}
+
+export interface ManifestImportResult {
+  total: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  items: ManifestImportItem[];
+}
+
 export interface BuildRecord {
   id: string;
   buildNo: number;

@@ -5,6 +5,7 @@ import type {
   DeployRecord,
   ImageRecord,
   LogLineRecord,
+  ManifestImportResult,
   PageResult,
   Project,
   ProjectManifest,
@@ -13,6 +14,16 @@ import type {
 // ---------------------------------------------------------------------------
 // CI 模块：项目 / 构建 / 镜像（对应后端 handler_ci.go）
 // ---------------------------------------------------------------------------
+
+/** 批量导入入参。 */
+export interface ManifestImportInput {
+  envKey: string;
+  /** 文件原文，可含多个 `---` 文档，也可以是 `kind: List` */
+  content: string;
+  /** overwrite = 覆盖平台里已存在的同名资源；省略/空 = 跳过 */
+  onConflict?: 'skip' | 'overwrite';
+  note?: string;
+}
 
 /** 新增 / 编辑一份资源定义的入参。**没有 kind / name**：由后端从 content 解析。 */
 export interface ManifestInput {
@@ -38,6 +49,14 @@ export const manifestApi = {
     http.put<ProjectManifest>(`/projects/${projectKey}/manifests/${id}`, body),
   remove: (projectKey: string, id: string) =>
     http.del(`/projects/${projectKey}/manifests/${id}`),
+  /**
+   * 批量导入：传**整个文件原文**，后端拆成多条并逐条校验。
+   *
+   * 前端不做拆分：拆分的规则必须和校验用同一套（什么算一个资源、
+   * `kind: List` 要不要展开），放两处早晚会分家。
+   */
+  import: (projectKey: string, body: ManifestImportInput) =>
+    http.post<ManifestImportResult>(`/projects/${projectKey}/manifests/import`, body),
 };
 
 export interface ProjectQuery {

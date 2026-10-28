@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   App as AntApp,
   Button,
+  Checkbox,
   Empty,
   Input,
   Modal,
@@ -13,10 +15,18 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { CopyOutlined, DeleteOutlined, EditOutlined, EyeOutlined, PlusOutlined } from '@ant-design/icons';
+import {
+  CopyOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  EyeOutlined,
+  ImportOutlined,
+  PlusOutlined,
+  UploadOutlined,
+} from '@ant-design/icons';
 import { manifestApi } from '@/api/ci';
 import { environmentApi } from '@/api/cd';
-import type { ProjectManifest } from '@/types';
+import type { ManifestImportResult, ProjectManifest } from '@/types';
 import { hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
 
@@ -122,6 +132,21 @@ const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
   // ---- 查看 ----
   const [viewing, setViewing] = useState<ProjectManifest | null>(null);
 
+  // ---- 导入 ----
+  //
+  // 导入和「新增」是两条不同的路：新增是"我在这儿写一份"，导入是
+  // "我手上已经有一份 kubectl apply -f 用的文件，里面好几个资源"。
+  // 所以导入接受多文档，且必须选环境（文件里通常不带环境信息）。
+  const [impOpen, setImpOpen] = useState(false);
+  const [impEnv, setImpEnv] = useState('');
+  const [impContent, setImpContent] = useState('');
+  const [impFileName, setImpFileName] = useState('');
+  const [impOverwrite, setImpOverwrite] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [impResult, setImpResult] = useState<ManifestImportResult | null>(null);
+  // input[type=file] 选同一个文件第二次不会触发 onChange，必须手动清 value
+  const fileRef = useRef<HTMLInputElement>(null);
+
   const envOptions = useMemo(
     () => envs.map((e) => ({ value: e.key, label: `${e.name}（${e.key}）` })),
     [envs],
@@ -150,6 +175,60 @@ const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
     setFormContent(m.content);
     setFormNote(m.note);
     setOpen(true);
+  };
+
+  const openImport = () => {
+    setImpEnv(envFilter || '');
+    setImpContent('');
+    setImpFileName('');
+    setImpOverwrite(false);
+    setImpResult(null);
+    setImpOpen(true);
+  };
+
+  /** 读本地文件。只读文本、不做解析 —— 拆分与校验统一在后端（一套规则只留一处）。 */
+  const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    // 清 value：否则再次选同一个文件时 onChange 不触发，看起来像"没反应"
+    e.target.value = '';
+    if (!f) return;
+    if (f.size > 4 * 1024 * 1024) {
+      message.warning('文件超过 4MB，先用编辑器精简一下再导');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setImpContent(String(reader.result ?? ''));
+      setImpFileName(f.name);
+    };
+    reader.onerror = () => message.error('读取文件失败，换个方式（直接粘贴内容）试试');
+    reader.readAsText(f);
+  };
+
+  const doImport = async () => {
+    if (!impEnv) {
+      message.warning('请先选择导入到哪个环境：文件里没有环境信息');
+      return;
+    }
+    if (!impContent.trim()) {
+      message.warning('还没有内容：选一个 YAML 文件，或把内容粘进来');
+      return;
+    }
+    setImporting(true);
+    try {
+      const res = await manifestApi.import(projectKey, {
+        envKey: impEnv,
+        content: impContent,
+        onConflict: impOverwrite ? 'overwrite' : 'skip',
+      });
+      setImpResult(res);
+      listApi.refresh();
+    } catch (e) {
+      // 后端说的是"文件里没有可导入的资源""超过 200 个"这类具体原因，原样展示
+      message.error((e as Error)?.message ?? '导入失败');
+    } finally {
+      setImporting(false);
+    }
   };
 
   const save = async () => {
@@ -322,9 +401,14 @@ const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
           这一期只保存到平台，<b>不会</b>应用到集群
         </Text>
         {canWrite ? (
-          <Button type="primary" icon={<PlusOutlined />} onClick={openNew}>
-            新增资源
-          </Button>
+          <>
+            <Button icon={<ImportOutlined />} onClick={openImport}>
+              导入 YAML
+            </Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openNew}>
+              新增资源
+            </Button>
+          </>
         ) : null}
       </div>
 
@@ -488,6 +572,188 @@ const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
         >
           {viewing?.content ?? ''}
         </pre>
+      </Modal>
+
+      {/* ---------------- 导入 YAML 文件 ---------------- */}
+      <Modal
+        open={impOpen}
+        title={
+          <Space size={8}>
+            <ImportOutlined />
+            导入 YAML
+          </Space>
+        }
+        width={820}
+        onCancel={() => setImpOpen(false)}
+        // 出结果之后按钮换成「关闭」：再点一次"导入"没有意义，
+        // 而且容易让人以为要再导一遍才生效。
+        footer={
+          impResult
+            ? [
+                <Button key="again" onClick={() => setImpResult(null)}>
+                  再导一份
+                </Button>,
+                <Button
+                  key="done"
+                  type="primary"
+                  onClick={() => {
+                    setImpOpen(false);
+                    setImpResult(null);
+                  }}
+                >
+                  完成
+                </Button>,
+              ]
+            : [
+                <Button key="cancel" onClick={() => setImpOpen(false)}>
+                  取消
+                </Button>,
+                <Button key="ok" type="primary" loading={importing} onClick={() => void doImport()}>
+                  导入
+                </Button>,
+              ]
+        }
+        destroyOnClose
+        // 内容多（说明 + 环境 + 文件 + 编辑框 + 勾选），在 1080p 屏幕上会顶到视口边缘，
+        // 底部按钮被挤出可视区。给 body 一个上限并允许内部滚动 —— 按钮永远可见。
+        styles={{ body: { maxHeight: 'calc(100vh - 260px)', overflowY: 'auto' } }}
+      >
+        {impResult ? (
+          /* ---- 结果视图：逐条报告，不给"成功 N 个"这种笼统结论 ---- */
+          <div>
+            <Space size={12} wrap style={{ marginBottom: 12 }}>
+              <Tag color="green">新建 {impResult.created}</Tag>
+              <Tag color="blue">更新 {impResult.updated}</Tag>
+              <Tag color="default">跳过 {impResult.skipped}</Tag>
+              <Tag color={impResult.failed > 0 ? 'red' : 'default'}>失败 {impResult.failed}</Tag>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                文件里共解析出 {impResult.total} 个资源
+              </Text>
+            </Space>
+            {impResult.failed > 0 ? (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="有资源没能导入，其余的都成功了"
+                description="下面每条的「原因」写的是后端拒绝它的实际理由，照着改文件再导一次即可（已成功的不受影响）。"
+              />
+            ) : null}
+            <Table
+              size="small"
+              rowKey={(r) => `${r.index}-${r.kind}-${r.name}`}
+              dataSource={impResult.items}
+              pagination={impResult.items.length > 12 ? { pageSize: 12, size: 'small' } : false}
+              columns={[
+                { title: '#', dataIndex: 'index', width: 48 },
+                {
+                  title: '类型',
+                  dataIndex: 'kind',
+                  width: 130,
+                  render: (k: string) =>
+                    k ? <Tag color={KIND_COLOR[k] ?? 'default'}>{k}</Tag> : <Text type="secondary">—</Text>,
+                },
+                {
+                  title: '名称',
+                  dataIndex: 'name',
+                  width: 180,
+                  render: (n: string) =>
+                    n ? <span className="yn-mono">{n}</span> : <Text type="secondary">（未解析出）</Text>,
+                },
+                {
+                  title: '结果',
+                  dataIndex: 'action',
+                  width: 90,
+                  render: (a: string) => {
+                    const map: Record<string, [string, string]> = {
+                      created: ['green', '新建'],
+                      updated: ['blue', '更新'],
+                      skipped: ['default', '跳过'],
+                      failed: ['red', '失败'],
+                    };
+                    const [color, label] = map[a] ?? ['default', a];
+                    return <Tag color={color}>{label}</Tag>;
+                  },
+                },
+                {
+                  title: '原因 / 说明',
+                  dataIndex: 'reason',
+                  render: (r: string) => (r ? <span style={{ fontSize: 12.5 }}>{r}</span> : <Text type="secondary">—</Text>),
+                },
+              ]}
+            />
+          </div>
+        ) : (
+          /* ---- 导入前的填写视图 ---- */
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <Alert
+              type="info"
+              showIcon
+              message="支持一次导入多个资源"
+              description={
+                <span style={{ fontSize: 12.5 }}>
+                  用 <code>---</code> 分隔的多文档文件、以及 <code>kubectl get -o yaml</code> 导出的{' '}
+                  <code>kind: List</code> 都能直接导 —— 平台会拆成多条记录，逐条告诉你结果。
+                  已存在的默认<b>跳过</b>（不覆盖你在平台上改过的内容）。
+                </span>
+              }
+            />
+
+            <Space size={12} wrap>
+              <span style={{ width: 64, textAlign: 'right', color: '#5b6169' }}>导入到</span>
+              <Select
+                style={{ width: 360 }}
+                placeholder="请选择环境（文件里没有环境信息）"
+                value={impEnv || undefined}
+                onChange={setImpEnv}
+                options={envOptions}
+              />
+            </Space>
+
+            <Space size={12} wrap>
+              <span style={{ width: 64, textAlign: 'right', color: '#5b6169' }}>文件</span>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".yaml,.yml,.txt,text/yaml,text/plain"
+                style={{ display: 'none' }}
+                onChange={onPickFile}
+              />
+              <Button icon={<UploadOutlined />} onClick={() => fileRef.current?.click()}>
+                选择 YAML 文件
+              </Button>
+              {impFileName ? (
+                <Text style={{ fontSize: 12.5 }}>
+                  {impFileName} · {impContent.split('\n').length} 行
+                </Text>
+              ) : (
+                <Text type="secondary" style={{ fontSize: 12.5 }}>
+                  也可以直接把内容粘到下面
+                </Text>
+              )}
+            </Space>
+
+            <Input.TextArea
+              value={impContent}
+              onChange={(e) => setImpContent(e.target.value)}
+              placeholder={'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-app\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: my-app-svc\n'}
+              autoSize={{ minRows: 8, maxRows: 16 }}
+              spellCheck={false}
+              style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12.5 }}
+            />
+
+            <Checkbox checked={impOverwrite} onChange={(e) => setImpOverwrite(e.target.checked)}>
+              覆盖平台里已存在的同名资源
+              <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                不勾选时，同名同类型会跳过（保护你在平台上改过的内容）
+              </Text>
+            </Checkbox>
+
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              导入仍然只写平台库，<b>不会</b>应用到集群。
+            </Text>
+          </div>
+        )}
       </Modal>
     </div>
   );

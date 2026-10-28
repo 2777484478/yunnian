@@ -87,6 +87,27 @@ func (h *handler) updateProjectManifest(c *gin.Context) {
 	httpx.OK(c, dto)
 }
 
+// importProjectManifests POST /projects/{key}/manifests/import
+//
+// 收的是**整个文件原文**（可含多个 `---` 文档、也可以是 `kubectl get -o yaml`
+// 导出的 `kind: List`），由服务端拆开逐条校验后落库。
+//
+// 为什么拆分放在后端而不是前端：拆分要和校验用同一套规则
+// （什么算一个资源、缺 metadata.name 怎么算），放两处早晚会分家；
+// 而且前端拿到的就是一段文本，它也没有必要理解 k8s 的文档结构。
+func (h *handler) importProjectManifests(c *gin.Context) {
+	var in service.ManifestImportInput
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	res, err := h.svc.CI.ImportManifests(c.Request.Context(), httpx.PathString(c, "key"), in, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, res)
+}
+
 // deleteProjectManifest DELETE /projects/{key}/manifests/{id}
 //
 // 只删平台里的记录，集群里的资源不动 —— 这一期平台没有写集群的能力。

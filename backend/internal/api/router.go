@@ -160,6 +160,10 @@ func (h *handler) registerProjects(g *gin.RouterGroup) {
 	p.GET("/:key/manifests", middleware.RequirePerm("project:read"), h.listProjectManifests)
 	p.GET("/:key/manifests/:id", middleware.RequirePerm("project:read"), h.getProjectManifest)
 	p.POST("/:key/manifests", middleware.RequirePerm("project:write", "project:write:own"), h.createProjectManifest)
+	// 批量导入：一次传整个文件（多文档 / kind: List），服务端拆开逐条落库。
+	// 放在 /:key/manifests 之前不影响路由匹配（Gin 静态段优先于参数段），
+	// 但显式写在前面更不容易被后来人误读成 /manifests/{id}。
+	p.POST("/:key/manifests/import", middleware.RequirePerm("project:write", "project:write:own"), h.importProjectManifests)
 	p.PUT("/:key/manifests/:id", middleware.RequirePerm("project:write", "project:write:own"), h.updateProjectManifest)
 	p.DELETE("/:key/manifests/:id", middleware.RequirePerm("project:write", "project:write:own"), h.deleteProjectManifest)
 }
