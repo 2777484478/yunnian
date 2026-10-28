@@ -129,7 +129,16 @@ const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
 
   const openNew = () => {
     setEditing(null);
-    setFormEnv(envFilter || envs[0]?.key || '');
+    // 环境**不自动选**。
+    //
+    // 原来默认 `envs[0]?.key`，而环境列表的第一项是「阿里云生产环境」——
+    // 手一快点了保存，YAML 就落到生产那一档去，不报错、看起来还一切正常。
+    // 这一期只存不写集群所以不会真出事，但后期开了 apply，这个默认值就成了真坑。
+    // 让用户自己选一次，成本 1 秒，换掉一个静默写错的可能。
+    //
+    // 例外：顶部已经筛了某个环境时（envFilter），沿用它是**用户明确的意图**，
+    // 不算默认值。
+    setFormEnv(envFilter || '');
     setFormContent(TEMPLATE_DEPLOYMENT);
     setFormNote('');
     setOpen(true);
@@ -359,8 +368,8 @@ const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
           <Space size={12} wrap>
             <span style={{ width: 64, textAlign: 'right', color: '#5b6169' }}>环境</span>
             <Select
-              style={{ width: 300 }}
-              placeholder="选择环境"
+              style={{ width: 360 }}
+              placeholder="请选择环境（同一份资源在不同环境通常不一样）"
               value={formEnv || undefined}
               onChange={setFormEnv}
               options={envOptions}

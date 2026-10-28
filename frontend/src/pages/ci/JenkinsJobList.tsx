@@ -263,8 +263,8 @@ const JenkinsJobList: React.FC = () => {
   return (
     <div>
       <PageHeader
-        breadcrumb={[{ title: 'CI 镜像构建' }, { title: 'Jenkins Job' }]}
-        title="Jenkins Job"
+        breadcrumb={[{ title: 'CI 镜像构建' }, { title: 'Job 管理' }]}
+        title="Job 管理"
         description="浏览 Jenkins 上已有的 Job、看它们最近构建的状态与绑定关系。本页只读取 Jenkins，不触发构建、也不会修改 Job 定义、插件或全局配置；要构建请到「项目管理」里对具体项目发起（平台上每次构建都要落到一个项目上）。"
         tags={
           data ? (
