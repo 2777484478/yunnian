@@ -19,6 +19,7 @@ const EnvironmentDetail = lazy(() => import('@/pages/cd/EnvironmentDetail'));
 const DeployList = lazy(() => import('@/pages/cd/DeployList'));
 const RollbackList = lazy(() => import('@/pages/cd/RollbackList'));
 const AiAssistant = lazy(() => import('@/pages/AiAssistant'));
+const UsageDocs = lazy(() => import('@/pages/UsageDocs'));
 const AuditLogPage = lazy(() => import('@/pages/AuditLogPage'));
 const SystemUsers = lazy(() => import('@/pages/system/SystemUsers'));
 const SystemRoles = lazy(() => import('@/pages/system/SystemRoles'));
@@ -112,6 +113,9 @@ const RoutedApp: React.FC = () => {
             <Route path="cd/rollbacks" element={<RequirePerm codes={['rollback:read']}><RollbackList /></RequirePerm>} />
 
             <Route path="ai" element={<RequirePerm codes={['ai:query']}><AiAssistant /></RequirePerm>} />
+            {/* 使用文档不挂权限点：它是"这个平台怎么用"的说明，能登录就该能看。
+                少一个权限点也少一处"新人进来连文档都打不开"的坑。 */}
+            <Route path="docs" element={<UsageDocs />} />
             <Route path="audit" element={<RequirePerm codes={['audit:read']}><AuditLogPage /></RequirePerm>} />
 
             <Route path="system/users" element={<RequirePerm codes={['user:manage']}><SystemUsers /></RequirePerm>} />

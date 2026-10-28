@@ -41,7 +41,7 @@ import {
   ThunderboltOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
-import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { LogoCloud } from '@/components/Logo';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { getSession, hasAnyPerm, hasPerm, logout } from '@/auth';
@@ -353,8 +353,13 @@ export const AppLayout: React.FC = () => {
                 },
                 {
                   key: 'docs',
-                  label: <span className="yn-nav-soon">使用文档</span>,
-                  onClick: () => message.info('使用文档将在平台功能定稿后补齐'),
+                  // 原来是 yn-nav-soon（灰掉的"即将上线"）—— 一期已补齐，去掉那个类。
+                  // 用 Link 而不是 onClick + navigate：导航是链接语义，右键"新标签打开"应该也能用。
+                  label: (
+                    <Link to="/docs" style={{ color: 'inherit' }}>
+                      使用文档
+                    </Link>
+                  ),
                 },
               ]}
             />
@@ -510,12 +515,10 @@ export const AppLayout: React.FC = () => {
             </Tooltip>
           )}
 
-          <Tooltip title="帮助文档（待补齐）">
-            <Button
-              type="text"
-              icon={<QuestionCircleOutlined style={{ fontSize: 16 }} />}
-              onClick={() => message.info('使用文档将在平台功能定稿后补齐')}
-            />
+          <Tooltip title="使用文档">
+            <Link to="/docs">
+              <Button type="text" icon={<QuestionCircleOutlined style={{ fontSize: 16 }} />} />
+            </Link>
           </Tooltip>
 
           <Dropdown
