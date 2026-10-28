@@ -96,11 +96,11 @@ const MENU: MenuGroup[] = [
     label: 'CI 镜像构建',
     children: [
       { key: '/ci/projects', icon: <AppstoreOutlined />, label: '项目管理', perms: ['project:read'] },
-      // 「Job 管理」是独立页，不再是项目管理里的抽屉：
+      // 「任务管理」是独立页，不再是项目管理里的抽屉：
       // 实测那台 Jenkins 有 531 个 job，需要搜索 / 筛选 / 翻页（见 pages/ci/JenkinsJobList.tsx）。
       // 权限点用 build:read（浏览构建作业）——ops/dev/qa/readonly 都持有，与触发所需的
       // build:trigger 分开：能看列表 ≠ 能点构建。
-      { key: '/ci/jenkins', icon: <UnorderedListOutlined />, label: 'Job 管理', perms: ['build:read'] },
+      { key: '/ci/jenkins', icon: <UnorderedListOutlined />, label: '任务管理', perms: ['build:read'] },
       { key: '/ci/builds', icon: <ThunderboltOutlined />, label: '构建记录', perms: ['build:read'] },
       { key: '/ci/images', icon: <HddOutlined />, label: '镜像版本', perms: ['image:read'] },
     ],

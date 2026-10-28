@@ -367,7 +367,7 @@ const ProjectList: React.FC = () => {
    */
 
   // Jenkins Job：本页只保留"项目表单里的 Job 下拉"。
-  // Job 列表本身已经独立成「CI 镜像构建 › Job 管理」菜单页了——
+  // Job 列表本身已经独立成「CI 镜像构建 › 任务管理」菜单页了——
   // 那是一个要搜索 / 筛选 / 翻页的正式列表，塞在抽屉里看不完也筛不动。
   const [jenkinsJobs, setJenkinsJobs] = useState<JenkinsJob[] | null>(null);
   const [jobsLoading, setJobsLoading] = useState(false);
