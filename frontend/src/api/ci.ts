@@ -7,11 +7,38 @@ import type {
   LogLineRecord,
   PageResult,
   Project,
+  ProjectManifest,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
 // CI 模块：项目 / 构建 / 镜像（对应后端 handler_ci.go）
 // ---------------------------------------------------------------------------
+
+/** 新增 / 编辑一份资源定义的入参。**没有 kind / name**：由后端从 content 解析。 */
+export interface ManifestInput {
+  envKey: string;
+  content: string;
+  note?: string;
+  sort?: number;
+}
+
+/**
+ * 项目的 k8s 资源定义。
+ *
+ * 这一族接口只读写**平台库**，不碰集群 —— 保存/删除都不会影响集群里已有的资源。
+ */
+export const manifestApi = {
+  list: async (projectKey: string, q?: { envKey?: string; kind?: string }): Promise<ProjectManifest[]> =>
+    unwrapList<ProjectManifest>(await http.get(`/projects/${projectKey}/manifests`, q)),
+  get: (projectKey: string, id: string) =>
+    http.get<ProjectManifest>(`/projects/${projectKey}/manifests/${id}`),
+  create: (projectKey: string, body: ManifestInput) =>
+    http.post<ProjectManifest>(`/projects/${projectKey}/manifests`, body),
+  update: (projectKey: string, id: string, body: ManifestInput) =>
+    http.put<ProjectManifest>(`/projects/${projectKey}/manifests/${id}`, body),
+  remove: (projectKey: string, id: string) =>
+    http.del(`/projects/${projectKey}/manifests/${id}`),
+};
 
 export interface ProjectQuery {
   keyword?: string;

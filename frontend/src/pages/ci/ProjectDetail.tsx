@@ -28,6 +28,7 @@ import {
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { PageHeader, SectionCard } from '@/components/ui';
 import { LogPanel } from '@/components/LogPanel';
+import ProjectManifests from '@/components/ProjectManifests';
 import { BuildStatusTag, DigestText, ImageText, MethodTag, ProjectTypeTag, ServiceStatusTag } from '@/components/StatusTag';
 import { buildApi, environmentApi, projectApi } from '@/api';
 import { useApi } from '@/hooks/useApi';
@@ -615,6 +616,13 @@ const ProjectDetail: React.FC = () => {
                 />
               </SectionCard>
             ),
+          },
+          {
+            // 放在最后：前四个是"这个项目跑成了什么样"，这一项是"它该长什么样"的前置配置，
+            // 日常看得少、配置时才会进来。
+            key: 'k8s',
+            label: 'K8s 资源',
+            children: <ProjectManifests projectKey={project.key} />,
           },
         ]}
       />

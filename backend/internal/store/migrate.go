@@ -30,6 +30,8 @@ func Models() []any {
 		// 2. 项目
 		&model.Project{},
 		&model.ProjectMember{},
+		// k8s 资源定义（Deployment / Service …），按「项目 × 环境 × 资源」存
+		&model.ProjectManifest{},
 
 		// 3. 构建 / 镜像
 		&model.BuildRecord{},

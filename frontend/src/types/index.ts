@@ -112,6 +112,29 @@ export interface Project {
   avgDuration: number;
 }
 
+/**
+ * 项目在**某个环境**的一份 k8s 资源定义（Deployment / Service / ConfigMap …）。
+ *
+ * `kind` 与 `name` 由服务端从 `content` 解析得来，**不是用户填的** ——
+ * 所以它们和正文永远一致，不存在"标的是 Service、存的是 Deployment"。
+ */
+export interface ProjectManifest {
+  id: string;
+  envKey: string;
+  /** 从 content 解析：Deployment / Service / ConfigMap … */
+  kind: string;
+  /** 从 content 的 metadata.name 解析 */
+  name: string;
+  /** 从 content 解析，用来显示 `apps/v1 Deployment` 这种完整身份 */
+  apiVersion: string;
+  /** YAML 原文，原样保存 */
+  content: string;
+  note: string;
+  sort: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface BuildRecord {
   id: string;
   buildNo: number;

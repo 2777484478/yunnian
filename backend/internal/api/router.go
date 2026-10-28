@@ -151,6 +151,17 @@ func (h *handler) registerProjects(g *gin.RouterGroup) {
 	p.GET("/:key/builds", middleware.RequirePerm("build:read"), h.listProjectBuilds)
 	p.GET("/:key/images", middleware.RequirePerm("image:read"), h.listProjectImages)
 	p.GET("/:key/deployments", middleware.RequirePerm("deploy:read"), h.listProjectDeployments)
+
+	// k8s 资源定义（Deployment / Service / ConfigMap …）。
+	//
+	// 权限用 project:read / project:write，**不用 project:delete** ——
+	// 删一份 YAML 定义不等于删项目，拿项目级的删除权限去管它是过重的门槛。
+	// 这一族接口这一期只读写平台库，不碰集群。
+	p.GET("/:key/manifests", middleware.RequirePerm("project:read"), h.listProjectManifests)
+	p.GET("/:key/manifests/:id", middleware.RequirePerm("project:read"), h.getProjectManifest)
+	p.POST("/:key/manifests", middleware.RequirePerm("project:write", "project:write:own"), h.createProjectManifest)
+	p.PUT("/:key/manifests/:id", middleware.RequirePerm("project:write", "project:write:own"), h.updateProjectManifest)
+	p.DELETE("/:key/manifests/:id", middleware.RequirePerm("project:write", "project:write:own"), h.deleteProjectManifest)
 }
 
 func (h *handler) registerBuilds(g *gin.RouterGroup) {
