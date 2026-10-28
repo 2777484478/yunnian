@@ -128,7 +128,9 @@ func parseManifest(content string) (parsedManifest, error) {
 		if errors.Is(err, io.EOF) {
 			return out, errs.Invalid("YAML 内容为空（只有注释？）")
 		}
-		return out, errs.Invalidf("YAML 解析失败：%v", err)
+		// 用中文说"第几行、哪里不对"，而不是把 `yaml: line 4: did not find
+		// expected key` 原样端给用户 —— 那句话他知道行号也不知道该改什么。
+		return out, errs.Invalidf("YAML 语法错误：%s", humanizeYAMLError(err))
 	}
 
 	// 第二个文档能解出来 → 说明用了 --- 分隔。
@@ -139,7 +141,8 @@ func parseManifest(content string) (parsedManifest, error) {
 			"请拆成多条记录分别保存 —— 后期 apply 时要能逐条报告是哪个资源失败")
 	} else if !errors.Is(err, io.EOF) {
 		// 第二个文档解析出错：同样按"多文档"处理，因为第一段已经足够构成一份资源。
-		return out, errs.Invalidf("发现第二个 YAML 文档但解析失败：%v；请一次只保存一个资源", err)
+		return out, errs.Invalidf("发现第二个 YAML 文档但解析失败（%s）；请一次只保存一个资源",
+			humanizeYAMLError(err))
 	}
 
 	out.APIVersion = strings.TrimSpace(stringOf(doc["apiVersion"]))
@@ -312,6 +315,18 @@ func (s *CIService) ImportManifests(ctx context.Context, projectKey string, in M
 		}
 		item.Kind, item.Name = pm.Kind, pm.Name
 
+		warn, verr := validateManifestStructure(doc)
+		if verr != nil {
+			item.Action = "failed"
+			item.Reason = userMessage(verr)
+			res.Failed++
+			res.Items = append(res.Items, item)
+			continue
+		}
+		if warn != "" {
+			item.Reason = warn
+		}
+
 		// 唯一键不含 deleted_at，所以查询必须 Unscoped —— 软删的行仍占着这个位置。
 		var existing model.ProjectManifest
 		qerr := s.db(ctx).Unscoped().
@@ -436,6 +451,12 @@ func (s *CIService) CreateProjectManifest(ctx context.Context, projectKey string
 	if err != nil {
 		return nil, err
 	}
+	// 结构校验（字段名 / 类型 / 必填项）只在**写入路径**做。
+	// 不放进 parseManifest：那个函数被 manifestDTO 每次渲染列表时都调一遍，
+	// 挂上严格解码会让"查一次列表 = N 次 k8s 解码"。
+	if _, err := validateManifestStructure(in.Content); err != nil {
+		return nil, err
+	}
 
 	// 唯一键 (project_id, env_key, kind, name) 不含 deleted_at：
 	// 软删过的行仍然占着这个位置，所以新建时必须**先查含软删的**。
@@ -511,6 +532,9 @@ func (s *CIService) UpdateProjectManifest(ctx context.Context, projectKey string
 	}
 	pm, err := parseManifest(in.Content)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := validateManifestStructure(in.Content); err != nil {
 		return nil, err
 	}
 

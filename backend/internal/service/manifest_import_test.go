@@ -161,18 +161,34 @@ spec:
 
 // TestImportManifests 钉住导入的行为：逐条独立、已存在默认跳过、可选覆盖。
 func TestImportManifests(t *testing.T) {
+	// ⚠️ fixture 必须是**结构完整**的 YAML：写入路径现在会做 k8s 结构校验
+	// （缺 selector / 缺容器 / 字段名拼错都会被挡）。这几条测的是"导入的分条与冲突处理"，
+	// 不该因为 fixture 本身不合法而红 —— 那样就分不清是导入逻辑坏了还是 fixture 坏了。
 	const deploy = `apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: imp-a
 spec:
   replicas: 1
+  selector:
+    matchLabels:
+      app: imp-a
+  template:
+    metadata:
+      labels:
+        app: imp-a
+    spec:
+      containers:
+        - name: c
+          image: nginx:1.0
 `
 	const svc = `apiVersion: v1
 kind: Service
 metadata:
   name: imp-svc
 spec:
+  selector:
+    app: imp-svc
   ports:
     - port: 80
 `

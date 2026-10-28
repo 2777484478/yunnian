@@ -99,7 +99,7 @@ spec:
 		{
 			name:       "非法 YAML（缩进错）",
 			in:         "apiVersion: v1\nkind: Service\n  metadata:\n name: x\n",
-			wantErrHas: "解析失败",
+			wantErrHas: "语法错误",
 		},
 	}
 

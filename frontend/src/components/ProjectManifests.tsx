@@ -485,7 +485,8 @@ const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
             <div style={{ marginBottom: 6, color: '#5b6169' }}>
               YAML 内容
               <Text type="secondary" style={{ fontSize: 12, marginLeft: 10 }}>
-                一次只能一个资源；kind / name 由内容自动识别
+                一次只能一个资源；kind / name 由内容自动识别；
+                保存时按 k8s 定义校验字段名与类型（写错的会被挡下来）
               </Text>
             </div>
             <Input.TextArea
@@ -694,6 +695,7 @@ const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
                 <span style={{ fontSize: 12.5 }}>
                   用 <code>---</code> 分隔的多文档文件、以及 <code>kubectl get -o yaml</code> 导出的{' '}
                   <code>kind: List</code> 都能直接导 —— 平台会拆成多条记录，逐条告诉你结果。
+                  每条都会按 k8s 定义校验字段名与类型，写错的那几条会单独报出来（其余照常导入）。
                   已存在的默认<b>跳过</b>（不覆盖你在平台上改过的内容）。
                 </span>
               }
