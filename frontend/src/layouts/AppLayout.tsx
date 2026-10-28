@@ -315,7 +315,8 @@ export const AppLayout: React.FC = () => {
     <Layout className="yn-layout">
       <Header className="yn-header">
         <div className="yn-header__left">
-          <div className="yn-logo">
+          {/* logo 点回首页是通用预期，之前是个死 div */}
+          <Link to="/overview" className="yn-logo" style={{ color: 'inherit', textDecoration: 'none' }}>
             <span className="yn-logo__mark">
               <LogoCloud size={19} />
             </span>
@@ -323,14 +324,26 @@ export const AppLayout: React.FC = () => {
               <span className="yn-logo__name">YunNian 云辇</span>
               <span className="yn-logo__sub">AI 运维管理发布平台</span>
             </span>
-          </div>
+          </Link>
           <div className="yn-header__nav">
             <Menu
               mode="horizontal"
-              selectedKeys={[]}
+              // 原来恒为 []，两个菜单项都没有选中态。
+              // 现在按路由点亮：在 /docs 亮「使用文档」，其余（所有功能页都属于控制台）亮「控制台」。
+              selectedKeys={[location.pathname.startsWith('/docs') ? 'docs' : 'console']}
               style={{ border: 'none', minWidth: 300, height: 55, lineHeight: '55px' }}
               items={[
-                { key: 'console', label: '控制台' },
+                {
+                  key: 'console',
+                  // ⚠️ 原来这里是纯文本 `label: '控制台'` —— 既没 Link 也没 onClick。
+                  // 那时控制台是唯一页面，点了无所谓；但加了 /docs 之后，
+                  // 从文档页点「控制台」**回不去首页**（用户实测报的）。
+                  label: (
+                    <Link to="/overview" style={{ color: 'inherit' }}>
+                      控制台
+                    </Link>
+                  ),
+                },
                 {
                   key: 'apps',
                   label: (
