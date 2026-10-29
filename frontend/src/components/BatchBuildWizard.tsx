@@ -42,6 +42,14 @@ import type { BuildStatus, Project } from '@/types';
 
 const { Text } = Typography;
 
+/**
+ * 批量勾选结果通知的固定 key。
+ *
+ * 固定 key 让 antd **替换**同 key 的通知而不是堆叠：连粘几次清单时，
+ * 屏幕上永远只有一条最新的结果，不会摞成一列让人分不清哪次是刚发生的。
+ */
+const BULK_PICK_NOTICE_KEY = 'batch-build-bulk-pick';
+
 export interface BatchBuildWizardProps {
   open: boolean;
   onClose: () => void;
@@ -344,6 +352,100 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
 
   const toggle = (key: string, on: boolean) =>
     setKeys((prev) => (on ? [...new Set([...prev, key])] : prev.filter((k) => k !== key)));
+
+  /**
+   * 把一段文本里的项目名批量勾上（搜索框粘贴即触发）。
+   *
+   * 与批量发布里的同类逻辑**同一套规则**（`BatchDeployWizard` 的 `bulkPickByNames`
+   * 有完整理由），这里只说差异：
+   *   · 匹配 `key` 优先、再退到项目名（清单里不会有负责人）；
+   *   · 「当前不可选」只有一种 —— Jenkins 项目没拿到可用的 Job 参数
+   *     （`jenkinsPlan` 为空），与 `getCheckboxProps` 的禁用条件完全一致。
+   */
+  const bulkPickByNames = (text: string) => {
+    const names = Array.from(
+      new Set(
+        text
+          .split(/[\s,;，、]+/)
+          // 从 Excel 复制常带成对的引号（"aiocmdb"），不剥掉就一个都匹配不上
+          .map((s) => s.trim().replace(/^["'`]+|["'`]+$/g, ''))
+          .filter(Boolean),
+      ),
+    );
+    if (!names.length) return;
+
+    const byKey = new Map(projects.map((p) => [p.key.toLowerCase(), p]));
+    const byName = new Map(projects.map((p) => [p.name.toLowerCase(), p]));
+
+    const hit: string[] = [];
+    const blocked: string[] = [];
+    const missed: string[] = [];
+
+    for (const n of names) {
+      const k = n.toLowerCase();
+      const p = byKey.get(k) ?? byName.get(k);
+      if (!p) {
+        missed.push(n);
+      } else if (p.buildMethod === 'jenkins' && !jenkinsPlan[p.key]) {
+        blocked.push(n);
+      } else {
+        hit.push(p.key);
+      }
+    }
+
+    if (hit.length) {
+      setKeys((prev) => [...new Set([...prev, ...hit])]);
+    }
+    // 清掉搜索词：粘完他要看的是「这批到底勾上没有」
+    setKw('');
+
+    const added = hit.filter((k) => !keys.includes(k));
+
+    if (!blocked.length && !missed.length) {
+      notification.destroy(BULK_PICK_NOTICE_KEY);
+      if (added.length === hit.length) {
+        message.success(`已勾选 ${hit.length} 个项目`);
+      } else if (!added.length) {
+        message.info(`这 ${hit.length} 个项目原本就在勾选里`);
+      } else {
+        message.success(`新勾选 ${added.length} 个，另外 ${hit.length - added.length} 个原本已选`);
+      }
+      return;
+    }
+
+    const left = [...blocked, ...missed];
+    const shown = left.slice(0, 12).join('、') + (left.length > 12 ? ` 等 ${left.length} 个` : '');
+    const parts: string[] = [];
+    if (added.length) {
+      parts.push(
+        added.length === hit.length
+          ? `已勾选 ${hit.length} 个`
+          : `新勾选 ${added.length} 个（另 ${hit.length - added.length} 个原本已选）`,
+      );
+    } else if (hit.length) {
+      parts.push(`其中 ${hit.length} 个原本已选`);
+    }
+    if (blocked.length) {
+      parts.push(`${blocked.length} 个的 Jenkins Job 参数不合适，不能批量构建`);
+    }
+    if (missed.length) parts.push(`${missed.length} 个没有匹配到项目`);
+
+    notification.warning({
+      key: BULK_PICK_NOTICE_KEY,
+      message: '批量勾选完成，但不是全部都勾上了',
+      description: `${parts.join('；')}。没处理的：${shown}`,
+      duration: 0,
+    });
+  };
+
+  /** 搜索框的粘贴钩子：看起来像一份清单就拦截，否则放行走正常搜索。 */
+  const handleBulkPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData('text');
+    const isList = /[\r\n]/.test(text) || text.split(/[\s,;，、]+/).filter(Boolean).length >= 2;
+    if (!isList) return;
+    e.preventDefault();
+    bulkPickByNames(text);
+  };
 
   // ------------------------------------------------------------------ 逐项目分支
   //
@@ -1045,10 +1147,12 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
               allowClear
               size="small"
               prefix={<SearchOutlined style={{ color: '#b5bac4' }} />}
-              placeholder="搜索项目名称 / 标识 / 负责人"
+              placeholder="搜索，或粘贴多个项目名"
               style={{ width: 240 }}
               value={kw}
               onChange={(e) => setKw(e.target.value)}
+              // 粘贴一份清单（一行一个 / 逗号分隔）即批量勾选，见 bulkPickByNames
+              onPaste={handleBulkPaste}
             />
             <Segmented
               size="small"
