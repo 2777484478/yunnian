@@ -6,6 +6,31 @@ import (
 	"gorm.io/gorm"
 )
 
+// ScheduleTarget 一条任务里的一个目标。
+//
+// 为什么要有它：定时构建 / 定时部署在真实使用中**从来不是单个服务** ——
+// 用户原话："部署发布的时候怎么可能只有 1 个服务？我肯定是批量的。"
+// 一晚要打 8 个包、一次要把 6 个服务铺到预生产，逐个建任务既啰嗦又容易漏。
+//
+// 于是"任务"和"目标"分开：任务管时间与动作，目标管"对谁做、用哪个分支 / 版本"。
+// 执行时**逐条独立建单**（与批量发布同一口径：一次建出全部单交给后端队列），
+// 一条失败不影响其余，最终结果按"全部成功 / 部分成功 / 全部失败"三档汇报。
+type ScheduleTarget struct {
+	ProjectKey string `json:"projectKey"`
+	// Branch 平台自建构建用的分支。Jenkins 项目里它是**要传给 Jenkins 的值**，
+	// 真正落到哪个参数名由 BranchParam 决定（见下）。
+	Branch string `json:"branch,omitempty"`
+	// BranchParam Jenkins 项目里承载分支的参数名（如 git_branch）。
+	//
+	// 为什么不执行时再去问 Jenkins：Job 参数是**创建任务时**就能读到的配置，
+	// 到点再去问会多一次外部依赖 —— Jenkins 不通时连"该往哪个参数传值"都定不下来，
+	// 而这个决定本该在配置阶段就固定住。
+	BranchParam string `json:"branchParam,omitempty"`
+	// ImageTag / ImageRecordID 定时部署"指定固定版本"时每个目标各自的版本。
+	ImageTag      string `json:"imageTag,omitempty"`
+	ImageRecordID string `json:"imageRecordId,omitempty"`
+}
+
 // ScheduleTask 定时任务：到点替用户"点一下按钮"。
 //
 // ⚠️ 它**不执行构建 / 部署本身**，只负责在时间点创建一条普通的构建单或部署单。
@@ -23,6 +48,14 @@ type ScheduleTask struct {
 	// 混在一个任务里，用户看不出是哪一步卡住。
 	TaskType string `gorm:"column:task_type;size:16;not null;index:idx_schedule_type" json:"taskType"`
 
+	// Targets 这条任务要处理的目标列表（项目 + 各自的分支 / 版本），JSON 数组。
+	//
+	// ⚠️ 下面的 ProjectKey / Branch / ImageTag / ImageRecordID 是它的**镜像**，
+	// 只为了让"按项目筛任务"和旧数据读得出来，不作为真相：
+	// 写的时候一律从 Targets 派生（取第一个目标），读的时候**先看 Targets**。
+	// 两处口径分家会让界面显示 A 项目、实际去建 B 项目的单。
+	Targets JSONText `gorm:"column:targets;type:json" json:"targets,omitempty"`
+
 	ProjectKey string `gorm:"column:project_key;size:64;not null;index:idx_schedule_project" json:"projectKey"`
 	// EnvKey 只有 deploy 任务用。build 任务留空。
 	EnvKey string `gorm:"column:env_key;size:64" json:"envKey"`
@@ -36,7 +69,7 @@ type ScheduleTask struct {
 	Enabled bool   `gorm:"not null;default:true;index:idx_schedule_enabled" json:"enabled"`
 
 	// ---- build 专用 ----
-	// Branch 空 = 用项目默认分支。
+	// Branch 第一个目标的构建分支（镜像列，见 Targets）。空 = 用项目默认分支。
 	Branch string `gorm:"size:96" json:"branch"`
 	// BuildParams 构建参数（Jenkins 参数化构建等）。原样透传给 TriggerBuild。
 	BuildParams JSONText `gorm:"column:build_params;type:json" json:"buildParams,omitempty"`
@@ -72,9 +105,17 @@ type ScheduleTask struct {
 	// 为什么单独计数而不是只写日志：用户需要知道"这个任务到底有没有在正常工作"。
 	// 一个每周跑一次的任务，停了三个月没发现，界面上一句"错过 12 次"比什么都直接。
 	MissedCount int `gorm:"column:missed_count;not null;default:0" json:"missedCount"`
-	// LastBuildID / LastDeployID 上次建的记录，点进去能直接跳到那次日志。
+	// LastBuildID / LastDeployID 上次建的**第一条**记录，点进去能直接跳到那次日志。
+	// 多目标时它只是"其中一条"，完整清单在 LastIDs 里。
 	LastBuildID  uint64 `gorm:"column:last_build_id" json:"lastBuildId"`
 	LastDeployID uint64 `gorm:"column:last_deploy_id" json:"lastDeployId"`
+
+	// LastIDs 上次执行建出的全部记录（`{"k":"build","id":12}` 形态的 JSON 数组）。
+	//
+	// 为什么不能只留 LastBuildID：多目标任务的"上次还没跑完就跳过"必须**逐条**判断，
+	// 只看第一条会出现"第一条早结束了、后面那条还在跑，于是又发一轮"，
+	// 而同一个服务的部署单会撞锁、构建会白跑一遍。
+	LastIDs JSONText `gorm:"column:last_ids;type:json" json:"lastIds,omitempty"`
 
 	CreatedBy *uint64 `gorm:"column:created_by" json:"-"`
 	UpdatedBy *uint64 `gorm:"column:updated_by" json:"-"`

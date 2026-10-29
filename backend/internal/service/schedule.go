@@ -47,8 +47,19 @@ const (
 	maxMissedScan = 500
 
 	// scheduleExecTimeout 单次执行的超时。
-	// 这里只等"建单"这一步（入队即返回），不等构建跑完，所以 2 分钟很宽裕。
-	scheduleExecTimeout = 2 * time.Minute
+	//
+	// 这里等的是"逐条建单"，不等构建 / 部署跑完（建单即入队就返回）。
+	// 单条最坏情况要解析仓库标签（一次 Harbor 查询），批量 20~30 个目标时
+	// 串起来可能到一分钟以上 —— 2 分钟会不够，5 分钟留足余量，
+	// 又不至于在数据库卡死时把 goroutine 拖太久。
+	scheduleExecTimeout = 5 * time.Minute
+
+	// maxScheduleTargets 一条任务最多带多少个目标。
+	//
+	// 上限是"防手滑"用的，不是容量极限：一次 tick 里循环建单，
+	// 每条建单只是一次 INSERT + 入队。50 已经远超"一次铺满一个环境"的量，
+	// 真给到几千条，用户更该分批配置，而不是指望一条任务跑一整晚。
+	maxScheduleTargets = 50
 )
 
 // scheduleCronParser 标准 5 字段（分 时 日 月 周）。
@@ -77,13 +88,18 @@ type ScheduleService struct {
 // --------------------------------------------------------------------------- 入参 / 出参
 
 type ScheduleDTO struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	TaskType   string `json:"taskType"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	TaskType string `json:"taskType"`
+	// ProjectKey / Branch / ImageTag / ImageRecordID 是 Targets 里**第一个**的镜像，
+	// 只为兼容旧界面与列表展示；判断"这条任务都干些什么"请看 Targets。
 	ProjectKey string `json:"projectKey"`
 	EnvKey     string `json:"envKey"`
 	Cron       string `json:"cron"`
 	Enabled    bool   `json:"enabled"`
+
+	// Targets 目标清单（至少 1 条）。旧数据无此字段时由镜像列还原。
+	Targets []model.ScheduleTarget `json:"targets"`
 
 	Branch      string            `json:"branch"`
 	BuildParams map[string]string `json:"buildParams,omitempty"`
@@ -95,13 +111,13 @@ type ScheduleDTO struct {
 
 	Remark string `json:"remark"`
 
-	NextRunAt   *time.Time `json:"nextRunAt"`
-	LastRunAt   *time.Time `json:"lastRunAt"`
-	LastStatus  string     `json:"lastStatus"`
-	LastError   string     `json:"lastError"`
-	MissedCount int        `json:"missedCount"`
-	LastBuildID string     `json:"lastBuildId"`
-	LastDeployID string    `json:"lastDeployId"`
+	NextRunAt    *time.Time `json:"nextRunAt"`
+	LastRunAt    *time.Time `json:"lastRunAt"`
+	LastStatus   string     `json:"lastStatus"`
+	LastError    string     `json:"lastError"`
+	MissedCount  int        `json:"missedCount"`
+	LastBuildID  string     `json:"lastBuildId"`
+	LastDeployID string     `json:"lastDeployId"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -111,10 +127,13 @@ type ScheduleDTO struct {
 type ScheduleInput struct {
 	Name     string `json:"name" binding:"required,max=64"`
 	TaskType string `json:"taskType" binding:"required,oneof=build deploy"`
-	// ProjectKey / EnvKey 在定时任务里**不做**"已纳管"校验：
-	// 定时部署的典型场景恰恰是"资源还没纳管、先把发布排上"。
-	// 但项目和环境本身必须存在，否则任务永远跑不起来。
-	ProjectKey string `json:"projectKey" binding:"required,max=64"`
+	// Targets 多目标（批量构建 / 批量部署）。
+	//
+	// 兼容旧的单目标写法：只给 ProjectKey/Branch/ImageTag 时，normalize 会把它
+	// 折叠成一条目标。两条路最终汇成同一个 targets 切片，不会出现"两套执行逻辑"。
+	Targets []model.ScheduleTarget `json:"targets"`
+
+	ProjectKey string `json:"projectKey" binding:"max=64"`
 	EnvKey     string `json:"envKey" binding:"max=64"`
 	Cron       string `json:"cron" binding:"required,max=64"`
 	// Enabled 指针：不传 = 新建默认启用，编辑时不动。
@@ -134,9 +153,9 @@ type ScheduleInput struct {
 
 // SchedulePreview 校验表达式并预览接下来几次执行时间（建任务时给用户看）。
 type SchedulePreview struct {
-	Valid  bool        `json:"valid"`
-	Error  string      `json:"error"`
-	Next   []time.Time `json:"next"`
+	Valid bool        `json:"valid"`
+	Error string      `json:"error"`
+	Next  []time.Time `json:"next"`
 }
 
 // --------------------------------------------------------------------------- 查询
@@ -148,7 +167,11 @@ func (s *ScheduleService) ListSchedules(ctx context.Context, taskType, projectKe
 		db = db.Where("task_type = ?", t)
 	}
 	if p := strings.TrimSpace(projectKey); p != "" {
-		db = db.Where("project_key = ?", p)
+		// ⚠️ 不能只查 project_key：那是**第一个**目标的镜像列，
+		// 按第 2 个目标去筛会漏掉这条任务（"我明明配了它" 却搜不到）。
+		// targets 是 json 列，这里用 LIKE 匹配序列化后的键值对；
+		// 项目标识只含 [a-z0-9-]，不含需要转义的字符。
+		db = db.Where("project_key = ? OR targets LIKE ?", p, `%"projectKey":"`+p+`"%`)
 	}
 	var rows []model.ScheduleTask
 	if err := db.Order("enabled DESC, next_run_at, id").Find(&rows).Error; err != nil {
@@ -180,23 +203,26 @@ func (s *ScheduleService) CreateSchedule(ctx context.Context, in ScheduleInput, 
 		return nil, err
 	}
 	uid := c.UserID()
+	first := norm.Targets[0]
 	t := &model.ScheduleTask{
-		Name:          norm.Name,
-		TaskType:      norm.TaskType,
-		ProjectKey:    norm.ProjectKey,
+		Name:     norm.Name,
+		TaskType: norm.TaskType,
+		Targets:  encodeScheduleTargets(norm.Targets),
+		// 镜像列取第一个目标，只为"按项目筛任务"与旧界面读得到
+		ProjectKey:    first.ProjectKey,
+		Branch:        first.Branch,
+		ImageTag:      first.ImageTag,
+		ImageRecordID: first.ImageRecordID,
 		EnvKey:        norm.EnvKey,
 		Cron:          norm.Cron,
 		// 新建默认启用（用户点了"创建"就是要它跑起来）
-		Enabled:       true,
-		Branch:        norm.Branch,
-		BuildParams:   encodeScheduleParams(norm.BuildParams),
-		ImageSource:   norm.ImageSource,
-		ImageTag:      norm.ImageTag,
-		ImageRecordID: norm.ImageRecordID,
-		Replicas:      norm.Replicas,
-		Remark:        norm.Remark,
-		CreatedBy:     uid,
-		UpdatedBy:     uid,
+		Enabled:     true,
+		BuildParams: encodeScheduleParams(norm.BuildParams),
+		ImageSource: norm.ImageSource,
+		Replicas:    norm.Replicas,
+		Remark:      norm.Remark,
+		CreatedBy:   uid,
+		UpdatedBy:   uid,
 	}
 	if norm.Enabled != nil {
 		t.Enabled = *norm.Enabled
@@ -226,17 +252,19 @@ func (s *ScheduleService) UpdateSchedule(ctx context.Context, id uint64, in Sche
 		return nil, err
 	}
 	uid := c.UserID()
+	first := norm.Targets[0]
 	updates := map[string]any{
 		"name":            norm.Name,
 		"task_type":       norm.TaskType,
-		"project_key":     norm.ProjectKey,
+		"targets":         encodeScheduleTargets(norm.Targets),
+		"project_key":     first.ProjectKey,
+		"branch":          first.Branch,
+		"image_tag":       first.ImageTag,
+		"image_record_id": first.ImageRecordID,
 		"env_key":         norm.EnvKey,
 		"cron":            norm.Cron,
 		"build_params":    encodeScheduleParams(norm.BuildParams),
-		"branch":          norm.Branch,
 		"image_source":    norm.ImageSource,
-		"image_tag":       norm.ImageTag,
-		"image_record_id": norm.ImageRecordID,
 		"replicas":        norm.Replicas,
 		"remark":          norm.Remark,
 		"updated_by":      uid,
@@ -469,9 +497,9 @@ func (s *ScheduleService) tick(ctx context.Context) {
 		// 正常到点：先写 running 再异步执行。
 		// 先写库是为了"上次还在跑就跳过"这个判断在下一轮能生效。
 		_ = s.db(ctx).Model(&model.ScheduleTask{}).Where("id = ?", t.ID).Updates(map[string]any{
-			"next_run_at":  next,
-			"last_status":  "running",
-			"last_error":   "",
+			"next_run_at": next,
+			"last_status": "running",
+			"last_error":  "",
 		})
 		taskID := t.ID
 		go func() {
@@ -485,11 +513,11 @@ func (s *ScheduleService) tick(ctx context.Context) {
 			}
 			if !row.Enabled {
 				// 扫描之后、执行之前被人停了 —— 尊重这个动作
-				s.finishTask(ectx, taskID, "skipped", "", 0, 0, "已被停用，本次不执行")
+				s.finishTask(ectx, taskID, "skipped", "", 0, 0, nil, "已被停用，本次不执行")
 				return
 			}
 			if busy, reason := s.stillRunning(ectx, &row); busy {
-				s.finishTask(ectx, taskID, "skipped", "", 0, 0, reason)
+				s.finishTask(ectx, taskID, "skipped", "", 0, 0, nil, reason)
 				return
 			}
 			_ = s.execute(ectx, &row, "")
@@ -499,65 +527,139 @@ func (s *ScheduleService) tick(ctx context.Context) {
 
 // --------------------------------------------------------------------------- 执行
 
-// execute 建单。triggerNote 非空时附加到备注（用于区分手动立即执行）。
+// execute 逐条建单（批量）。
+//
+// 编排放在后端而不是前端，与批量发布同一口径（2026-10-16 `ca7c60c` 的教训）：
+// 前端逐个调接口的话，关掉页面后面的目标就再也不会被创建。
+// 这里是一次性把**全部**目标建成单子，建完就与浏览器无关。
+//
+// 目标之间**互相独立**：一个项目失败不影响其余继续建（这正好是运维要的 ——
+// 8 个包里有 1 个分支写错，不该连累另外 7 个）。最终按三档汇报结果。
 func (s *ScheduleService) execute(ctx context.Context, t *model.ScheduleTask, triggerNote string) error {
 	// 用 DisplayName 而不是冒充某个用户：
 	// 定时任务没有"当前登录人"，冒用创建者的身份会让审计失真。
 	// 同时 User 为 nil 意味着跳过部署的权限校验 —— 权限在**创建任务时**校验过。
 	caller := Caller{DisplayName: "定时任务：" + t.Name}
 
+	targets := scheduleTargetsOf(t)
+	if len(targets) == 0 {
+		// 理论上 normalize 已经拦住；这里兜底是为了不让一条坏任务把调度器搞崩。
+		msg := "任务没有配置任何目标，请重新编辑"
+		s.finishTask(ctx, t.ID, "failed", msg, 0, 0, nil, "")
+		return errs.Invalid(msg)
+	}
+
 	var (
-		buildID  uint64
-		deployID uint64
-		err      error
+		refs                    []scheduleRef
+		failures                []string
+		firstBuild, firstDeploy uint64
 	)
 
-	switch t.TaskType {
-	case "build":
-		buildID, err = s.triggerBuild(ctx, t, caller)
-	case "deploy":
-		var in CreateDeploymentInput
-		in, err = s.buildDeployInput(ctx, t, triggerNote)
-		if err == nil {
-			var dto *DeployDTO
-			dto, err = s.cd.CreateDeployment(ctx, in, caller)
-			if err == nil && dto != nil {
-				deployID = parseUint64(dto.ID)
+	for _, tg := range targets {
+		bID, dID, err := s.executeTarget(ctx, t, tg, caller, triggerNote)
+		if err != nil {
+			// 只取 .Message：`*errs.Error.Error()` 带 `code=NNNNN` 前缀，那是给日志看的
+			failures = append(failures, fmt.Sprintf("%s：%s", tg.ProjectKey, userMessage(err)))
+			s.log("schedule").Warn("定时任务某个目标失败（其余继续）",
+				"task", t.ID, "name", t.Name, "project", tg.ProjectKey, "err", userMessage(err))
+			continue
+		}
+		if bID != 0 {
+			refs = append(refs, scheduleRef{Kind: "build", ID: bID})
+			if firstBuild == 0 {
+				firstBuild = bID
 			}
 		}
-	default:
-		err = fmt.Errorf("未知的任务类型 %q", t.TaskType)
+		if dID != 0 {
+			refs = append(refs, scheduleRef{Kind: "deploy", ID: dID})
+			if firstDeploy == 0 {
+				firstDeploy = dID
+			}
+		}
 	}
 
-	next := nextRunAfter(t.Cron, now())
-	if err != nil {
-		msg := userMessage(err)
-		s.log("schedule").Warn("定时任务执行失败", "task", t.ID, "name", t.Name, "err", msg)
-		s.finishTask(ctx, t.ID, "failed", msg, buildID, deployID, "")
-		return err
+	status := aggregateScheduleStatus(len(targets), len(failures))
+	summary := ""
+	if len(failures) > 0 {
+		summary = fmt.Sprintf("%d 个目标中 %d 个失败 —— %s",
+			len(targets), len(failures), strings.Join(failures, "；"))
 	}
+
 	s.log("schedule").Info("定时任务已建单", "task", t.ID, "name", t.Name,
-		"buildId", buildID, "deployId", deployID)
-	s.finishTask(ctx, t.ID, "success", "", buildID, deployID, "")
-	_ = next
+		"targets", len(targets), "failed", len(failures), "status", status)
+	s.finishTask(ctx, t.ID, status, summary, firstBuild, firstDeploy, refs, "")
+	if summary != "" {
+		// ⚠️ 必须带业务码返回（Upstream），不能直接 `errors.New(summary)`：
+		// 裸 error 会被 errs.From 归一化成 50000「服务端内部错误，请联系管理员」，
+		// 那句人话（哪个服务、为什么失败）就**整段丢掉**了。
+		// 手动"立即执行"时这就是用户唯一能看到的原因。
+		return errs.Upstream(nil, "%s", summary)
+	}
 	return nil
+}
+
+// aggregateScheduleStatus 批量执行的结果档位。
+//
+// 三档而不是两档：批量的失败通常是"一半成功、一半失败"（某个分支写错、
+// 某个服务没构建过）。并进 success 会让人以为全发完了，
+// 并进 failed 又会让"已经发上去那一半"看起来像没发生 —— 回滚 / 重试前
+// 必须先知道是哪些成功。
+func aggregateScheduleStatus(total, failed int) string {
+	switch {
+	case total <= 0 || failed >= total:
+		return "failed"
+	case failed > 0:
+		return "partial"
+	default:
+		return "success"
+	}
+}
+
+// executeTarget 建一个目标对应的单。
+//
+// 返回的 id 是**本次新建的那条记录**，不是任务上的历史值：
+// 调用方要用它拼 LastIDs，供"上次还没跑完就跳过"逐条判断。
+func (s *ScheduleService) executeTarget(ctx context.Context, t *model.ScheduleTask, tg model.ScheduleTarget,
+	caller Caller, triggerNote string) (buildID, deployID uint64, err error) {
+	switch t.TaskType {
+	case "build":
+		buildID, err = s.triggerBuild(ctx, t, tg, caller)
+		return buildID, 0, err
+	case "deploy":
+		in, ierr := s.buildDeployInput(ctx, t, tg, triggerNote)
+		if ierr != nil {
+			return 0, 0, ierr
+		}
+		dto, derr := s.cd.CreateDeployment(ctx, in, caller)
+		if derr != nil {
+			return 0, 0, derr
+		}
+		if dto != nil {
+			deployID = parseUint64(dto.ID)
+		}
+		return 0, deployID, nil
+	default:
+		return 0, 0, fmt.Errorf("未知的任务类型 %q", t.TaskType)
+	}
 }
 
 // triggerBuild 触发一次构建，**按项目的构建方式分流**。
 //
 // ⚠️ 这里必须分流，否则定时构建对绝大多数项目是死的：
 // 平台有两条完全独立的构建链路 ——
-//   · `dockerfile` / `tag`：平台自己拉代码、跑 docker build、推镜像 → TriggerBuild
-//   · `jenkins`：平台只负责调 Jenkins API，产物由 Jenkins 自己打包推送 → TriggerJenkinsBuild
+//
+//	· `dockerfile` / `tag`：平台自己拉代码、跑 docker build、推镜像 → TriggerBuild
+//	· `jenkins`：平台只负责调 Jenkins API，产物由 Jenkins 自己打包推送 → TriggerJenkinsBuild
+//
 // 而 `TriggerBuild` 对 jenkins 项目是**兜底拒绝**的（防止平台拿 Jenkins 的参数
 // 当自己的分支名去跑一次 docker 构建，最后落一条与 Jenkins 对不上的记录）。
 // 实测（2026-10-29 本机）：只调 TriggerBuild 时，Jenkins 项目直接 409
 // 「平台不会代为执行 docker 构建」—— 功能等于只对少数项目可用。
-func (s *ScheduleService) triggerBuild(ctx context.Context, t *model.ScheduleTask, caller Caller) (uint64, error) {
+func (s *ScheduleService) triggerBuild(ctx context.Context, t *model.ScheduleTask, tg model.ScheduleTarget, caller Caller) (uint64, error) {
 	var p model.Project
-	if err := s.db(ctx).Where("project_key = ?", t.ProjectKey).First(&p).Error; err != nil {
+	if err := s.db(ctx).Where("project_key = ?", tg.ProjectKey).First(&p).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, errs.NotFoundf("项目 %s 不存在（可能已被删除）", t.ProjectKey)
+			return 0, errs.NotFoundf("项目 %s 不存在（可能已被删除）", tg.ProjectKey)
 		}
 		return 0, errs.Internalf(err, "查询项目失败")
 	}
@@ -568,11 +670,11 @@ func (s *ScheduleService) triggerBuild(ctx context.Context, t *model.ScheduleTas
 		if job == "" {
 			return 0, errs.Invalid(fmt.Sprintf(
 				"项目 %s 的构建方式是 Jenkins Job，但还没绑定具体 Job。"+
-					"请先到「项目管理」里选好 Job，否则定时任务无法触发任何构建", t.ProjectKey))
+					"请先到「项目管理」里选好 Job，否则定时任务无法触发任何构建", tg.ProjectKey))
 		}
 		res, err := s.ci.TriggerJenkinsBuild(ctx, JenkinsTriggerInput{
 			FullName:   job,
-			Parameters: jenkinsParams(params),
+			Parameters: jenkinsParams(params, tg),
 		}, caller)
 		if err != nil {
 			return 0, err
@@ -584,8 +686,8 @@ func (s *ScheduleService) triggerBuild(ctx context.Context, t *model.ScheduleTas
 	}
 
 	dto, err := s.ci.TriggerBuild(ctx, TriggerBuildInput{
-		ProjectKey:  t.ProjectKey,
-		Branch:      t.Branch,
+		ProjectKey:  tg.ProjectKey,
+		Branch:      tg.Branch,
 		Params:      params,
 		TriggerType: "schedule",
 		TriggerName: "定时任务：" + t.Name,
@@ -599,31 +701,45 @@ func (s *ScheduleService) triggerBuild(ctx context.Context, t *model.ScheduleTas
 	return parseUint64(dto.ID), nil
 }
 
-// jenkinsParams 把任务里存的参数表转成 Jenkins 的 Name/Value 列表。
+// jenkinsParams 把任务里存的参数表 + 目标上的分支转成 Jenkins 的 Name/Value 列表。
 //
 // 顺序按 key 排序，仅为了同样的任务每次发出的请求体一致（便于比对日志）。
-func jenkinsParams(m map[string]string) []integration.JenkinsBuildParam {
-	if len(m) == 0 {
-		// 空 = 全部用 Jenkins 自己配的默认值，与在 Jenkins 页面直接点 Build 一致
-		return nil
+//
+// ⚠️ 分支（tg.Branch + tg.BranchParam）**优先于同名的任务级参数**：
+// 目标上写的是"这次要用哪个分支"，是更具体的意图。反过来会让用户在行里改了分支
+// 却仍按任务级参数构建 —— 界面显示与结果不一致，而且不报错。
+func jenkinsParams(m map[string]string, tg model.ScheduleTarget) []integration.JenkinsBuildParam {
+	branchParam := strings.TrimSpace(tg.BranchParam)
+	branch := strings.TrimSpace(tg.Branch)
+
+	out := make([]integration.JenkinsBuildParam, 0, len(m)+1)
+	if branch != "" && branchParam != "" {
+		out = append(out, integration.JenkinsBuildParam{Name: branchParam, Value: branch})
 	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
+		if branchParam != "" && k == branchParam {
+			continue // 已被目标上的分支覆盖
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	out := make([]integration.JenkinsBuildParam, 0, len(keys))
 	for _, k := range keys {
 		out = append(out, integration.JenkinsBuildParam{Name: k, Value: m[k]})
+	}
+	if len(out) == 0 {
+		// 空 = 全部用 Jenkins 自己配的默认值，与在 Jenkins 页面直接点 Build 一致
+		return nil
 	}
 	return out
 }
 
-// buildDeployInput 把任务配置翻译成一次部署的入参。
-func (s *ScheduleService) buildDeployInput(ctx context.Context, t *model.ScheduleTask, triggerNote string) (CreateDeploymentInput, error) {
+// buildDeployInput 把任务配置 + 一个目标翻译成一次部署的入参。
+func (s *ScheduleService) buildDeployInput(ctx context.Context, t *model.ScheduleTask, tg model.ScheduleTarget,
+	triggerNote string) (CreateDeploymentInput, error) {
 	in := CreateDeploymentInput{
 		EnvKey:     t.EnvKey,
-		ProjectKey: t.ProjectKey,
+		ProjectKey: tg.ProjectKey,
 		Replicas:   t.Replicas,
 		Remark:     "定时任务：" + t.Name,
 	}
@@ -639,12 +755,12 @@ func (s *ScheduleService) buildDeployInput(ctx context.Context, t *model.Schedul
 		// 而且平台构建记录是"我们自己造出来的产物"，可追溯；
 		// 仓库里可能有别人手工推的 tag，拿它发版等于把一个来历不明的版本推到线上。
 		var rec model.ImageRecord
-		err := s.db(ctx).Where("project_key = ?", t.ProjectKey).Order("id DESC").First(&rec).Error
+		err := s.db(ctx).Where("project_key = ?", tg.ProjectKey).Order("id DESC").First(&rec).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return in, errs.Invalid(fmt.Sprintf(
 					"项目 %s 在平台上还没有任何构建记录，「每次取最新」发不出去。请先构建一次，或把任务改成指定版本",
-					t.ProjectKey))
+					tg.ProjectKey))
 			}
 			return in, errs.Internalf(err, "查询最新构建记录失败")
 		}
@@ -652,18 +768,19 @@ func (s *ScheduleService) buildDeployInput(ctx context.Context, t *model.Schedul
 		in.ImageRecordID = strconv.FormatUint(rec.ID, 10)
 		in.Remark += "（取最新构建 " + rec.Tag + "）"
 	default: // fixed
-		if id := strings.TrimSpace(t.ImageRecordID); id != "" {
+		if id := strings.TrimSpace(tg.ImageRecordID); id != "" {
 			in.ImageSource = "platform"
 			in.ImageRecordID = id
-			if t.ImageTag != "" {
-				in.Remark += "（" + t.ImageTag + "）"
+			if tg.ImageTag != "" {
+				in.Remark += "（" + tg.ImageTag + "）"
 			}
-		} else if tag := strings.TrimSpace(t.ImageTag); tag != "" {
+		} else if tag := strings.TrimSpace(tg.ImageTag); tag != "" {
 			in.ImageSource = "registry"
 			in.RegistryTag = tag
 			in.Remark += "（仓库标签 " + tag + "）"
 		} else {
-			return in, errs.Invalid("任务没有指定版本：请选一个具体版本，或改成「每次取最新」")
+			return in, errs.Invalid(fmt.Sprintf(
+				"项目 %s 没有指定版本：给它选一个具体版本，或把整个任务改成「每次取最新」", tg.ProjectKey))
 		}
 	}
 	return in, nil
@@ -674,34 +791,41 @@ func (s *ScheduleService) buildDeployInput(ctx context.Context, t *model.Schedul
 // 用**实际记录的 status** 判断，而不是任务的 LastStatus：
 // 后者在进程重启后可能是残留的 "running"，而那条构建其实早就结束了 ——
 // 用残留状态判断会让任务从此被永久跳过，且没有任何报错。
+//
+// 多目标必须**逐条**看（LastIDs）：只看第一条会出现"第一条早结束了、
+// 第二条还在跑，于是又发一轮"，同一服务的部署单会撞锁、构建会白跑一遍。
 func (s *ScheduleService) stillRunning(ctx context.Context, t *model.ScheduleTask) (bool, string) {
-	switch t.TaskType {
-	case "build":
-		if t.LastBuildID == 0 {
-			return false, ""
+	refs := scheduleRefsOf(t)
+	if len(refs) == 0 {
+		return false, ""
+	}
+	var builds, deploys []uint64
+	for _, r := range refs {
+		switch r.Kind {
+		case "build":
+			builds = append(builds, r.ID)
+		case "deploy":
+			deploys = append(deploys, r.ID)
 		}
+	}
+	if len(builds) > 0 {
 		var n int64
-		if err := s.db(ctx).Model(&model.BuildRecord{}).
-			Where("id = ? AND status IN ?", t.LastBuildID, []string{"queued", "running"}).
-			Count(&n).Error; err != nil {
-			return false, ""
+		err := s.db(ctx).Model(&model.BuildRecord{}).
+			Where("id IN ? AND status IN ?", builds, []string{"queued", "running"}).
+			Count(&n).Error
+		// 查询失败时放行：宁可多发一次，也不要因为一次查询抖动把任务永久跳过。
+		if err == nil && n > 0 {
+			return true, fmt.Sprintf("上次还有 %d 个构建没结束，本次跳过（不并发发两轮）", n)
 		}
-		if n > 0 {
-			return true, fmt.Sprintf("上次构建（#%d）还在执行中，本次跳过", t.LastBuildID)
-		}
-	case "deploy":
-		if t.LastDeployID == 0 {
-			return false, ""
-		}
+	}
+	if len(deploys) > 0 {
 		var n int64
-		if err := s.db(ctx).Model(&model.DeployRecord{}).
-			Where("id = ? AND status IN ?", t.LastDeployID,
+		err := s.db(ctx).Model(&model.DeployRecord{}).
+			Where("id IN ? AND status IN ?", deploys,
 				[]string{"queued", "progressing", "pending_approval"}).
-			Count(&n).Error; err != nil {
-			return false, ""
-		}
-		if n > 0 {
-			return true, fmt.Sprintf("上次部署（#%d）还没结束，本次跳过", t.LastDeployID)
+			Count(&n).Error
+		if err == nil && n > 0 {
+			return true, fmt.Sprintf("上次还有 %d 个部署没结束，本次跳过（不并发发两轮）", n)
 		}
 	}
 	return false, ""
@@ -711,7 +835,11 @@ func (s *ScheduleService) stillRunning(ctx context.Context, t *model.ScheduleTas
 //
 // ⚠️ 不碰 next_run_at：它已经在 tick 里推进过了。
 // 这里再算一次会与 tick 的结果不一致，导致"下次执行时间"来回跳。
-func (s *ScheduleService) finishTask(ctx context.Context, id uint64, status, errMsg string, buildID, deployID uint64, note string) {
+//
+// refs 是本次建出的**全部**记录，落进 last_ids 供下一轮逐条判断"是否还没跑完"；
+// last_build_id / last_deploy_id 仍取第一条，只用于界面上的"看构建 / 看部署"跳转。
+func (s *ScheduleService) finishTask(ctx context.Context, id uint64, status, errMsg string,
+	buildID, deployID uint64, refs []scheduleRef, note string) {
 	at := now()
 	updates := map[string]any{
 		"last_status": status,
@@ -723,6 +851,13 @@ func (s *ScheduleService) finishTask(ctx context.Context, id uint64, status, err
 	}
 	if deployID != 0 {
 		updates["last_deploy_id"] = deployID
+	}
+	if len(refs) > 0 {
+		updates["last_ids"] = encodeScheduleRefs(refs)
+	} else if status != "success" && status != "partial" && status != "running" {
+		// 本次一个单都没建出来（全失败 / 跳过）：清掉上一轮的记录，
+		// 否则"上次还没跑完就跳过"会用上一轮的 id 一直误判。
+		updates["last_ids"] = nil
 	}
 	if status != "missed" {
 		// 跑过一次就说明"错过计数"该归零：否则错过了 3 次之后恢复正常，
@@ -741,13 +876,9 @@ func (s *ScheduleService) normalize(ctx context.Context, in ScheduleInput, c Cal
 	out := in
 	out.Name = strings.TrimSpace(in.Name)
 	out.TaskType = strings.TrimSpace(in.TaskType)
-	out.ProjectKey = strings.TrimSpace(in.ProjectKey)
 	out.EnvKey = strings.TrimSpace(in.EnvKey)
 	out.Cron = strings.TrimSpace(in.Cron)
-	out.Branch = strings.TrimSpace(in.Branch)
 	out.ImageSource = strings.TrimSpace(in.ImageSource)
-	out.ImageTag = strings.TrimSpace(in.ImageTag)
-	out.ImageRecordID = strings.TrimSpace(in.ImageRecordID)
 	out.Remark = strings.TrimSpace(in.Remark)
 
 	if out.Name == "" {
@@ -758,32 +889,58 @@ func (s *ScheduleService) normalize(ctx context.Context, in ScheduleInput, c Cal
 			"例如 0 2 * * * 表示每天 02:00", err)
 	}
 
-	// 项目必须存在（否则任务永远跑不起来，而用户要到点才发现）
-	var pn int64
-	if err := s.db(ctx).Model(&model.Project{}).Where("project_key = ?", out.ProjectKey).Count(&pn).Error; err != nil {
-		return out, errs.Internalf(err, "查询项目失败")
+	// 目标归一化 + 项目存在性（一次查完，别 N+1）
+	targets, projs, err := s.normalizeTargets(ctx, in)
+	if err != nil {
+		return out, err
 	}
-	if pn == 0 {
-		return out, errs.NotFoundf("项目 %s 不存在", out.ProjectKey)
-	}
+	out.Targets = targets
+	// 镜像列统一从第一个目标派生，别信客户端传来的旧字段
+	out.ProjectKey = targets[0].ProjectKey
+	out.Branch = targets[0].Branch
+	out.ImageTag = targets[0].ImageTag
+	out.ImageRecordID = targets[0].ImageRecordID
 
 	switch out.TaskType {
 	case "build":
 		out.EnvKey = "" // build 不涉及环境，防止误存一个不相干的值
-		out.ImageSource, out.ImageTag, out.ImageRecordID, out.Replicas = "", "", "", nil
+		out.ImageSource, out.Replicas = "", nil
 		if c.User != nil && !c.User.HasAnyPerm("build:trigger", "*") {
 			return out, errs.Forbidden("你没有触发构建的权限（build:trigger），无法配置定时构建")
 		}
-		// Jenkins 项目必须已经绑定了 Job —— 提前拦住。
-		// 不拦的话任务能建成功、界面显示"已启用/下次执行时间"，但每次执行都失败，
-		// 而用户要等到点之后才发现（配置期本该是最容易发现的时候）。
-		var p model.Project
-		if err := s.db(ctx).Where("project_key = ?", out.ProjectKey).First(&p).Error; err == nil {
-			if strings.EqualFold(strings.TrimSpace(p.BuildMethod), "jenkins") &&
-				strings.TrimSpace(p.JenkinsJob) == "" {
+		for i := range out.Targets {
+			tg := &out.Targets[i]
+			// build 任务不带版本（版本是交付物，不是输入）
+			tg.ImageTag, tg.ImageRecordID = "", ""
+			p := projs[tg.ProjectKey]
+			jenkins := strings.EqualFold(strings.TrimSpace(p.BuildMethod), "jenkins")
+			if jenkins {
+				// Jenkins 项目必须已经绑定了 Job —— 提前拦住。
+				// 不拦的话任务能建成功、界面显示"已启用/下次执行时间"，但每次执行都失败，
+				// 而用户要等到点之后才发现（配置期本该是最容易发现的时候）。
+				if strings.TrimSpace(p.JenkinsJob) == "" {
+					return out, errs.Invalid(fmt.Sprintf(
+						"项目 %s 的构建方式是 Jenkins Job，但还没有绑定具体 Job。"+
+							"请先到「项目管理」里选好 Job，再来配定时构建", tg.ProjectKey))
+				}
+				// Jenkins 的分支是"某个参数的值"：说了分支就必须说清传给哪个参数，
+				// 否则到点只能不传 —— 那等于悄悄用了 Jenkins 的默认分支。
+				if tg.Branch != "" && tg.BranchParam == "" {
+					return out, errs.Invalid(fmt.Sprintf(
+						"项目 %s 选了分支 %s，但没说明要传给 Jenkins 的哪个参数。"+
+							"请在编辑时重新选一次分支（界面会自动带上参数名）", tg.ProjectKey, tg.Branch))
+				}
+				continue
+			}
+			// 平台自建构建：分支必填。
+			//
+			// 用户明确要求（2026-10-29）："定时构建肯定要填写项目的分支啊，不用默认参数，
+			// 手动可选"。理由很实在 —— 定时任务半夜跑，如果分支靠默认值，
+			// 项目默认分支一改，第二天构建的就不是你排的那条了，而且没人知道。
+			if tg.Branch == "" {
 				return out, errs.Invalid(fmt.Sprintf(
-					"项目 %s 的构建方式是 Jenkins Job，但还没有绑定具体 Job。"+
-						"请先到「项目管理」里选好 Job，再来配定时构建", out.ProjectKey))
+					"项目 %s 没有指定分支。定时构建请明确写上分支，"+
+						"不要让它在到点时才由默认值决定", tg.ProjectKey))
 			}
 		}
 	case "deploy":
@@ -800,8 +957,20 @@ func (s *ScheduleService) normalize(ctx context.Context, in ScheduleInput, c Cal
 		if out.ImageSource == "" {
 			out.ImageSource = "fixed"
 		}
-		if out.ImageSource == "fixed" && out.ImageTag == "" && out.ImageRecordID == "" {
-			return out, errs.Invalid("定时部署要指定发哪个版本：选一个具体版本，或改成「每次取最新」")
+		for i := range out.Targets {
+			tg := &out.Targets[i]
+			// 部署不用分支（分支是构建的输入）
+			tg.Branch, tg.BranchParam = "", ""
+			if out.ImageSource == "fixed" {
+				if tg.ImageTag == "" && tg.ImageRecordID == "" {
+					return out, errs.Invalid(fmt.Sprintf(
+						"项目 %s 还没选要发的版本：给它选一个具体版本，"+
+							"或把整个任务改成「每次取最新」", tg.ProjectKey))
+				}
+			} else {
+				// latest：目标上的固定版本一律清掉，避免"看着写了固定版本、实际发的是最新"
+				tg.ImageTag, tg.ImageRecordID = "", ""
+			}
 		}
 		// 权限按环境校验，与手动部署同一口径
 		if c.User != nil && !c.User.HasAnyPerm("deploy:"+out.EnvKey, "deploy:*", "*") {
@@ -815,6 +984,71 @@ func (s *ScheduleService) normalize(ctx context.Context, in ScheduleInput, c Cal
 	// Enabled 保持指针语义（nil = "没传"，由调用方决定默认值），
 	// 这里不强行赋默认值 —— 编辑时不传就表示"不改启停状态"。
 	return out, nil
+}
+
+// normalizeTargets 把入参折叠成目标清单，并顺手校验项目存在。
+//
+// 兼容两种写法：新界面给 Targets（多目标），旧调用只给 ProjectKey（单目标）。
+// 两条路在这里汇成一个切片 —— 后面只有一套执行逻辑。
+func (s *ScheduleService) normalizeTargets(ctx context.Context, in ScheduleInput) ([]model.ScheduleTarget, map[string]model.Project, error) {
+	raw := in.Targets
+	if len(raw) == 0 {
+		if k := strings.TrimSpace(in.ProjectKey); k != "" {
+			raw = []model.ScheduleTarget{{
+				ProjectKey:    k,
+				Branch:        in.Branch,
+				ImageTag:      in.ImageTag,
+				ImageRecordID: in.ImageRecordID,
+			}}
+		}
+	}
+	if len(raw) == 0 {
+		return nil, nil, errs.Invalid("请至少选择一个项目：定时任务要明确对谁做")
+	}
+	if len(raw) > maxScheduleTargets {
+		return nil, nil, errs.Invalidf("一条任务最多 %d 个目标，请分批配置", maxScheduleTargets)
+	}
+
+	out := make([]model.ScheduleTarget, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for i, t := range raw {
+		k := strings.TrimSpace(t.ProjectKey)
+		if k == "" {
+			return nil, nil, errs.Invalidf("第 %d 个目标没有选项目", i+1)
+		}
+		if seen[k] {
+			// 同一个项目在一条任务里出现两次：部署会撞同一把锁、构建会白跑一遍，
+			// 而且界面上一行一行长得一样，用户根本看不出重复。
+			return nil, nil, errs.Invalidf("项目 %s 重复了：同一个任务里同一个项目只需出现一次", k)
+		}
+		seen[k] = true
+		out = append(out, model.ScheduleTarget{
+			ProjectKey:    k,
+			Branch:        strings.TrimSpace(t.Branch),
+			BranchParam:   strings.TrimSpace(t.BranchParam),
+			ImageTag:      strings.TrimSpace(t.ImageTag),
+			ImageRecordID: strings.TrimSpace(t.ImageRecordID),
+		})
+	}
+
+	keys := make([]string, 0, len(out))
+	for _, t := range out {
+		keys = append(keys, t.ProjectKey)
+	}
+	var projs []model.Project
+	if err := s.db(ctx).Where("project_key IN ?", keys).Find(&projs).Error; err != nil {
+		return nil, nil, errs.Internalf(err, "查询项目失败")
+	}
+	byKey := make(map[string]model.Project, len(projs))
+	for _, p := range projs {
+		byKey[p.ProjectKey] = p
+	}
+	for _, t := range out {
+		if _, ok := byKey[t.ProjectKey]; !ok {
+			return nil, nil, errs.NotFoundf("项目 %s 不存在", t.ProjectKey)
+		}
+	}
+	return out, byKey, nil
 }
 
 // scheduleOf 按 id 取，并校验存在。
@@ -834,6 +1068,7 @@ func scheduleDTO(t *model.ScheduleTask) ScheduleDTO {
 		ID:            strconv.FormatUint(t.ID, 10),
 		Name:          t.Name,
 		TaskType:      t.TaskType,
+		Targets:       scheduleTargetsOf(t),
 		ProjectKey:    t.ProjectKey,
 		EnvKey:        t.EnvKey,
 		Cron:          t.Cron,
@@ -914,6 +1149,90 @@ func decodeScheduleParams(raw model.JSONText) map[string]string {
 		return nil
 	}
 	return m
+}
+
+// scheduleRef 上次执行建出的一条记录（用于"上次还没跑完就跳过"逐条判断）。
+type scheduleRef struct {
+	Kind string `json:"k"` // build / deploy
+	ID   uint64 `json:"id"`
+}
+
+// scheduleTargetsOf 从任务里取目标清单。
+//
+// 优先读 targets 列；旧数据（这一列是 NULL）由镜像列还原成一条 ——
+// 这样升级后老任务照常跑，不需要人工迁移。
+// **绝不能反过来**（先看镜像列）：多目标任务的镜像列只有第一个，
+// 那样会静默地只执行一个目标，而界面上明明写着 6 个。
+func scheduleTargetsOf(t *model.ScheduleTask) []model.ScheduleTarget {
+	var list []model.ScheduleTarget
+	if len(t.Targets) > 0 {
+		if err := json.Unmarshal(t.Targets, &list); err != nil {
+			// 坏 JSON 不能让调度器崩：退回镜像列，至少还能跑一个。
+			list = nil
+		}
+	}
+	out := make([]model.ScheduleTarget, 0, len(list))
+	for _, x := range list {
+		if k := strings.TrimSpace(x.ProjectKey); k != "" {
+			x.ProjectKey = k
+			out = append(out, x)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	if t.ProjectKey == "" {
+		return nil
+	}
+	return []model.ScheduleTarget{{
+		ProjectKey:    t.ProjectKey,
+		Branch:        t.Branch,
+		ImageTag:      t.ImageTag,
+		ImageRecordID: t.ImageRecordID,
+	}}
+}
+
+func encodeScheduleTargets(list []model.ScheduleTarget) model.JSONText {
+	if len(list) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(list)
+	if err != nil {
+		return nil
+	}
+	return model.JSONText(b)
+}
+
+// scheduleRefsOf 上次建出的全部记录。旧数据（last_ids 为空）退回单条 id。
+func scheduleRefsOf(t *model.ScheduleTask) []scheduleRef {
+	var list []scheduleRef
+	if len(t.LastIDs) > 0 {
+		if err := json.Unmarshal(t.LastIDs, &list); err != nil {
+			list = nil
+		}
+	}
+	if len(list) > 0 {
+		return list
+	}
+	out := make([]scheduleRef, 0, 2)
+	if t.LastBuildID != 0 {
+		out = append(out, scheduleRef{Kind: "build", ID: t.LastBuildID})
+	}
+	if t.LastDeployID != 0 {
+		out = append(out, scheduleRef{Kind: "deploy", ID: t.LastDeployID})
+	}
+	return out
+}
+
+func encodeScheduleRefs(list []scheduleRef) model.JSONText {
+	if len(list) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(list)
+	if err != nil {
+		return nil
+	}
+	return model.JSONText(b)
 }
 
 func parseUint64(s string) uint64 {

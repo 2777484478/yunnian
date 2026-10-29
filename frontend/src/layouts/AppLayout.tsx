@@ -103,9 +103,6 @@ const MENU: MenuGroup[] = [
       // build:trigger 分开：能看列表 ≠ 能点构建。
       { key: '/ci/jenkins', icon: <UnorderedListOutlined />, label: '任务管理', perms: ['build:read'] },
       { key: '/ci/builds', icon: <ThunderboltOutlined />, label: '构建记录', perms: ['build:read'] },
-      // 定时任务放在构建记录之后：它配的是"以后自动发"，属于配置类，
-      // 而不是每天要看的记录类。读权限要 build / deploy 任一（任务横跨两个域）。
-      { key: '/ci/schedules', icon: <ClockCircleOutlined />, label: '定时任务', perms: ['build:read', 'deploy:read'] },
       { key: '/ci/images', icon: <HddOutlined />, label: '镜像版本', perms: ['image:read'] },
     ],
   },
@@ -123,6 +120,22 @@ const MENU: MenuGroup[] = [
       { key: '/cd/environments', icon: <ApartmentOutlined />, label: '环境管理', perms: ['env:read'] },
       { key: '/cd/deploys', icon: <DeploymentUnitOutlined />, label: '部署记录', perms: ['deploy:read'] },
       { key: '/cd/rollbacks', icon: <RollbackOutlined />, label: '回滚记录', perms: ['rollback:read'] },
+    ],
+  },
+  {
+    // 定时任务**单独成顶层菜单**：一条任务要么构建、要么部署，
+    // 横跨 CI 与 CD，挂在任一侧都会让人在另一侧找不到它
+    // （用户原话："放在镜像构建下面不合适，单独放"）。
+    key: 'schedule',
+    icon: <ClockCircleOutlined />,
+    label: '定时任务',
+    children: [
+      {
+        key: '/schedules',
+        icon: <ClockCircleOutlined />,
+        label: '定时任务',
+        perms: ['build:read', 'deploy:read'],
+      },
     ],
   },
   {

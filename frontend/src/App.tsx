@@ -20,7 +20,7 @@ const DeployList = lazy(() => import('@/pages/cd/DeployList'));
 const RollbackList = lazy(() => import('@/pages/cd/RollbackList'));
 const AiAssistant = lazy(() => import('@/pages/AiAssistant'));
 const UsageDocs = lazy(() => import('@/pages/UsageDocs'));
-const ScheduleList = lazy(() => import('@/pages/ci/ScheduleList'));
+const ScheduleList = lazy(() => import('@/pages/schedules/ScheduleList'));
 const AuditLogPage = lazy(() => import('@/pages/AuditLogPage'));
 const SystemUsers = lazy(() => import('@/pages/system/SystemUsers'));
 const SystemRoles = lazy(() => import('@/pages/system/SystemRoles'));
@@ -104,8 +104,9 @@ const RoutedApp: React.FC = () => {
             <Route path="ci/projects" element={<RequirePerm codes={['project:read']}><ProjectList /></RequirePerm>} />
             <Route path="ci/projects/:key" element={<RequirePerm codes={['project:read']}><ProjectDetail /></RequirePerm>} />
             <Route path="ci/jenkins" element={<RequirePerm codes={['build:read']}><JenkinsJobList /></RequirePerm>} />
-            {/* 定时任务横跨 CI/CD，所以两边的读权限任一即可进入 */}
-            <Route path="ci/schedules" element={<RequirePerm codes={['build:read', 'deploy:read']}><ScheduleList /></RequirePerm>} />
+            {/* 定时任务横跨 CI/CD（一条任务要么构建、要么部署），
+                所以路由挂在顶层 /schedules，读权限两边任一即可进入。 */}
+            <Route path="schedules" element={<RequirePerm codes={['build:read', 'deploy:read']}><ScheduleList /></RequirePerm>} />
             <Route path="ci/builds" element={<RequirePerm codes={['build:read']}><BuildList /></RequirePerm>} />
             <Route path="ci/images" element={<RequirePerm codes={['image:read']}><ImageList /></RequirePerm>} />
 

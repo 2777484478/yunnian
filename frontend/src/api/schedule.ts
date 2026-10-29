@@ -17,10 +17,31 @@ export type ScheduleTaskType = 'build' | 'deploy';
 /** 定时部署发哪个版本。 */
 export type ScheduleImageSource = 'fixed' | 'latest';
 
+/**
+ * 一个目标：对哪个项目做、用什么分支 / 版本。
+ *
+ * 一条任务可以有多个目标（批量），这是真实用法 ——
+ * "部署发布的时候怎么可能只有 1 个服务"（用户原话 2026-10-29）。
+ */
+export interface ScheduleTarget {
+  projectKey: string;
+  /** build：平台自建构建的分支；Jenkins 项目里它是要传给 Jenkins 的值 */
+  branch?: string;
+  /** build + Jenkins：分支落到哪个参数名（如 git_branch） */
+  branchParam?: string;
+  /** deploy + fixed：平台构建记录里的 tag 或仓库标签 */
+  imageTag?: string;
+  /** deploy + fixed：平台构建记录 id */
+  imageRecordId?: string;
+}
+
 export interface ScheduleTask {
   id: string;
   name: string;
   taskType: ScheduleTaskType;
+  /** **完整**目标清单，至少 1 条 */
+  targets: ScheduleTarget[];
+  /** 第一个目标的 projectKey（后端镜像列，只用于兼容与筛选，别拿它当全部） */
   projectKey: string;
   /** 只有 deploy 任务有值 */
   envKey: string;
@@ -28,7 +49,7 @@ export interface ScheduleTask {
   cron: string;
   enabled: boolean;
 
-  /** build：平台自建构建用的分支 */
+  /** build：第一个目标的分支（镜像列） */
   branch: string;
   /** build：Jenkins 参数 / 平台构建参数 */
   buildParams?: Record<string, string>;
@@ -47,7 +68,7 @@ export interface ScheduleTask {
   /** 下次执行时间（RFC3339）。停用 / 表达式非法时为 null */
   nextRunAt?: string | null;
   lastRunAt?: string | null;
-  /** success / failed / skipped / missed / running */
+  /** success / partial / failed / skipped / missed / running */
   lastStatus: string;
   lastError: string;
   /** 累计错过次数（服务停机期间到点但没跑）。跑成功一次会归零 */
@@ -63,15 +84,13 @@ export interface ScheduleTask {
 export interface ScheduleInput {
   name: string;
   taskType: ScheduleTaskType;
-  projectKey: string;
+  /** 目标清单（批量）。旧接口仍接受 projectKey 单目标写法，此处一律用 targets */
+  targets: ScheduleTarget[];
   envKey?: string;
   cron: string;
   enabled?: boolean;
-  branch?: string;
   buildParams?: Record<string, string>;
   imageSource?: ScheduleImageSource;
-  imageTag?: string;
-  imageRecordId?: string;
   replicas?: number | null;
   remark?: string;
 }
