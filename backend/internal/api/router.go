@@ -78,6 +78,7 @@ func NewRouter(d Deps) *gin.Engine {
 	h.registerRollbacks(g)
 	h.registerClusters(g)
 	h.registerAudit(g)
+	h.registerSchedules(g)
 	h.registerNotify(g)
 	h.registerModels(g)
 	h.registerAI(g)

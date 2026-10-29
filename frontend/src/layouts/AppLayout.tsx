@@ -22,6 +22,7 @@ import {
   AppstoreOutlined,
   BellOutlined,
   BuildOutlined,
+  ClockCircleOutlined,
   CloudServerOutlined,
   ClusterOutlined,
   DashboardOutlined,
@@ -102,6 +103,9 @@ const MENU: MenuGroup[] = [
       // build:trigger 分开：能看列表 ≠ 能点构建。
       { key: '/ci/jenkins', icon: <UnorderedListOutlined />, label: '任务管理', perms: ['build:read'] },
       { key: '/ci/builds', icon: <ThunderboltOutlined />, label: '构建记录', perms: ['build:read'] },
+      // 定时任务放在构建记录之后：它配的是"以后自动发"，属于配置类，
+      // 而不是每天要看的记录类。读权限要 build / deploy 任一（任务横跨两个域）。
+      { key: '/ci/schedules', icon: <ClockCircleOutlined />, label: '定时任务', perms: ['build:read', 'deploy:read'] },
       { key: '/ci/images', icon: <HddOutlined />, label: '镜像版本', perms: ['image:read'] },
     ],
   },

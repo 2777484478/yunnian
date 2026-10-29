@@ -251,6 +251,14 @@ func run() error {
 		IdleTimeout: 120 * time.Second,
 	}
 
+	// 定时任务的调度器。
+	//
+	// 放在 HTTP 起来之后、启动补偿之前**声明**，但真正跑起来要等补偿做完 ——
+	// 见下面 `schedCtx` 的启动点：如果先让调度器跑，它在重启瞬间会看到
+	// 一堆状态是 running 的旧记录（其实随进程一起没了），判定"上次还在跑"而跳过。
+	schedCtx, schedCancel := context.WithCancel(context.Background())
+	defer schedCancel()
+
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("HTTP 服务已监听", "addr", cfg.App.HTTPAddr)
@@ -310,6 +318,14 @@ func run() error {
 		case m > 0:
 			log.Info("已为镜像记录补上仓库元数据", "count", m)
 		}
+
+		// ---------------------------------------------------------- 定时任务
+		//
+		// **必须排在 ReconcileInterrupted 之后**：调度器判断"上次还在跑就跳过"
+		// 读的是构建/部署记录的真实状态。若在补偿之前启动，重启那一刻那些记录
+		// 还是 running（随进程一起没了），任务会被误判为"忙"而白跳过一次。
+		svc.Schedule.RunScheduler(schedCtx)
+		log.Info("定时任务调度器已启动（每 30 秒扫描一次）")
 	}()
 
 	// ------------------------------------------------------------------ 优雅退出
@@ -322,6 +338,8 @@ func run() error {
 	case sig := <-quit:
 		log.Info("收到退出信号，开始优雅关闭", "signal", sig.String())
 	}
+	// 先停调度器：别在关库、关连接池的过程中又冒出一条到点的任务去建单。
+	schedCancel()
 
 	shutdownTimeout := cfg.App.ShutdownTimeout.D()
 	if shutdownTimeout <= 0 {

@@ -77,6 +77,9 @@ type Service struct {
 	System *SystemService
 	AI     *AIService
 	Notify *NotifyService
+	// Schedule 定时任务。单独一个服务而不是塞进 CI：
+	// 它需要同时调用 CI 和 CD，挂在任一边都会造成反向依赖。
+	Schedule *ScheduleService
 
 	*base
 }
@@ -86,19 +89,25 @@ func New(d Deps) *Service {
 	b := &base{deps: d}
 	b.notify = newNotifyService(d)
 	sys := &SystemService{base: b}
+	ci := &CIService{base: b, sys: sys}
+	cd := &CDService{base: b, sys: sys}
 	return &Service{
 		base: b,
 		Auth: &AuthService{base: b},
 		// CI 的失败归因要走模型通道，因此和 AI 服务一样复用下面这个 sys 实例。
-		CI: &CIService{base: b, sys: sys},
+		CI: ci,
 		// CD 的失败诊断同样要走模型通道：它比 CI 更需要——部署失败几乎没有
 		// 可机读的错误码能区分场景（都是"没起来"），真实原因只在容器侧证据里。
-		CD:     &CDService{base: b, sys: sys},
+		CD: cd,
 		System: sys,
 		// AI 服务复用 SystemService 的"默认模型通道"解析（含密钥解密），
 		// 避免把同一段解密逻辑写两遍——那种重复最容易在换加密方案时漏改一处。
 		AI:     &AIService{base: b, sys: sys},
 		Notify: b.notify,
+		// 定时任务复用上面这两个**同一个实例**：
+		// 再 new 一份 CI 会得到另一套内部状态（如 Jenkins 客户端缓存），
+		// 表现为"手动构建正常、定时构建报错"这类难以理解的现象。
+		Schedule: &ScheduleService{base: b, ci: ci, cd: cd},
 	}
 }
 
@@ -111,10 +120,17 @@ func (s *Service) Stream() logstream.Stream { return s.deps.Stream }
 // Caller 请求发起方信息，用于审计与「负责人」类判断。
 // 由 HTTP 层从 gin.Context 构造后传入，避免 service 依赖框架类型。
 type Caller struct {
-	User    *auth.CurrentUser
-	IP      string
-	UA      string
-	TraceID string
+	User *auth.CurrentUser
+	// DisplayName 覆盖"操作人展示名"。
+	//
+	// 给**没有登录用户**的触发来源用：定时任务、未来的 webhook。
+	// 这类调用 `User` 是 nil（不该冒用某个人的权限），但记录里写"匿名"
+	// 又等于什么都没说 —— 用户看到一条凌晨 2 点的部署单，必须能立刻认出
+	// "这是定时任务发的"，否则会怀疑是不是有人半夜动了手。
+	DisplayName string
+	IP          string
+	UA          string
+	TraceID     string
 }
 
 // UserID 返回用户 ID 指针（未登录为 nil）。
@@ -128,6 +144,9 @@ func (c Caller) UserID() *uint64 {
 
 // Name 返回展示用姓名。
 func (c Caller) Name() string {
+	if c.DisplayName != "" {
+		return c.DisplayName
+	}
 	if c.User == nil {
 		return "匿名"
 	}

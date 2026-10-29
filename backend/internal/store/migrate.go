@@ -32,6 +32,8 @@ func Models() []any {
 		&model.ProjectMember{},
 		// k8s 资源定义（Deployment / Service …），按「项目 × 环境 × 资源」存
 		&model.ProjectManifest{},
+		// 定时任务（到点建构建单 / 部署单，不自己执行）
+		&model.ScheduleTask{},
 
 		// 3. 构建 / 镜像
 		&model.BuildRecord{},
