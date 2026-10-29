@@ -94,6 +94,15 @@ const TagText: React.FC<{ value?: string; variant?: 'ref' | 'now' | 'pick' }> = 
     <Text type="secondary">—</Text>
   );
 
+/**
+ * 批量勾选结果通知的固定 key。
+ *
+ * 用固定 key 而不是随机 key：连粘几次清单时，antd 会**替换**同 key 的通知而不是堆叠，
+ * 屏幕上永远只有一条"最新结果"。否则三次粘贴就是三张卡片摞在右上角，
+ * 用户分不清哪条是刚才那次。
+ */
+const BULK_PICK_NOTICE_KEY = 'batch-deploy-bulk-pick';
+
 interface RowModel {
   projectKey: string;
   projectName: string;
@@ -743,6 +752,119 @@ const submitAtRef = useRef(Date.now());
     () => rows.filter((r) => keys.includes(r.projectKey) && !skipped.includes(r.projectKey)),
     [rows, keys, skipped],
   );
+
+  /**
+   * 把一段文本里的服务名批量勾上（搜索框粘贴即触发）。
+   *
+   * 用户的实际用法（2026-10-29 提的）：手头有一份服务清单，一行一个，从文档 / 表格 /
+   * 聊天记录里复制过来。逐个在搜索框里搜、再逐个点勾，14 个就要点 28 次，而且
+   * 中途被打断就得重来。整段粘进来一次勾完才是他要的。
+   *
+   * 四个刻意的取舍：
+   *
+   * 1. **只在"像一份清单"时才拦截**（含换行，或解析出 ≥2 个名字）。
+   *    单个词粘贴仍走正常搜索 —— 那是"搜一下"，不是"勾一批"，抢掉会很烦人。
+   *
+   * 2. **匹配范围是全部行，不是当前筛选结果。** 用户粘的清单里可能有被搜索词藏起来的
+   *    服务；只匹配可见行会让其中一部分"静默没勾上"，而他以为全选上了。
+   *
+   * 3. **勾不上的必须分类说清楚**（没匹配到 / 当前不可选），且**不自动消失**。
+   *    只说"已勾选 10 个"会让人以为 14 个都齐了，一直到第 3 步才发现少 4 个。
+   *
+   * 4. **禁用条件与 `getCheckboxProps` 同一口径**（能勾选 == 后端受理）。
+   *    这里另立一套判断，迟早会出现"批量勾上了、单点勾不上"的分叉。
+   */
+  const bulkPickByNames = (text: string) => {
+    const names = Array.from(
+      new Set(
+        text
+          .split(/[\s,;，、]+/)
+          // 从 Excel 复制常带成对的引号（"aiocmdb"），不剥掉就一个都匹配不上
+          .map((s) => s.trim().replace(/^["'`]+|["'`]+$/g, ''))
+          .filter(Boolean),
+      ),
+    );
+    if (!names.length) return;
+
+    const byKey = new Map(rows.map((r) => [r.projectKey.toLowerCase(), r]));
+    const byName = new Map(rows.map((r) => [r.projectName.toLowerCase(), r]));
+
+    const hit: string[] = [];
+    const blocked: string[] = [];
+    const missed: string[] = [];
+
+    for (const n of names) {
+      const k = n.toLowerCase();
+      // 标识优先：projectKey 是唯一的，projectName 理论上可能重名
+      const row = byKey.get(k) ?? byName.get(k);
+      if (!row) {
+        missed.push(n);
+      } else if (!row.hasBuild || row.undeployed || row.inflight) {
+        blocked.push(n);
+      } else {
+        hit.push(row.projectKey);
+      }
+    }
+
+    if (hit.length) {
+      // 合并而不是覆盖：用户可能已经手点过几个
+      setKeys((prev) => [...new Set([...prev, ...hit])]);
+    }
+    // 清掉搜索词：粘完他要看的是「这批到底勾上没有」，而不是继续被上次的搜索词过滤
+    setKw('');
+
+    // 已经勾过的不算"新增"：连粘两次时还报「已勾选 10 个」会让人以为又勾了一遍
+    const added = hit.filter((k) => !keys.includes(k));
+
+    if (!blocked.length && !missed.length) {
+      // 上一次「部分没勾上」的通知已经过时，先关掉 —— 留着会被当成这次的结果
+      notification.destroy(BULK_PICK_NOTICE_KEY);
+      if (added.length === hit.length) {
+        message.success(`已勾选 ${hit.length} 个服务`);
+      } else if (!added.length) {
+        message.info(`这 ${hit.length} 个服务原本就在勾选里`);
+      } else {
+        message.success(`新勾选 ${added.length} 个，另外 ${hit.length - added.length} 个原本已选`);
+      }
+      return;
+    }
+
+    const left = [...blocked, ...missed];
+    const shown = left.slice(0, 12).join('、') + (left.length > 12 ? ` 等 ${left.length} 个` : '');
+    const parts: string[] = [];
+    if (added.length) {
+      parts.push(
+        added.length === hit.length
+          ? `已勾选 ${hit.length} 个`
+          : `新勾选 ${added.length} 个（另 ${hit.length - added.length} 个原本已选）`,
+      );
+    } else if (hit.length) {
+      // 全部都是本来就在勾选里的：说"已勾选 N 个"会让人以为流程重跑了一遍
+      parts.push(`其中 ${hit.length} 个原本已选`);
+    }
+    if (blocked.length) {
+      parts.push(`${blocked.length} 个当前不可选（未纳管 / 无构建产物 / 有进行中的部署）`);
+    }
+    if (missed.length) parts.push(`${missed.length} 个在 ${env?.name ?? '这个环境'} 里没有对应服务`);
+
+    notification.warning({
+      // 固定 key：同一类结果只保留最新一条（连粘几次不会堆成一列）
+      key: BULK_PICK_NOTICE_KEY,
+      message: '批量勾选完成，但不是全部都勾上了',
+      description: `${parts.join('；')}。没处理的：${shown}`,
+      // 不自动消失：这份名单是要照着核对的，4.5 秒根本看不完
+      duration: 0,
+    });
+  };
+
+  /** 搜索框的粘贴钩子：看起来像一份清单就拦截，否则放行走正常搜索。 */
+  const handleBulkPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData('text');
+    const isList = /[\r\n]/.test(text) || text.split(/[\s,;，、]+/).filter(Boolean).length >= 2;
+    if (!isList) return;
+    e.preventDefault();
+    bulkPickByNames(text);
+  };
 
   /**
    * 「同步版本号」：把目标版本一键对齐到**前一环境正在跑的版本**。
@@ -1712,10 +1834,12 @@ const submitAtRef = useRef(Date.now());
               allowClear
               size="small"
               prefix={<SearchOutlined style={{ color: '#b5bac4' }} />}
-              placeholder="搜索服务名称 / 标识"
+              placeholder="搜索，或粘贴多个服务名"
               style={{ width: 220 }}
               value={kw}
               onChange={(e) => setKw(e.target.value)}
+              // 粘贴一份清单（一行一个 / 逗号分隔）即批量勾选，见 bulkPickByNames
+              onPaste={handleBulkPaste}
             />
             <Segmented
               size="small"
