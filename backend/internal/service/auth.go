@@ -112,6 +112,12 @@ func (a *AuthService) Login(ctx context.Context, in LoginInput, c Caller) (*Logi
 	a.audit(ctx, c, auditInput{
 		Module: "认证", Action: "login", TargetType: "user",
 		TargetID: &user.ID, TargetName: user.Name,
+		// 登录这一条必须显式给操作人：此刻 c.User 还是 nil（认证就发生在这里），
+		// 不覆盖就会写成「匿名 · 登录成功」。操作人 = 刚通过密码校验的这个账号，
+		// 目标 = 同一个用户（谁登录了自己），两者字段不同但语义都对。
+		Operator: &auditOperator{
+			ID: user.ID, Name: user.Name, Username: user.Username, RoleCode: p.RoleCode,
+		},
 		Detail: "登录成功", Result: "success", StartedAt: started,
 	})
 	return result, nil

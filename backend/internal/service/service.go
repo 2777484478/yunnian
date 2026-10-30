@@ -171,6 +171,23 @@ func (c Caller) RoleCode() string {
 
 // --------------------------------------------------------------------------- 横切能力
 
+// auditOperator 显式指定审计里的「操作人」。
+//
+// 只给**操作发生时调用方还没被认证**的入口用 —— 目前就是登录成功那一条：
+// 那一刻请求的 Caller 里没有用户（User 为 nil），照原样落库会写成
+// 「匿名 · 登录成功」，而后台明明刚校验过密码、知道是谁。
+// 事后想追"谁在几点登录过"，整张表全是匿名，这条日志等于没写。
+//
+// 刻意不复用 Caller：`Caller.User` 是带权限点的 CurrentUser，
+// 为了写一条日志去伪造一个身份，会让"这个请求有什么权限"这件事变得含糊；
+// 这里只是**记录口径**的覆盖，与权限判定无关。
+type auditOperator struct {
+	ID       uint64
+	Name     string
+	Username string
+	RoleCode string
+}
+
 // auditInput 审计记录入参。
 type auditInput struct {
 	Module     string
@@ -182,6 +199,8 @@ type auditInput struct {
 	Result     string // success / failed
 	ErrMsg     string
 	StartedAt  time.Time
+	// Operator 非空时覆盖从 Caller 推断出来的操作人（见 auditOperator 的说明）
+	Operator *auditOperator
 }
 
 // audit 写审计日志。审计失败不影响主流程（只记录告警日志），
@@ -209,6 +228,15 @@ func (b *base) audit(ctx context.Context, c Caller, in auditInput) {
 	}
 	if c.User != nil {
 		rec.Username = c.User.Username
+	}
+	if op := in.Operator; op != nil {
+		id := op.ID
+		rec.UserID = &id
+		rec.UserName = op.Name
+		rec.Username = op.Username
+		if op.RoleCode != "" {
+			rec.RoleCode = op.RoleCode
+		}
 	}
 	if !in.StartedAt.IsZero() {
 		ms := uint32(time.Since(in.StartedAt).Milliseconds())
