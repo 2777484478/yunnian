@@ -222,6 +222,26 @@ const ProjectList: React.FC = () => {
   const [methodFilter, setMethodFilter] = useState<string | undefined>();
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
 
+  /**
+   * 分页状态。
+   *
+   * ⚠️ 必须自己存，不能只给 `pagination` 写一个 `pageSize: 20` 常量。
+   * 那样 antd 的「每页 50 / 100」下拉只是**改了个受控值**，下一次渲染又被
+   * 那个 20 顶回去 —— 用户看到的是"选了 50，列表还是 20 条、页码还是 3 页"，
+   * 而且不会有任何报错（2026-11-02 用户报的就是这个）。
+   *
+   * 数据是**一次拉全量、前端筛选**（见上面 projectsApi 的注释），
+   * 所以这里放大每页条数不增加任何请求。
+   */
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+
+  // 筛选条件一变就回第 1 页：否则在第 3 页筛出 2 条时，界面是一片空白
+  // （数据明明有，用户会以为"筛出来是空的"）
+  useEffect(() => {
+    setPage(1);
+  }, [keyword, type, enabledFilter, methodFilter]);
+
   /** 构建幂等键：打开弹窗时生成一次，提交时复用（防重复点击产生并行构建） */
   const idemKeyRef = useRef<string>('');
 
@@ -1527,12 +1547,19 @@ const ProjectList: React.FC = () => {
           scroll={{ x: 1560 }}
           rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
           pagination={{
-            // 20：项目从 6 个涨到 14 个之后，10 条/页已经装不下（新项目排在前面，
+            // 默认 20：项目从 6 个涨到 14 个之后，10 条/页已经装不下（新项目排在前面，
             // 老项目被挤到第 2 页，用户找 aioai 时以为它不见了 —— 实测踩过）。
-            // 接口那边是**一次拉全量**（pageSize 200，见上面的注释），所以放大这里不增加请求。
-            pageSize: 20,
+            // ⚠️ 但 20 只是**初始值**：pageSize 必须是 state（见上面的注释），
+            // 写死常量会让「每页 50 / 100」切换后立刻被打回 20。
+            current: page,
+            pageSize,
             showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50, 100],
             showTotal: (t) => `共 ${t} 条`,
+            onChange: (p, ps) => {
+              setPage(p);
+              setPageSize(ps);
+            },
             size: 'default',
           }}
         />
