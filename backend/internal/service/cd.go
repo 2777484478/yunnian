@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1921,6 +1922,28 @@ func (s *CDService) runDeploy(taskCtx context.Context, deployID uint64) {
 	s.markImageDeployed(ctx, rec.ImageRecID, rec.EnvKey)
 	s.finishRollbackOf(ctx, deployID, "success", duration)
 
+	// 让「K8s 资源」里那份 YAML 跟着这次发布走（见 syncManifestImageTag 的注释）。
+	//
+	// 用独立 ctx：走到这里部署已经成功，这件事不该因为部署 ctx 恰好到期而失败，
+	// 也不该反过来拖住收尾；15 秒足够改几份文档，出问题就跳过。
+	syncCtx, cancelSync := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	syncRes := s.syncManifestImageTag(syncCtx, rec.EnvKey, rec.ProjectKey, rec.Image)
+	cancelSync()
+	if syncRes.Updated > 0 {
+		from := strings.Join(syncRes.From, "、")
+		if from == "" {
+			from = "旧版本"
+		}
+		s.appendDeployLog(ctx, streamKey, "info", fmt.Sprintf(
+			"已同步「K8s 资源」里的镜像版本：%s → %s（%d 份文档，只改 image 的 tag，注释与格式原样保留）",
+			from, tagOfImage(rec.Image), syncRes.Updated))
+	}
+	if syncRes.Failed > 0 {
+		s.appendDeployLog(ctx, streamKey, "warn", fmt.Sprintf(
+			"有 %d 份「K8s 资源」的镜像版本没同步成功，那里仍是旧版本号，需要时请手动改一下",
+			syncRes.Failed))
+	}
+
 	// 部署成功通知。放在这里（终态已落库 + 回滚单也收尾了），
 	// 而不是 ApplyImage 刚返回 nil 时 —— 见 notifyDeploySucceeded 的注释。
 	s.notifyDeploySucceeded(ctx, deployID)
@@ -1929,6 +1952,184 @@ func (s *CDService) runDeploy(taskCtx context.Context, deployID uint64) {
 		rec.EnvKey, rec.ProjectKey, tagOfImage(rec.Image)))
 	_ = s.deps.Stream.Finish(ctx, streamKey, "finished")
 	log.Info("部署成功", "image", rec.Image)
+}
+
+// ----------------------------------------------------------------- 资源定义（YAML）同步
+
+// syncManifestImageTag 把「该环境下这个项目的 K8s 资源定义」里的镜像版本号，
+// 同步成刚刚发上去的那一版。
+//
+// 用户诉求（2026-11-03）：发完一版再点开「K8s 资源」，里面还是半年前的版本号 ——
+// 那份 YAML 本该是"这个环境现在跑的是什么"的书面记录，结果越看越不敢信。
+// 现在每次成功发布自动跟着改，它就一直准。
+//
+// 四个刻意的取舍，每条都对应一种会翻车的方式：
+//
+//  1. **文本替换，不做 yaml 解析后重排。** Content 的约定是「原样保存」，
+//     而用户的 YAML 里有大段人肉注释（`# - name: JAVA_OPTS …` 这种被注释掉的行，
+//     以及为什么这么配的说明）。解析再序列化会把注释、空行、键顺序全洗掉 ——
+//     每次发版都把用户的文档重写一遍，比版本号旧更不能接受。
+//
+//  2. **只换 tag，不换 repo。** 同一个 Deployment 里常有 sidecar（不同仓库）。
+//     只改「repo 与本次发布镜像完全一致」的那几行，其余一个字符都不动；
+//     对不上就**不改**——宁可不改，也不能改错别人的镜像。
+//
+//  3. **不碰疑似"被程序读的配置"。** 只处理工作负载类型（Deployment/StatefulSet/…）。
+//     ConfigMap / Secret 里的同名字符串往往是程序自己读的值，改它等于改运行时行为。
+//
+//  4. **失败不影响部署。** 它只是让文档跟上，部署已经成功了；这里出错只返回条数，
+//     由调用方写一条 warn 日志，绝不回头把成功的单改成失败（函数签名里没有 error）。
+//
+// 也刻意**不在这里写部署日志**：它只负责改数据、把结果交回去，
+// 怎么告知用户由调用方决定（也让这段逻辑能脱离日志流单独测）。
+func (s *CDService) syncManifestImageTag(ctx context.Context, envKey, projectKey, image string) manifestSyncResult {
+	var res manifestSyncResult
+	repo, tag := splitImageRepoTag(image)
+	if repo == "" || tag == "" {
+		return res
+	}
+
+	var project model.Project
+	if err := s.db(ctx).Where("project_key = ?", projectKey).First(&project).Error; err != nil {
+		return res // 项目没了：本次发布的记录仍然有效，这里安静跳过
+	}
+
+	var rows []model.ProjectManifest
+	if err := s.db(ctx).Where("project_id = ? AND env_key = ?", project.ID, envKey).
+		Where("kind IN ?", manifestKindWithImage).Find(&rows).Error; err != nil {
+		s.log("cd").Warn("读取资源定义失败（跳过镜像版本同步）",
+			"env", envKey, "project", projectKey, "err", err)
+		return res
+	}
+
+	from := map[string]bool{}
+	for _, m := range rows {
+		next, changed := replaceImageTag(m.Content, repo, tag)
+		if !changed {
+			continue
+		}
+		if err := s.db(ctx).Model(&model.ProjectManifest{}).Where("id = ?", m.ID).
+			Updates(map[string]any{"content": next, "updated_at": now()}).Error; err != nil {
+			s.log("cd").Warn("同步资源定义里的镜像版本失败",
+				"manifestId", m.ID, "env", envKey, "err", err)
+			res.Failed++
+			continue
+		}
+		res.Updated++
+		for _, old := range imageTagsInContent(m.Content, repo) {
+			if old != tag {
+				from[old] = true
+			}
+		}
+	}
+
+	for t := range from {
+		res.From = append(res.From, t)
+	}
+	sort.Strings(res.From)
+	return res
+}
+
+// manifestSyncResult 一次「YAML 镜像版本同步」的结果，供调用方写日志。
+type manifestSyncResult struct {
+	// From 被替换掉的旧 tag（去重、升序），用于说清"从哪一版改到哪一版"
+	From []string
+	// Updated 改动并写库成功的文档数
+	Updated int
+	// Failed 写库失败的文档数
+	Failed int
+}
+
+// manifestKindWithImage 允许被同步镜像版本的工作负载类型。
+var manifestKindWithImage = []string{
+	"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob", "Pod",
+}
+
+// splitImageRepoTag 拆出「仓库地址」与「tag」。
+//
+// 注意 registry 自己带端口（`es-repo.x.com:5000/...`），所以不能取第一个冒号：
+// 只有**最后一个斜杠之后**的冒号才是 tag 分隔符。
+// digest 形式（`repo@sha256:...`）一律视为"没有 tag"，不去动它。
+func splitImageRepoTag(img string) (repo, tag string) {
+	img = strings.TrimSpace(img)
+	if img == "" || strings.Contains(img, "@") {
+		return "", ""
+	}
+	i := strings.LastIndex(img, ":")
+	if i <= strings.LastIndex(img, "/") {
+		return img, "" // 只有 registry 端口那个冒号，说明没写 tag
+	}
+	return img[:i], img[i+1:]
+}
+
+// replaceImageTag 把 YAML 里 repo 命中且 tag 不同的 image 行换成新 tag。
+//
+// 逐行处理而不是正则全文替换：正则很容易连注释行、env 的 value、
+// 甚至 ConfigMap 里的文本一起改掉。这里只认「去掉缩进后以 image: 开头」的行，
+// 并且保留缩进、引号与行尾注释。
+func replaceImageTag(content, repo, newTag string) (string, bool) {
+	if content == "" {
+		return content, false
+	}
+	lines := strings.Split(content, "\n")
+	changed := false
+
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		// 注释行直接跳过（`# image: ...` 这种被注释掉的旧写法不该被"复活"）
+		if !strings.HasPrefix(trimmed, "image:") {
+			continue
+		}
+		indent := line[:len(line)-len(trimmed)]
+
+		raw := strings.TrimSpace(strings.TrimPrefix(trimmed, "image:"))
+		if raw == "" {
+			continue
+		}
+		// 行尾注释单独留出来，替换后原样接回去
+		comment := ""
+		if j := strings.Index(raw, "#"); j >= 0 {
+			comment = " " + strings.TrimSpace(raw[j:])
+			raw = strings.TrimSpace(raw[:j])
+		}
+		quote := ""
+		if len(raw) >= 2 && (raw[0] == '"' || raw[0] == '\'') && raw[len(raw)-1] == raw[0] {
+			quote = string(raw[0])
+			raw = raw[1 : len(raw)-1]
+		}
+
+		curRepo, curTag := splitImageRepoTag(raw)
+		if curRepo != repo || curTag == "" || curTag == newTag {
+			continue
+		}
+
+		lines[i] = indent + "image: " + quote + repo + ":" + newTag + quote + comment
+		changed = true
+	}
+	if !changed {
+		return content, false
+	}
+	return strings.Join(lines, "\n"), true
+}
+
+// imageTagsInContent 收集 YAML 里 repo 命中的镜像 tag（用于日志里说"从哪一版改到哪一版"）。
+func imageTagsInContent(content, repo string) []string {
+	out := make([]string, 0, 2)
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(trimmed, "image:") {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(trimmed, "image:"))
+		if j := strings.Index(raw, "#"); j >= 0 {
+			raw = strings.TrimSpace(raw[:j])
+		}
+		raw = strings.Trim(raw, `"'`)
+		if r, t := splitImageRepoTag(raw); r == repo && t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // failDeploy 统一写部署失败终态并关流。
