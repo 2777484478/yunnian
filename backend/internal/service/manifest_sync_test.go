@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: master
-          image: es-repo.digiwincloud.com.cn:5000/escloud/aioai:1.2.0.3390
+          image: es-repo.example.com:5000/escloud/aioai:1.2.0.3390
           env:
             - name: OPENAI_API_KEY
               value: "sk-5dfb1e3b63bae42e"
@@ -31,12 +31,12 @@ spec:
             - name: AREA
               value: "test"
         - name: log-sidecar
-          image: es-repo.digiwincloud.com.cn:5000/infra/fluent-bit:2.1.8
+          image: es-repo.example.com:5000/infra/fluent-bit:2.1.8
 `
 
 // TestReplaceImageTag 钉住「只换 tag」这件事。
 func TestReplaceImageTag(t *testing.T) {
-	const repo = "es-repo.digiwincloud.com.cn:5000/escloud/aioai"
+	const repo = "es-repo.example.com:5000/escloud/aioai"
 
 	t.Run("命中 repo 的 image 行换成新 tag，其余原样", func(t *testing.T) {
 		got, changed := replaceImageTag(sampleDeployYAML, repo, "1.2.0.3396")
@@ -74,26 +74,26 @@ func TestReplaceImageTag(t *testing.T) {
 	})
 
 	t.Run("repo 对不上 → 一个字都不改", func(t *testing.T) {
-		got, changed := replaceImageTag(sampleDeployYAML, "es-repo.digiwincloud.com.cn:5000/escloud/other", "9.9.9")
+		got, changed := replaceImageTag(sampleDeployYAML, "es-repo.example.com:5000/escloud/other", "9.9.9")
 		if changed || got != sampleDeployYAML {
 			t.Error("repo 不匹配时不该改动任何内容")
 		}
 	})
 
 	t.Run("注释掉的行不会被复活", func(t *testing.T) {
-		y := "      containers:\n#        image: es-repo.digiwincloud.com.cn:5000/escloud/aioai:0.0.1\n"
+		y := "      containers:\n#        image: es-repo.example.com:5000/escloud/aioai:0.0.1\n"
 		if _, changed := replaceImageTag(y, repo, "1.2.0.3396"); changed {
 			t.Error("被注释掉的 image 行不该被当成有效字段")
 		}
 	})
 
 	t.Run("行尾注释与引号都保留", func(t *testing.T) {
-		y := `          image: "es-repo.digiwincloud.com.cn:5000/escloud/aioai:1.0.0"  # 别乱改`
+		y := `          image: "es-repo.example.com:5000/escloud/aioai:1.0.0"  # 别乱改`
 		got, changed := replaceImageTag(y, repo, "1.2.0.3396")
 		if !changed {
 			t.Fatal("应该被改")
 		}
-		if !strings.Contains(got, `"es-repo.digiwincloud.com.cn:5000/escloud/aioai:1.2.0.3396"`) {
+		if !strings.Contains(got, `"es-repo.example.com:5000/escloud/aioai:1.2.0.3396"`) {
 			t.Errorf("引号丢了：%q", got)
 		}
 		if !strings.Contains(got, "# 别乱改") {
@@ -112,11 +112,11 @@ func TestReplaceImageTag(t *testing.T) {
 // TestSplitImageRepoTag registry 自带端口，不能取第一个冒号。
 func TestSplitImageRepoTag(t *testing.T) {
 	cases := []struct{ in, repo, tag string }{
-		{"es-repo.digiwincloud.com.cn:5000/escloud/aioai:1.2.0.3396",
-			"es-repo.digiwincloud.com.cn:5000/escloud/aioai", "1.2.0.3396"},
+		{"es-repo.example.com:5000/escloud/aioai:1.2.0.3396",
+			"es-repo.example.com:5000/escloud/aioai", "1.2.0.3396"},
 		// 没有 tag：只有 registry 的端口冒号
-		{"es-repo.digiwincloud.com.cn:5000/escloud/aioai",
-			"es-repo.digiwincloud.com.cn:5000/escloud/aioai", ""},
+		{"es-repo.example.com:5000/escloud/aioai",
+			"es-repo.example.com:5000/escloud/aioai", ""},
 		{"nginx:1.25", "nginx", "1.25"},
 		{"nginx", "nginx", ""},
 		// digest 形式：不碰
@@ -151,10 +151,10 @@ spec:
     spec:
       containers:
         - name: master
-          image: es-repo.digiwincloud.com.cn:5000/escloud/aioai:1.2.0.3391
+          image: es-repo.example.com:5000/escloud/aioai:1.2.0.3391
 # 手工注释：这行别删，起 JAVA_OPTS 的时候要用
         - name: sidecar
-          image: es-repo.digiwincloud.com.cn:5000/infra/fluent-bit:2.1.8
+          image: es-repo.example.com:5000/infra/fluent-bit:2.1.8
 `
 	serviceContent := "apiVersion: v1\nkind: Service\nmetadata:\n  name: aioai\nspec:\n  ports:\n    - port: 80\n"
 	otherEnvContent := `apiVersion: apps/v1
@@ -166,7 +166,7 @@ spec:
     spec:
       containers:
         - name: master
-          image: es-repo.digiwincloud.com.cn:5000/escloud/aioai:1.2.0.3388
+          image: es-repo.example.com:5000/escloud/aioai:1.2.0.3388
 `
 	mk := func(env, kind, name, content string) *model.ProjectManifest {
 		m := &model.ProjectManifest{ProjectID: proj.ID, EnvKey: env, Kind: kind, Name: name, Content: content}
@@ -180,7 +180,7 @@ spec:
 	other := mk("pre-aliyun", "Deployment", "aioai", otherEnvContent)
 
 	res := s.syncManifestImageTag(ctx, "test-152", "aioai",
-		"es-repo.digiwincloud.com.cn:5000/escloud/aioai:1.2.0.3396")
+		"es-repo.example.com:5000/escloud/aioai:1.2.0.3396")
 
 	if res.Updated != 1 {
 		t.Errorf("应只改 1 份文档，实际 %d（失败 %d）", res.Updated, res.Failed)
@@ -221,7 +221,7 @@ spec:
 
 	t.Run("重复同步同一版本 → 不再判为改动（幂等）", func(t *testing.T) {
 		res2 := s.syncManifestImageTag(ctx, "test-152", "aioai",
-			"es-repo.digiwincloud.com.cn:5000/escloud/aioai:1.2.0.3396")
+			"es-repo.example.com:5000/escloud/aioai:1.2.0.3396")
 		if res2.Updated != 0 {
 			t.Errorf("已经是目标版本，不该再写库，实际改了 %d 份", res2.Updated)
 		}
@@ -229,7 +229,7 @@ spec:
 
 	t.Run("项目不存在 → 安静跳过，不报错", func(t *testing.T) {
 		res3 := s.syncManifestImageTag(ctx, "test-152", "nope",
-			"es-repo.digiwincloud.com.cn:5000/escloud/nope:1.0.0")
+			"es-repo.example.com:5000/escloud/nope:1.0.0")
 		if res3.Updated != 0 || res3.Failed != 0 {
 			t.Error("项目不存在时应安静返回")
 		}

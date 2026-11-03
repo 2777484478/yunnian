@@ -3373,7 +3373,7 @@ func (s *CIService) ListHarborProjects(ctx context.Context) ([]string, error) {
 
 // HarborMetaDTO Harbor 视角需要的"环境信息"（不是数据，是前缀）。
 type HarborMetaDTO struct {
-	// Registry 镜像仓库的**域名/地址前缀**，如 es-repo.digiwincloud.com.cn:5000
+	// Registry 镜像仓库的**域名/地址前缀**，如 es-repo.example.com:5000
 	//
 	// 取的是「系统管理 → 集成」里配的那个 registry，而不是项目表里的同名字段 ——
 	// 用户说的"配置镜像仓库的域名地址"就是这个。留空时退回 BaseURL，

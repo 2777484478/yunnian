@@ -73,7 +73,7 @@ spec:
       containers:
         - name: my-service
           # 镜像 tag 可以被镜像发布覆盖；这里写一个占位版本即可
-          image: es-repo.digiwincloud.com.cn:5000/escloud/my-service:latest
+          image: es-repo.example.com:5000/escloud/my-service:latest
           ports:
             - containerPort: 8080
           resources:

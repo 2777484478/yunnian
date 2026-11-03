@@ -398,8 +398,17 @@ AI 通道不在配置文件里：模型密钥需要脱敏回显与运行时变�
   （超时要查"为什么慢"，卡死要查"为什么起不来"）。
   operator 侧的正解仍是把 `ProgressDeadlineExceeded` 映射成 `phase=Failed`（`PhaseFailed` 已存在），
   届时平台这条兜底可留作双保险。
-- **`/ai/conversations` 不持久化**：docs/02 的 22 张表里没有会话表，一期按一次性上下文处理，
-  接口返回空列表 + `usable:false`，前端可据此隐藏入口。`POST /ai/chat` 本身可用（需先在模型设置里配通道）。
+- ~~**`/ai/conversations` 不持久化**~~ —— **2026-10-15 已落地**（`service/ai_conversation.go`）。
+  原先这里是"返回空列表 + `usable:false`、前端据此隐藏入口"，用户原话是
+  "换一个页面再回来就没了，能不能改成像 DeepSeek 那样左边能看到历史会话"，所以建了
+  `ai_conversation` / `ai_message` 两张表。三条纪律，改这块之前先读：
+  - **会话是私有的**：列表与详情一律按 `user_id` 过滤。漏一次就是数据泄露 ——
+    `ai:query` 是登录即有的权限，而问句里常带着环境名、服务名、失败现象。
+  - **对外只暴露 `convKey`**，不暴露自增主键（主键可枚举，改个数字就能试探存在性）。
+  - **历史只当对话上下文，事实快照每次提问都重新注入**；且历史**必须带 `tool_calls` 回放** ——
+    只回放 `role/content` 会让模型在长会话里学会"直接作答然后编数据"，提示词压不住，
+    所以 `Run` 首轮强制 `tool_choice:"required"`（`ChatStreamStepWithChoice`）。
+  `POST /ai/chat` 本身可用（需先在模型设置里配通道）。
 - ~~**`/ai/chat` 只喂一份提问前拼好的快照，模型无法自己取数**~~ —— **2026-10-09 已落地**，
   见「AI 助手：从『复述快照』改成『自己取数』」。配套问题一起消失：
   - ~~`ai.go` 把 `service_instance.liveness_ok / readiness_ok` 当"健康"喂给模型（假前提）~~

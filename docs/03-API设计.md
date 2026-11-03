@@ -150,9 +150,45 @@ GET /projects?page=1&pageSize=10&keyword=user&type=frontend&enabled=1&sortBy=upd
 | GET | `/projects/{key}/builds` | `build:read` | 项目构建历史 |
 | GET | `/projects/{key}/images` | `image:read` | 项目镜像版本 |
 | GET | `/projects/{key}/deployments` | `deploy:read` | 项目在各环境的部署情况 |
+| GET | `/projects/{key}/manifests` | `project:read` | **K8s 资源定义**列表（`?envKey=&kind=` 均可选） |
+| GET | `/projects/{key}/manifests/{id}` | `project:read` | 资源定义详情（含 YAML 原文） |
+| POST | `/projects/{key}/manifests` | `project:write` / `project:write:own` | 新建一份资源定义 |
+| POST | `/projects/{key}/manifests/import` | `project:write` / `project:write:own` | **批量导入**：收整个文件原文 |
+| PUT | `/projects/{key}/manifests/{id}` | `project:write` / `project:write:own` | 编辑（**无条件覆盖**，见下） |
+| DELETE | `/projects/{key}/manifests/{id}` | `project:write` / `project:write:own` | 删除平台记录（**集群里的资源不动**） |
 
 > `/projects/default-build-script` 与 `/projects/test-connection` 是**静态段**，注册在 `/:key` 之前。
 > gin 的路由树本来就是静态优先，但这两条靠框架行为很容易被后人改坏，注释里写明了别动。
+
+**K8s 资源定义（`project_manifest`）的四条硬约定**
+
+1. **入参没有 `kind` / `name`** —— 服务端从 `content` 解析。让前端传就等于给了它一次
+   "标的是 Service、存的是 Deployment"的机会，而这种错要到 apply 时才炸。
+
+   ```json
+   { "envKey": "test", "content": "apiVersion: apps/v1\nkind: Deployment\n…", "note": "为什么 2Gi", "sort": 0 }
+   ```
+
+2. **`PUT` 是无条件覆盖写回**（不是 PATCH）。手拼请求时漏传 `content` 就会把 YAML 清空 ——
+   前端一律先取详情、整份回传。
+
+3. **`import` 接受多文档**：`---` 分隔的多个资源、或 `kubectl get -o yaml` 导出的 `kind: List`。
+   拆分与校验都在服务端（前端只是一段文本）。`onConflict` 取 `skip`（默认）/ `overwrite` ——
+   **默认跳过而不是覆盖**：导入是"把文件灌进来"，不该悄悄盖掉别人已经编辑过的内容。
+   结果**逐条报告**，不接受"成功 5 个"这种笼统结论：
+
+   ```json
+   { "total": 3, "created": 2, "skipped": 0, "failed": 1,
+     "items": [ { "index": 3, "kind": "Deployment", "name": "aioai", "action": "failed", "reason": "缺少 metadata.name" } ] }
+   ```
+
+4. **唯一键是 `(project_id, env_key, kind, name)`，不含 `deleted_at`** —— 软删后重建同名资源
+   **复用同一行并覆盖内容**。所以"配置莫名回退"要先怀疑这条链路。
+
+> ⚠️ **这一期只存不写集群**：`POST /deployments` 成功之后平台会**自动**把该环境那份资源定义里
+> `image:` 的 tag 改成刚发布的那一版（逐行文本替换，注释与格式原样保留；只改 repo 完全一致的行，
+> sidecar 不动）。这是**唯一**一处平台会自己改动 `content` 的地方。
+
 
 **GET /projects**（响应节选）
 
@@ -1693,12 +1729,65 @@ es-repo.example.com:5000/escloud/demowarning:1.2.0.1058
 
 ---
 
-## 14. 接口总览（按模块计数）
+## 14. 定时任务
+
+挂在 `/schedules` **顶层**而不是 `/projects/{key}/schedules`：一条任务要么构建、要么部署，
+横跨 CI 与 CD；挂到项目下会让"现在有哪些定时任务在跑"变成 N 次请求 —— 而这是运维最常问的。
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/schedules/preview` | `build:read` / `deploy:read` | 校验 cron 并预览接下来几次执行（纯计算、不落库） |
+| GET | `/schedules` | `build:read` / `deploy:read` | 列表（`?taskType=&projectKey=`） |
+| GET | `/schedules/{id}` | `build:read` / `deploy:read` | 详情 |
+| POST | `/schedules` | `build:trigger` / `deploy:read` | 新建 |
+| PUT | `/schedules/{id}` | `build:trigger` / `deploy:read` | 编辑 |
+| DELETE | `/schedules/{id}` | `build:trigger` / `deploy:read` | 删除 |
+| POST | `/schedules/{id}/enabled` | `build:trigger` / `deploy:read` | 启用 / 停用（body `{"enabled":true}`） |
+| POST | `/schedules/{id}/run` | `build:trigger` / `deploy:read` | **立即执行一次**（调试用，不推进下次计划时间） |
+
+> 读权限两边**任一**即可（任务跨两个域）；写权限路由层只能判个大概，
+> **具体动作由服务层按 `taskType` / `envKey` 再判一次** —— 配定时构建要 `build:trigger`，
+> 配定时部署要有该环境的 `deploy` 权限。路由层表达不了"按 payload 动态校验"。
+
+**POST /schedules**（请求，多目标）
+
+```json
+{
+  "name": "夜间打包",
+  "taskType": "build",
+  "cron": "0 2 * * *",
+  "enabled": true,
+  "targets": [
+    { "projectKey": "user-web", "branch": "master" },
+    { "projectKey": "order-job", "branch": "origin/master", "branchParam": "git_branch" }
+  ]
+}
+```
+
+四条**会拒**的规则（每条都对应一次真实踩坑）：
+
+1. **平台自建构建必须显式给分支**（`400`）。留空用项目默认值的话，默认分支一改，
+   半夜构建的就不是你排的那条，**而且不报错**。
+2. **Jenkins 项目说了分支但 Job 没有对应 git 参数** → 建任务时就拒。
+   否则到点只能不传 —— 等于悄悄用了 Jenkins 的默认值。
+3. **目标重复**（同一 `projectKey` 出现两次）→ 拒。
+4. **项目不存在 / 任务类型与目标不匹配** → 拒。
+
+**执行语义**
+
+- 到点**逐目标独立建单**：一条失败不影响其余（8 个包里有 1 个分支写错，不该连累另外 7 个）。
+- 结果三档 `success` / `partial` / `failed`；`last_ids` 存本轮**全部**建单记录，
+  "上次还没跑完就跳过"是**逐条**判断的。
+- 超出 `scheduleGrace` 的错过记 `missed`，**不补跑**。
+
+---
+
+## 15. 接口总览（按模块计数）
 
 | 模块 | 接口数 | 备注 |
 | --- | --- | --- |
 | 认证与用户 | 12 | 含 SSO |
-| 项目 | 11 | |
+| 项目 | 17 | 其中 6 个是 K8s 资源定义（`manifests`） |
 | 构建 | 10 | 2 个 SSE、2 个 Webhook |
 | 镜像 | 5 | |
 | 环境 | 11 | |
@@ -1710,7 +1799,11 @@ es-repo.example.com:5000/escloud/demowarning:1.2.0.1058
 | 凭证 | 5 | |
 | AI | 5 | 1 个 SSE |
 | 系统 | 18 | 含 3 个 GitLab + 7 个 Jenkins 接入配置/Job/触发接口 |
-| **合计** | **111** | 一期实现其中 **约 73 个**（标 ⭐ 的为核心路径） |
+| 定时任务 | 8 | 顶层 `/schedules`，横跨 CI / CD |
+| **合计** | **125** | 一期实现其中 **约 92 个**（标 ⭐ 的为核心路径） |
+
+> `docs/06` 与 `backend/README.md` 里出现过"约 73 个"这类数字，是本节在补
+> `manifests` / `schedules` 之前的旧值；**以本表为准**。
 
 **一期核心路径（MVP 必做）**：
 `POST /auth/login` → `GET /projects` → `POST /builds` → `GET /builds/{id}/logs/stream`

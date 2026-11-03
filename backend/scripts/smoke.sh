@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# YunNian 后端冒烟脚本：走通 docs/03 §14 的一期核心路径
+# YunNian 后端冒烟脚本：走通 docs/03 §15 的一期核心路径
 # （登录 → 项目 → 构建 → 构建 SSE → 环境 → 服务实例 → 部署 → 部署 SSE → 回滚 → 审计）。
 #
 # 用法：bash scripts/smoke.sh [baseUrl]
@@ -386,6 +386,52 @@ else
   "${AC[@]}" -X PATCH "$BASE/users/$AMEID" -d '{"enabled":false}' -o /tmp/smoke-self-disable.json
   check "停用当前登录账号 → 40000" 40000 /tmp/smoke-self-disable.json
 fi
+
+# --------------------------------------------------------------------------- 9c. 定时任务与 K8s 资源（只读）
+#
+# 为什么单独一档、且**只读**：
+#   - 定时任务的写接口会真的建单，"立即执行"更是会真触发一次构建/部署 ——
+#     冒烟不能有这个副作用，所以只验"读得到 + 参数校验说得清"。
+#   - K8s 资源（project_manifest）这一期**只存不写集群**，但创建会落库。
+#     写路径（含发布后自动同步镜像版本）已由 service/manifest_sync_test.go 覆盖，
+#     这里只要保证"接口还在、还能读到"就够了，不在别人库里留 smoke-* 垃圾。
+step "定时任务（只读）"
+"${C[@]}" "$BASE/schedules" -o /tmp/smoke-schedules.json && check "GET /schedules" 0 /tmp/smoke-schedules.json
+info "定时任务数=$(get /tmp/smoke-schedules.json 'len(d["data"])')"
+
+"${C[@]}" "$BASE/schedules/preview?cron=0%202%20*%20*%20*" -o /tmp/smoke-cron-ok.json
+check "GET /schedules/preview（合法表达式）" 0 /tmp/smoke-cron-ok.json
+# valid 为 true 时 next 必须有 5 个时间点：只回 valid、next 是空的，
+# 等于"看着能用、到点不跑"，这种半截实现必须红。
+if [ "$(get /tmp/smoke-cron-ok.json 'd["data"]["valid"]')" = "True" ] \
+   && [ "$(get /tmp/smoke-cron-ok.json 'len(d["data"]["next"])')" = "5" ]; then
+  ok "cron 合法 → valid=true 且预览 5 次执行时间"
+else
+  bad "cron 合法却没给出执行时间（valid=$(get /tmp/smoke-cron-ok.json 'd["data"]["valid"]')）"
+fi
+
+"${C[@]}" "$BASE/schedules/preview?cron=not-a-cron" -o /tmp/smoke-cron-bad.json
+check "GET /schedules/preview（非法表达式仍 200）" 0 /tmp/smoke-cron-bad.json
+if [ "$(get /tmp/smoke-cron-bad.json 'd["data"]["valid"]')" = "False" ] \
+   && [ -n "$(get /tmp/smoke-cron-bad.json 'd["data"]["error"]')" ]; then
+  ok "cron 非法 → valid=false 且带人话原因"
+else
+  bad "cron 非法却没被判无效（这会让人存进一条永远不会跑的任务）"
+fi
+
+"${C[@]}" "$BASE/schedules/999999" -o /tmp/smoke-schedule-missing.json
+check "GET /schedules/999999 → 40400" 40400 /tmp/smoke-schedule-missing.json
+
+step "K8s 资源定义（只读）"
+"${C[@]}" "$BASE/projects/$PKEY/manifests" -o /tmp/smoke-manifests.json && check "GET /projects/$PKEY/manifests" 0 /tmp/smoke-manifests.json
+info "该项目的资源定义数=$(get /tmp/smoke-manifests.json 'len(d["data"])')"
+"${C[@]}" "$BASE/projects/$PKEY/manifests/99999999" -o /tmp/smoke-manifest-missing.json
+check "GET .../manifests/99999999 → 40400" 40400 /tmp/smoke-manifest-missing.json
+# 空 body 必须被参数校验拦下，而不是落一份 content 为空的记录
+"${C[@]}" -X POST "$BASE/projects/$PKEY/manifests" -d '{}' -o /tmp/smoke-manifest-bad.json
+check "POST .../manifests（空 body）→ 40000" 40000 /tmp/smoke-manifest-bad.json
+"${C[@]}" "$BASE/projects/__no_such_project__/manifests" -o /tmp/smoke-manifest-noproj.json
+check "GET 不存在项目的 manifests → 40400" 40400 /tmp/smoke-manifest-noproj.json
 
 # --------------------------------------------------------------------------- 10. 登出与会话吊销
 step "登出（会话吊销）"
