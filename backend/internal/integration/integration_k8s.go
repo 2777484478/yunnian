@@ -217,8 +217,8 @@ func (k *K8sCluster) Pods(ctx context.Context, ref WorkloadRef) ([]PodInfo, erro
 	return out, nil
 }
 
-// PodLogs 读取某个 Pod 的日志（tail 最近 n 行）。
-func (k *K8sCluster) PodLogs(ctx context.Context, ref WorkloadRef, pod string, tailLines int) (io.ReadCloser, error) {
+// PodLogs 读取某个 Pod 的日志（tail 最近 n 行）。container 为空时走 K8s 默认规则。
+func (k *K8sCluster) PodLogs(ctx context.Context, ref WorkloadRef, pod, container string, tailLines int) (io.ReadCloser, error) {
 	if err := ref.validate(); err != nil {
 		return nil, err
 	}
@@ -233,6 +233,9 @@ func (k *K8sCluster) PodLogs(ctx context.Context, ref WorkloadRef, pod string, t
 	if tailLines > 0 {
 		n := int64(tailLines)
 		opts.TailLines = &n
+	}
+	if c := strings.TrimSpace(container); c != "" {
+		opts.Container = c
 	}
 	rc, err := cs.CoreV1().Pods(ref.Namespace).GetLogs(pod, opts).Stream(ctx)
 	if err != nil {

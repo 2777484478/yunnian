@@ -13,7 +13,7 @@ import (
 // 只要不含被禁的词就绕过去了。白名单逼着**新增工具必须显式登记**，
 // 登记的那一刻就会被迫回答这个问题："这个工具会改东西吗？"
 //
-// 这条测试的价值不在于"现在只有 8 个工具"，而在于：
+// 这条测试的价值不在于"现在只有几个工具"，而在于：
 // **将来有人想给 AI 加一个写能力时，CI 会先亮红灯**，而不是等它在生产上
 // 把某个服务重启了才发现。
 func TestAIToolsAreReadOnly(t *testing.T) {
@@ -28,6 +28,7 @@ func TestAIToolsAreReadOnly(t *testing.T) {
 		"list_env_services",
 		"list_environments",
 		"list_projects",
+		"search_service_logs",
 	}
 
 	a := &AIService{}

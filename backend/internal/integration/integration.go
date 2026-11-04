@@ -351,7 +351,12 @@ type Cluster interface {
 	// 升级成"服务列表打不开"。
 	WorkloadUsages(ctx context.Context, ref ClusterRef, namespace string, workloads []string) (map[string]WorkloadUsage, error)
 	// PodLogs 读取某个 Pod 的日志（tail 最近 n 行），返回的流由调用方关闭。
-	PodLogs(ctx context.Context, ref WorkloadRef, pod string, tailLines int) (io.ReadCloser, error)
+	//
+	// container 为空表示"按 K8s 默认规则选容器"：单容器 Pod 没问题，
+	// **多容器 Pod 会被 K8s 拒绝**（原文里带着可选容器名）。要读 sidecar 或
+	// 多容器 Pod 时必须显式给名字 —— 不给就报错，不做"随便挑一个"的猜测：
+	// 挑错容器返回的日志看起来很正常，会让人以为"没问题"。
+	PodLogs(ctx context.Context, ref WorkloadRef, pod, container string, tailLines int) (io.ReadCloser, error)
 	// DiagnoseFailure 采集"这个工作负载为什么没起来"的证据（只读）。
 	//
 	// 拿不到证据时必须返回 error，不能返回一个空结构体装作"没有异常证据"——

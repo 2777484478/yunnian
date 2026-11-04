@@ -1365,7 +1365,7 @@ data: {"reason":"finished","conversationId":"conv_8f2c1a9b","tokensUsed":412}
 
 **模型自己取数（2026-10-09 起）**
 
-`/ai/chat` 背后挂了 8 个**只读**工具，模型会在回答前自行调用：
+`/ai/chat` 背后挂了 9 个**只读**工具，模型会在回答前自行调用：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -1373,8 +1373,25 @@ data: {"reason":"finished","conversationId":"conv_8f2c1a9b","tokensUsed":412}
 | `list_env_services` | 某环境的服务清单（平台登记值，可能滞后） |
 | `get_service_status` | **集群实时**状态：镜像 tag、期望/实际/就绪副本 |
 | `diagnose_service` | **集群侧故障取证**：Pod 容器状态、事件、崩溃前那轮日志 |
+| `search_service_logs` | **运行中服务的日志检索**：只回异常片段（error/exception/超时…），带前后 2 行上下文 |
 | `get_cluster_resources` | 集群实时资源（含 `metricsAvailable` 语义） |
 | `list_deployments` / `list_builds` | 部署与构建记录 |
+
+> **`search_service_logs` 与 `diagnose_service` 的分工**（2026-11-04 加）：
+> `diagnose_service` 的日志是**故障取证的副产品**——只采「未就绪 Pod」崩溃前那一轮，
+> 服务正常跑着时它拿不到任何日志。而运维最常查日志的时刻恰恰是「服务没崩但在报错」
+> （接口 500、连接池耗尽、慢查询）。所以单独加了 `search_service_logs`：
+>
+> - 入参 `envKey` / `projectKey` 必填，`keyword` / `lines`（默认 400，上限 2000）/ `pod` / `container` 可选；
+> - 一次最多扫 4 个 Pod（**按重启次数降序**，重启多的才是在出问题的），每 Pod 最多回 8 条、总 24 条；
+> - **只回片段**，同时给 `scannedLines` / `matchedTotal` / `hitsShown` 三个计数 ——
+>   只回 `hits` 会让模型把"回了 8 条"读成"只有 8 条错误"；
+> - **0 命中必须说清"扫了多少行、用了哪组关键词"**，并提示"日志可能在 stdout 之外"。
+>   回一个空数组等于告诉模型"服务很干净"，与事实可能正好相反。
+>
+> 为什么不做"挑一个容器"的猜测：多容器 Pod 不指定容器时 K8s 会直接拒绝，
+> 而**猜错容器**返回的日志看起来很正常，会让人以为"没问题"。所以 `container` 留空即报错，
+> 错误原文里带着可选容器名。
 
 > **安全约束（两条一起才成立）**：
 > ① **结构性只读**——工具注册表里根本没有 apply / scale / restart / rollback 这些函数，

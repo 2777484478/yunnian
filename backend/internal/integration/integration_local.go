@@ -204,7 +204,7 @@ func (l *LocalCluster) Pods(context.Context, WorkloadRef) ([]PodInfo, error) {
 //
 // 此前它生成的是一段形状正确的**编造日志**：前端日志窗看着一切正常，
 // 内容却与集群毫无关系。比空更糟——运维会照着假日志排查。
-func (l *LocalCluster) PodLogs(context.Context, WorkloadRef, string, int) (io.ReadCloser, error) {
+func (l *LocalCluster) PodLogs(context.Context, WorkloadRef, string, string, int) (io.ReadCloser, error) {
 	return nil, errors.New(localClusterHint)
 }
 

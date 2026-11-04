@@ -627,7 +627,9 @@ const AiAssistant: React.FC = () => {
                   <ThunderboltOutlined /> 失败自动归因
                 </span>
                 <span className="yn-ai-hero__tag yn-ai-hero__tag--violet">
-                  <ApiOutlined /> 8 个只读工具
+                  {/* 数字要跟后端的 aiTools() 一致：加工具时连同
+                      ai_tools_test.go 的精确清单一起改（那条断言会先红，不会静默漏掉）。 */}
+                  <ApiOutlined /> 9 个只读工具
                 </span>
               </div>
             </div>

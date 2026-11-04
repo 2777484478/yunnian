@@ -27,9 +27,11 @@ import (
 //
 // 三条硬约束（与 docs/03 §12 对应）：
 //
-//  1. **只读，且是结构性的只读**。下面 8 个工具的 Run 里没有一处
+//  1. **只读，且是结构性的只读**。下面每个工具的 Run 里没有一处
 //     Apply / Scale / Restart / Rollback。模型就算在正文里写"我帮你重启了"，
 //     也没有那个函数可调——安全边界靠接口不存在，不靠提示词。
+//     新增工具必须同步登记到 ai_tools_test.go 与 ai_tools_readonly_test.go，
+//     那两条精确集合断言就是这道门（不是"现在有几个"的问题，是"加写工具时 CI 会红"）。
 //  2. **不需要把集群密钥交给模型**。工具在**平台进程内**执行，用的是平台自己
 //     那套 K8s 客户端（环境自带 kubeconfig / 集群接入凭据，见 KubeconfigSource）。
 //     模型看到的只是返回值。把 kubeconfig 塞进提示词是另一种做法，但它等于
@@ -91,6 +93,7 @@ func (a *AIService) aiTools() []aiTool {
 		a.toolListEnvServices(),
 		a.toolGetServiceStatus(),
 		a.toolDiagnoseService(),
+		a.toolSearchServiceLogs(),
 		a.toolListDeployments(),
 		a.toolListBuilds(),
 		a.toolClusterResources(),
@@ -583,6 +586,8 @@ func aiToolLabel(name string) string {
 		return "查询集群实时状态"
 	case "diagnose_service":
 		return "采集集群侧故障证据"
+	case "search_service_logs":
+		return "检索服务日志里的异常"
 	case "list_deployments":
 		return "读取部署记录"
 	case "list_builds":

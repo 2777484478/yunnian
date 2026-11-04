@@ -1183,7 +1183,9 @@ func (s *CDService) StreamPodLogs(ctx context.Context, id uint64, podName string
 	if err != nil {
 		return "", err
 	}
-	rc, err := s.deps.Up.Cluster.PodLogs(ctx, workloadRefOf(env, svc.WorkloadName), podName, tailLines)
+	// 容器留空：Pod 日志窗目前没有"选容器"的入口，走 K8s 默认规则
+	// （单容器 Pod 正常；多容器 Pod 会由 K8s 返回带可选容器名的错误，前端原样展示）。
+	rc, err := s.deps.Up.Cluster.PodLogs(ctx, workloadRefOf(env, svc.WorkloadName), podName, "", tailLines)
 	if err != nil {
 		return "", upstreamError(err, "读取 Pod %s 日志失败", podName)
 	}

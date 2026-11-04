@@ -74,7 +74,7 @@ func (c *stubCluster) Restart(context.Context, integration.WorkloadRef) error { 
 func (c *stubCluster) Pods(context.Context, integration.WorkloadRef) ([]integration.PodInfo, error) {
 	return nil, nil
 }
-func (c *stubCluster) PodLogs(context.Context, integration.WorkloadRef, string, int) (io.ReadCloser, error) {
+func (c *stubCluster) PodLogs(context.Context, integration.WorkloadRef, string, string, int) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
 func (c *stubCluster) DiagnoseFailure(context.Context, integration.WorkloadRef) (*integration.FailureEvidence, error) {
