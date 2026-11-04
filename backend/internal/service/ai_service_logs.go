@@ -169,12 +169,12 @@ func (a *AIService) toolSearchServiceLogs() aiTool {
 				}
 				txt, truncated := readLogCapped(rc, logScanReadCap)
 				_ = rc.Close()
-				hs, scanned := scanLogText(p.Name, txt, patterns, logScanContext, logScanHitsPerPod)
+				hs, scanned, matched := scanLogText(p.Name, txt, patterns, logScanContext, logScanHitsPerPod)
 				scannedTotal += scanned
-				matchedTotal += len(hs)
+				matchedTotal += matched
 				item := map[string]any{
 					"pod": p.Name, "restarts": p.Restarts,
-					"scannedLines": scanned, "matched": len(hs),
+					"scannedLines": scanned, "matched": matched,
 				}
 				if truncated {
 					item["truncated"] = true
@@ -240,31 +240,35 @@ type logHit struct {
 
 // scanLogText 在一段日志里按关键词找异常片段。
 //
-// 返回 hits 与**扫过的行数**：后者是"0 命中"结论可信度的凭据 ——
-// 只说"没找到错误"而不说扫了多少行，模型无法判断这是"扫了一大片很干净"
-// 还是"根本没读到日志"。
+// 三个返回值都不是装饰：
+//   - hits 是要回给模型的片段（最多 maxHits 条）；
+//   - scanned 是**扫过的行数**，它是"0 命中"这个结论可信度的凭据 ——
+//     只说"没找到错误"而不说扫了多少行，模型无法判断这是"扫了一大片很干净"
+//     还是"根本没读到日志"；
+//   - matched 是**命中的段数（未截断）**。必须与 len(hits) 分开：相等的话
+//     "只回了前 N 处、还有更多"这句话就永远说不出来，模型会把 8 条读成全部。
+//     2026-11-04 实测踩过：两个数都按 len(hits) 算，note 分支成了死代码。
 //
-// maxHits 按 Pod 计数，命中达到上限立即停（不再继续扫）：日志尾部通常才是最新问题，
-// 前面几十条老报错挤占额度反而会把真正那次挤掉 —— 所以这里**从头往下扫**，
-// 而"头"已经是 API 的尾部窗口（TailLines），语义上仍是最近的。
-func scanLogText(pod, text string, patterns []string, ctxLines, maxHits int) ([]logHit, int) {
+// maxHits 按 Pod 计数。达到上限后**仍然继续扫**（只计数不收集）：
+// 提前 break 会让 matched 恰好等于上限，与"刚好只有这么多"无法区分。
+func scanLogText(pod, text string, patterns []string, ctxLines, maxHits int) (hits []logHit, scanned, matched int) {
 	if strings.TrimSpace(text) == "" {
-		return nil, 0
+		return nil, 0, 0
 	}
 	text = strings.ToValidUTF8(text, "")
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	if len(lines) == 1 && strings.TrimSpace(lines[0]) == "" {
-		return nil, 0
+		return nil, 0, 0
 	}
 	if len(patterns) == 0 || maxHits <= 0 {
-		return nil, len(lines)
+		return nil, len(lines), 0
 	}
 	lowered := make([]string, len(lines))
 	for i, l := range lines {
 		lowered[i] = strings.ToLower(l)
 	}
 
-	hits := make([]logHit, 0, maxHits)
+	hits = make([]logHit, 0, maxHits)
 	// lastEnd 上一段**上下文窗口**的末尾行号。
 	//
 	// 合并条件是「新命中行的上文与上一段的下文相接或重叠」（i-ctx <= lastEnd+1），
@@ -288,22 +292,22 @@ func scanLogText(pod, text string, patterns []string, ctxLines, maxHits int) ([]
 		if to > len(lines)-1 {
 			to = len(lines) - 1
 		}
-		h := logHit{Pod: pod, Line: i + 1, Text: strings.TrimRight(lines[i], " \t")}
-		if ctxLines > 0 {
-			if i > from {
-				h.Before = append(h.Before, lines[from:i]...)
+		matched++
+		if len(hits) < maxHits {
+			h := logHit{Pod: pod, Line: i + 1, Text: strings.TrimRight(lines[i], " \t")}
+			if ctxLines > 0 {
+				if i > from {
+					h.Before = append(h.Before, lines[from:i]...)
+				}
+				if to > i {
+					h.After = append(h.After, lines[i+1:to+1]...)
+				}
 			}
-			if to > i {
-				h.After = append(h.After, lines[i+1:to+1]...)
-			}
+			hits = append(hits, h)
 		}
-		hits = append(hits, h)
 		lastEnd = to
-		if len(hits) >= maxHits {
-			break
-		}
 	}
-	return hits, len(lines)
+	return hits, len(lines), matched
 }
 
 // logLineMatches 一行是否命中任一关键词。

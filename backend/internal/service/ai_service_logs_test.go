@@ -23,13 +23,16 @@ func javaishLog() string {
 }
 
 func TestScanLogText_HitsWithContext(t *testing.T) {
-	hits, scanned := scanLogText("pod-a", javaishLog(), defaultLogPatterns, 2, 8)
+	hits, scanned, matched := scanLogText("pod-a", javaishLog(), defaultLogPatterns, 2, 8)
 
 	if scanned != 10 {
 		t.Errorf("应扫过 10 行，实际 %d", scanned)
 	}
 	if len(hits) == 0 {
 		t.Fatal("这段日志里明明有 ERROR，却一处都没命中")
+	}
+	if matched != len(hits) {
+		t.Errorf("没到上限时 matched 应等于 len(hits)，得到 %d vs %d", matched, len(hits))
 	}
 	// 第 4 行是 ERROR。多行堆栈会被合并成一段，所以这里只断言"第一条命中在第 4 行"，
 	// 不断言总条数 —— 总条数由日志内容决定，钉死它等于把测试写成实现副本。
@@ -61,7 +64,7 @@ func TestScanLogText_HitsWithContext(t *testing.T) {
 // 每行单开一条 = 同一处问题回 4 条互相重叠的内容，把额度占光。
 func TestScanLogText_MergesAdjacentHits(t *testing.T) {
 	log := "ERROR boom\njava.lang.IllegalStateException: x\nCaused by: timeout\nCaused by: refused\n"
-	hits, _ := scanLogText("p", log, defaultLogPatterns, 2, 8)
+	hits, _, _ := scanLogText("p", log, defaultLogPatterns, 2, 8)
 	if len(hits) != 1 {
 		t.Fatalf("连续 4 行命中应合并成 1 段，实际 %d 段：%+v", len(hits), hits)
 	}
@@ -74,13 +77,18 @@ func TestScanLogText_CapsHits(t *testing.T) {
 		b.WriteString(strings.Repeat("x", 5))
 		b.WriteString("\nok\n")
 	}
-	hits, scanned := scanLogText("p", b.String(), defaultLogPatterns, 0, 3)
+	hits, scanned, matched := scanLogText("p", b.String(), defaultLogPatterns, 0, 3)
 	if len(hits) != 3 {
 		t.Errorf("maxHits=3，实际返回 %d 条", len(hits))
 	}
 	// 截断时 scanned 仍报**总行数**：模型靠它判断"是不是没扫完"。
 	if scanned != 80 {
 		t.Errorf("应报总行数 80，实际 %d", scanned)
+	}
+	// matched 必须是**未截断**的段数：40 处错误、只回 3 条。
+	// 这里若等于 len(hits)，"还有更多"那句话就永远说不出口（实测踩过）。
+	if matched != 40 {
+		t.Errorf("matched 应为未截断的 40，实际 %d —— 它等于 len(hits) 时 note 分支成了死代码", matched)
 	}
 }
 
@@ -89,7 +97,7 @@ func TestScanLogText_CapsHits(t *testing.T) {
 // 这是这个工具最容易被误读的地方：回一个空数组，模型会说"日志没有异常"。
 // 有 scanned 在，模型才可能说出"扫了 N 行没匹配到"。
 func TestScanLogText_NoHitStillReportsScanned(t *testing.T) {
-	hits, scanned := scanLogText("p", "a\nb\nc\n", defaultLogPatterns, 2, 8)
+	hits, scanned, _ := scanLogText("p", "a\nb\nc\n", defaultLogPatterns, 2, 8)
 	if len(hits) != 0 {
 		t.Errorf("不该命中：%+v", hits)
 	}
@@ -100,7 +108,7 @@ func TestScanLogText_NoHitStillReportsScanned(t *testing.T) {
 
 func TestScanLogText_Empty(t *testing.T) {
 	for _, in := range []string{"", "   ", "\n\n"} {
-		hits, scanned := scanLogText("p", in, defaultLogPatterns, 2, 8)
+		hits, scanned, _ := scanLogText("p", in, defaultLogPatterns, 2, 8)
 		if len(hits) != 0 || scanned != 0 {
 			t.Errorf("空日志应返回 0/0，得到 %d/%d（输入 %q）", len(hits), scanned, in)
 		}
@@ -109,7 +117,7 @@ func TestScanLogText_Empty(t *testing.T) {
 
 // TestScanLogText_ChinesePatterns 中文日志也要能命中（不少服务在打中文）。
 func TestScanLogText_ChinesePatterns(t *testing.T) {
-	hits, _ := scanLogText("p", "开始处理\n连接数据库失败\n重试中\n", defaultLogPatterns, 1, 8)
+	hits, _, _ := scanLogText("p", "开始处理\n连接数据库失败\n重试中\n", defaultLogPatterns, 1, 8)
 	if len(hits) != 1 || !strings.Contains(hits[0].Text, "失败") {
 		t.Fatalf("中文「失败」应命中一行，实际：%+v", hits)
 	}
