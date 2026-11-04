@@ -132,6 +132,26 @@ body {
   gap: 4px;
 }
 
+/* 顶栏「使用文档」链接：位置在搜索框左侧（用户要求），外观贴近导航项而不是按钮。
+   它由 Link 渲染（右键可"新标签打开"），所以需要自己给字号/颜色/hover。 */
+.yn-header__doclink {
+  display: inline-flex;
+  align-items: center;
+  height: var(--yn-header-h);
+  padding: 0 10px;
+  margin-right: 8px;
+  font-size: 14px;
+  color: var(--yn-text-2);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.yn-header__doclink:hover,
+.yn-header__doclink.is-active {
+  color: var(--yn-primary);
+}
+
 .yn-header__env-tag {
   display: inline-flex;
   align-items: center;

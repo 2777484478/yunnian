@@ -346,32 +346,20 @@ export const AppLayout: React.FC = () => {
             <Menu
               mode="horizontal"
               // 原来恒为 []，两个菜单项都没有选中态。
-              // 现在按路由点亮：在 /docs 亮「使用文档」，其余（所有功能页都属于控制台）亮「控制台」。
-              selectedKeys={[location.pathname.startsWith('/docs') ? 'docs' : 'console']}
-              style={{ border: 'none', minWidth: 300, height: 55, lineHeight: '55px' }}
+              // 现在按路由点亮：仅当**不在**文档页时亮「控制台」。
+              // 「使用文档」已移到右侧动作区（2026-11-04 用户要求），不再属于这个 Menu，
+              // 所以文档页要**清空**选中态 —— 否则会错误地把「控制台」点亮。
+              selectedKeys={[location.pathname.startsWith('/docs') ? '' : 'console']}
+              style={{ border: 'none', height: 55, lineHeight: '55px' }}
               items={[
                 {
                   key: 'console',
-                  // ⚠️ 原来这里是纯文本 `label: '控制台'` —— 既没 Link 也没 onClick。
+                  // ⚠️ 原来是纯文本 `label: '控制台'` —— 既没 Link 也没 onClick。
                   // 那时控制台是唯一页面，点了无所谓；但加了 /docs 之后，
                   // 从文档页点「控制台」**回不去首页**（用户实测报的）。
                   label: (
                     <Link to="/overview" style={{ color: 'inherit' }}>
                       控制台
-                    </Link>
-                  ),
-                },
-                {
-                  key: 'docs',
-                  // 用 Link 而不是 onClick + navigate：导航是链接语义，右键"新标签打开"应该也能用。
-                  //
-                  // 这里原先是灰掉的「即将上线」占位，一期补齐后改成真链接。
-                  // 同批的另外两个占位（应用中心 / 流水线模板）已于 2026-11-04 **撤掉**：
-                  // 它们从 initial commit 起就只是一句"二期"，没有方案也没有排期，
-                  // 点一下就弹"暂未实现" —— 那是无源的承诺。等真有方案再加回来。
-                  label: (
-                    <Link to="/docs" style={{ color: 'inherit' }}>
-                      使用文档
                     </Link>
                   ),
                 },
@@ -381,6 +369,14 @@ export const AppLayout: React.FC = () => {
         </div>
 
         <div className="yn-header__actions">
+          {/* 「使用文档」放在这里而不是左边的导航区：用户要求挪到搜索框左侧。
+              它是链接而不是按钮——右键"新标签打开"应该也能用。 */}
+          <Link
+            to="/docs"
+            className={`yn-header__doclink${location.pathname.startsWith('/docs') ? ' is-active' : ''}`}
+          >
+            使用文档
+          </Link>
           {canSearch ? (
             <Dropdown
               open={searchOpen}
