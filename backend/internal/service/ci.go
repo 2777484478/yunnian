@@ -482,6 +482,13 @@ func (s *CIService) CreateProject(ctx context.Context, in ProjectInput, c Caller
 		return nil, err
 	}
 
+	// 团队必须是 `team` 表里真实存在（且启用）的名字。
+	// 前端是下拉，但**后端不能依赖前端**：一条直接打 API 的请求照样能写进
+	// 一个不存在的团队名，而那种脏数据的后果是静默的（见 assertTeamAssignable）。
+	if err := s.assertTeamAssignable(ctx, in.Team, ""); err != nil {
+		return nil, err
+	}
+
 	params, err := encodeBuildParams(in.BuildParams)
 	if err != nil {
 		return nil, err
@@ -605,6 +612,13 @@ func (s *CIService) UpdateProject(ctx context.Context, key string, in ProjectInp
 		return nil, err
 	}
 
+	// 团队：空值保留原值（与其它字段同一口径 —— 精简表单不渲染这一格时不能把它清掉），
+	// 改了就必须是 `team` 表里存在的名字。
+	team := stringOr(strings.TrimSpace(in.Team), p.Team)
+	if err := s.assertTeamAssignable(ctx, team, p.Team); err != nil {
+		return nil, err
+	}
+
 	updates := map[string]any{
 		"name":            strings.TrimSpace(in.Name),
 		"type":            in.Type,
@@ -623,7 +637,7 @@ func (s *CIService) UpdateProject(ctx context.Context, key string, in ProjectInp
 		"image_name":   stringOr(in.ImageName, p.ImageName),
 		"tag_pattern":  stringOr(in.TagPattern, p.TagPattern),
 		"build_params": params,
-		"team":         in.Team,
+		"team":         team,
 		"description":  in.Description,
 		"owner_id":     p.OwnerID,
 		"updated_by":   c.UserID(),
@@ -2621,6 +2635,44 @@ func (s *CIService) defaultRegistry() string {
 		return r
 	}
 	return "harbor.yunnian.internal"
+}
+
+// assertTeamAssignable 校验「这个团队名能不能分给项目」（2026-11-04 team 收口）。
+//
+// 为什么必须校验：`project.team` 存的是**名字本身**，而团队列表由 `/teams` 维护。
+// 不校验的话，任何一条直接打 API 的请求都能写进一个 `team` 表里不存在（或已停用）的名字。
+// 这种脏数据的后果是**静默的**，四处都对不上但每处看起来都正常：
+//   - 「系统管理 › 团队」里那个团队的项目数不含它（统计按 name 分组）；
+//   - 按团队反查数据权限时漏掉它 —— 负责人会莫名看不到自己的项目；
+//   - 项目详情页「所属团队」照常显示，只是写着个没人认识的名字。
+//
+// 前端是下拉选择，但**后端不能依赖前端**：下拉只是体验，约束必须在写入口。
+//
+// 三条放行规则：
+//   - 空值 → 拒绝（项目必须有团队；与前端 required 同一口径）；
+//   - 与原值相同 → **即使该团队已停用也放行**。停用是为了"不许再往里加新项目"，
+//     不是把已经在里面的项目锁死 —— 否则改一句项目描述都会失败；
+//   - 存在且启用 → 放行。
+func (s *CIService) assertTeamAssignable(ctx context.Context, team, oldTeam string) error {
+	team = strings.TrimSpace(team)
+	if team == "" {
+		return errs.Invalid("请选择所属团队")
+	}
+	if team == strings.TrimSpace(oldTeam) {
+		return nil
+	}
+	var t model.Team
+	err := s.db(ctx).Where("name = ?", team).First(&t).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errs.Invalidf("团队 %q 不存在。请先在「系统管理 › 团队」里创建它，或从下拉里选一个已有的团队", team)
+	}
+	if err != nil {
+		return errs.Internalf(err, "校验所属团队失败")
+	}
+	if !t.Enabled {
+		return errs.Invalidf("团队 %q 已停用，不能把项目分配到已停用的团队", team)
+	}
+	return nil
 }
 
 // resolveOwner 把"负责人姓名"解析成用户 ID。空则落到当前登录人。
