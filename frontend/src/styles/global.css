@@ -126,23 +126,6 @@ body {
   margin-left: 12px;
 }
 
-/* 顶栏中「已排期但未实现」的导航项：弱化颜色 + 二期角标，避免看起来像可用的死链 */
-.yn-header__nav .yn-nav-soon {
-  color: var(--yn-text-3);
-}
-
-.yn-header__nav .yn-nav-soon__badge {
-  font-style: normal;
-  font-size: 11px;
-  line-height: 1;
-  margin-left: 5px;
-  padding: 2px 4px;
-  border-radius: 3px;
-  background: #f0f1f4;
-  color: #9aa0ab;
-  vertical-align: 1px;
-}
-
 .yn-header__actions {
   display: flex;
   align-items: center;

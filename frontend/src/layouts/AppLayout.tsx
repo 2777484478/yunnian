@@ -362,29 +362,13 @@ export const AppLayout: React.FC = () => {
                   ),
                 },
                 {
-                  key: 'apps',
-                  label: (
-                    <span className="yn-nav-soon">
-                      应用中心
-                      <em className="yn-nav-soon__badge">二期</em>
-                    </span>
-                  ),
-                  onClick: () => message.info('「应用中心」已排入二期，当前版本暂未实现'),
-                },
-                {
-                  key: 'pipeline',
-                  label: (
-                    <span className="yn-nav-soon">
-                      流水线模板
-                      <em className="yn-nav-soon__badge">二期</em>
-                    </span>
-                  ),
-                  onClick: () => message.info('「流水线模板」已排入二期，当前版本暂未实现'),
-                },
-                {
                   key: 'docs',
-                  // 原来是 yn-nav-soon（灰掉的"即将上线"）—— 一期已补齐，去掉那个类。
                   // 用 Link 而不是 onClick + navigate：导航是链接语义，右键"新标签打开"应该也能用。
+                  //
+                  // 这里原先是灰掉的「即将上线」占位，一期补齐后改成真链接。
+                  // 同批的另外两个占位（应用中心 / 流水线模板）已于 2026-11-04 **撤掉**：
+                  // 它们从 initial commit 起就只是一句"二期"，没有方案也没有排期，
+                  // 点一下就弹"暂未实现" —— 那是无源的承诺。等真有方案再加回来。
                   label: (
                     <Link to="/docs" style={{ color: 'inherit' }}>
                       使用文档
