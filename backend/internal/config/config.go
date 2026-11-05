@@ -237,7 +237,36 @@ type GitLabConfig struct {
 	Enabled bool     `yaml:"enabled"`
 	BaseURL string   `yaml:"baseUrl"`
 	Token   string   `yaml:"token"`
-	Timeout Duration `yaml:"timeout"`
+	// AuthMode 认证方式：空/`token` = 访问令牌（PAT），`password` = 账号密码。
+	//
+	// 为什么现在支持账号密码（2026-11-05）：PAT 会过期，而平台里没有任何东西
+	// 会在过期前提醒人，表现是"某天开始所有构建都拉不到代码"，错误还是一句
+	// 与真实原因无关的 401。账号密码则由平台自己换令牌、自己续期。
+	//
+	// ⚠️ 落点与新 GitLab 版本的关系（实测 GitLab 上 `POST /api/v4/session` 已是 404）：
+	// 账号密码走的是 **OAuth2 password grant**（`POST /oauth/token`），拿到的是
+	// access_token + refresh_token，**不是** private_token。所以调用 API 时鉴权头
+	// 必须是 `Authorization: Bearer`，用 `PRIVATE-TOKEN` 会稳定 401（实测过）。
+	AuthMode string `yaml:"authMode"`
+	// Username / Password 仅 AuthMode=password 时有意义。
+	// Username 不是机密（界面上要显示），落 system_config；Password 落加密凭证表。
+	Username string   `yaml:"username"`
+	Password string   `yaml:"password"`
+	Timeout  Duration `yaml:"timeout"`
+}
+
+// 认证方式取值。
+const (
+	GitLabAuthToken    = "token"
+	GitLabAuthPassword = "password"
+)
+
+// NormalizedAuthMode 归一化认证方式：空值按令牌处理（兼容老配置）。
+func (c GitLabConfig) NormalizedAuthMode() string {
+	if strings.EqualFold(strings.TrimSpace(c.AuthMode), GitLabAuthPassword) {
+		return GitLabAuthPassword
+	}
+	return GitLabAuthToken
 }
 
 // JenkinsConfig 构建执行（Jenkins）。

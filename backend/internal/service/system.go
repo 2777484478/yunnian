@@ -324,12 +324,26 @@ type GitLabSettingsDTO struct {
 	Impl string `json:"impl"`
 	// TokenPageURL 由地址派生的"新建访问令牌"页面，省得用户自己翻设置菜单。
 	TokenPageURL string `json:"tokenPageUrl"`
+	// AuthMode 认证方式：token（访问令牌）/ password（账号密码）。
+	AuthMode string `json:"authMode"`
+	// Username 账号密码模式下的用户名。它不是机密，明文回显。
+	Username string `json:"username"`
+	// HasPassword 是否已存密码。密码本身**永不回显**（连掩码都不给）：
+	// 令牌掩码是为了让用户确认"填的是哪一把"，而密码没有任何"认一下"的必要。
+	HasPassword bool `json:"hasPassword"`
 }
 
 // GitLabSettingsInput 保存 GitLab 配置的入参。
 type GitLabSettingsInput struct {
 	Enabled bool   `json:"enabled"`
 	BaseURL string `json:"baseUrl" binding:"omitempty,max=255"`
+	// AuthMode 认证方式：token（访问令牌）/ password（账号密码）。空按当前值。
+	AuthMode string `json:"authMode" binding:"omitempty,max=16"`
+	// Username 账号密码模式的用户名（不是机密）。
+	Username string `json:"username" binding:"omitempty,max=128"`
+	// Password 与 Token 同口径：空=保持原密码，ClearPassword 才是删除。
+	Password      string `json:"password" binding:"max=256"`
+	ClearPassword bool   `json:"clearPassword"`
 	// Token 为空表示保持原令牌不变：前端只看得到掩码、回传不了明文，
 	// 若把空串当成"清空令牌"，每次改地址都会顺手把令牌删掉。
 	Token string `json:"token" binding:"omitempty,max=1024"`
@@ -346,7 +360,11 @@ type GitLabSettingsInput struct {
 type TestGitLabInput struct {
 	BaseURL string `json:"baseUrl" binding:"omitempty,max=255"`
 	Token   string `json:"token" binding:"omitempty,max=1024"`
-	Timeout int    `json:"timeout" binding:"omitempty,min=1,max=300"`
+	// AuthMode / Username / Password：允许带还没保存的账号密码来测。
+	AuthMode string `json:"authMode" binding:"omitempty,max=16"`
+	Username string `json:"username" binding:"omitempty,max=128"`
+	Password string `json:"password" binding:"max=256"`
+	Timeout  int    `json:"timeout" binding:"omitempty,min=1,max=300"`
 }
 
 // GitLabTestResult GitLab 连通性测试结果。
@@ -394,10 +412,41 @@ func (s *SystemService) UpdateGitLabSettings(ctx context.Context, in GitLabSetti
 		return nil, errs.Invalid("不能同时提交新令牌与清除令牌，请二选一")
 	}
 
+	// 判"密码留空时库里到底有没有密码"，必须先读一次当前值。
+	cur, err := store.LoadGitLabConfig(ctx, s.deps.DB, s.deps.Sealer, s.deps.Cfg.Integration.GitLab)
+	if err != nil {
+		return nil, errs.Internalf(err, "读取 GitLab 配置失败")
+	}
+
+	// 认证方式：老前端不传就沿用当前值，不默认改回令牌（那会把刚配好的账号密码废掉）。
+	authMode := strings.TrimSpace(in.AuthMode)
+	if authMode == "" {
+		authMode = cur.Cfg.NormalizedAuthMode()
+	}
+	if authMode != config.GitLabAuthPassword {
+		authMode = config.GitLabAuthToken
+	}
+	username := strings.TrimSpace(in.Username)
+	if authMode == config.GitLabAuthPassword {
+		if username == "" {
+			return nil, errs.Invalid("认证方式为账号密码时，用户名不能为空")
+		}
+		// 密码留空 = 保持原密码，但**前提是库里有**。没有就必须当场填，
+		// 否则会存下一个"看着配好了、实际换不到令牌"的配置，而报错要到测试连接时才有。
+		hasPassword := in.Password != "" || (cur.Cfg.Password != "" && !in.ClearPassword)
+		if !hasPassword {
+			return nil, errs.Invalid("认证方式为账号密码时，密码不能为空（若只想保留原密码，请不要清空它）")
+		}
+	}
+
 	replacedToken := strings.TrimSpace(in.Token) != ""
+	replacedCred := replacedToken || in.Password != "" || in.ClearPassword
 	if err := store.SaveGitLabConfig(ctx, s.deps.DB, s.deps.Sealer, store.GitLabSaveInput{
 		Enabled: in.Enabled, BaseURL: base, Timeout: in.Timeout,
 		Token: in.Token, ClearToken: in.ClearToken,
+		AuthMode: authMode, Username: username,
+		// ⚠️ 密码原样传，不 Trim：前后空格也是密码的一部分。
+		Password: in.Password, ClearPassword: in.ClearPassword,
 		// 传入配置文件里的令牌：首次保存且未填令牌时，它会被搬进加密存储，
 		// 让"留空=不修改"在首次保存时也字面成立。
 		FallbackToken: s.deps.Cfg.Integration.GitLab.Token,
@@ -406,12 +455,24 @@ func (s *SystemService) UpdateGitLabSettings(ctx context.Context, in GitLabSetti
 		return nil, errs.Internalf(err, "保存 GitLab 配置失败")
 	}
 
-	// 审计里只记"改了哪几项"，绝不记令牌本身——审计日志是给人翻的，不是给人抄的。
+	// 凭据/账号变了就丢掉缓存的 OAuth 令牌：否则"我明明改了密码，它还在用旧账号"
+	// 会持续到缓存过期（最长将近 2 小时），而且界面上一切正常。
+	if replacedCred || authMode == config.GitLabAuthPassword {
+		integration.ResetGitLabOAuthCache()
+	}
+
+	// 审计里只记"改了哪几项"，绝不记令牌/密码本身——审计日志是给人翻的，不是给人抄的。
 	changes := []string{}
 	if in.Enabled {
 		changes = append(changes, "启用接入")
 	} else {
 		changes = append(changes, "停用接入")
+	}
+	// 认证方式进审计但不带密码：出问题时能看出"什么时候从令牌切成了账号密码"。
+	if authMode == config.GitLabAuthPassword {
+		changes = append(changes, "认证方式=账号密码（"+username+"）")
+	} else if replacedCred {
+		changes = append(changes, "认证方式=访问令牌")
 	}
 	if base != "" {
 		changes = append(changes, "地址="+base)
@@ -452,6 +513,26 @@ func (s *SystemService) TestGitLabConnection(ctx context.Context, in TestGitLabI
 	if v := strings.TrimSpace(in.Token); v != "" {
 		cfg.Token, usingSaved = v, false
 	}
+	if v := strings.TrimSpace(in.AuthMode); v != "" {
+		cfg.AuthMode, usingSaved = v, false
+	}
+	if v := strings.TrimSpace(in.Username); v != "" {
+		cfg.Username, usingSaved = v, false
+	}
+	// 密码原样用（不 Trim），空表示沿用库里已存的那份。
+	if in.Password != "" {
+		cfg.Password, usingSaved = in.Password, false
+	}
+	if cfg.NormalizedAuthMode() == config.GitLabAuthPassword {
+		// 提前把"缺哪一项"说清楚。放过去的话，下面会以匿名身份请求，
+		// 私有仓库回 404，排查方向被带偏到"地址/仓库不对"。
+		if strings.TrimSpace(cfg.Username) == "" {
+			return nil, errs.Invalid("账号密码认证需要填写用户名")
+		}
+		if cfg.Password == "" {
+			return nil, errs.Invalid("账号密码认证需要填写密码")
+		}
+	}
 	if in.Timeout > 0 {
 		cfg.Timeout = config.Duration(time.Duration(in.Timeout) * time.Second)
 	}
@@ -484,7 +565,13 @@ func (s *SystemService) TestGitLabConnection(ctx context.Context, in TestGitLabI
 	res.OK = true
 	res.Version, res.Username, res.Name, res.IsAdmin = probe.Version, probe.Username, probe.Name, probe.IsAdmin
 	res.Scopes, res.ExpiresAt = probe.Scopes, probe.ExpiresAt
-	res.Message = fmt.Sprintf("连通正常：GitLab %s，令牌身份 %s，耗时 %dms", probe.Version, probe.Username, latency)
+	// 身份说法要跟认证方式一致：账号密码模式下没有"令牌"，说成"令牌身份"会让人
+	// 以为平台存着一把 PAT，从而去 GitLab 的令牌页找一个根本不存在的东西。
+	who := "令牌身份"
+	if cfg.NormalizedAuthMode() == config.GitLabAuthPassword {
+		who = "登录账号"
+	}
+	res.Message = fmt.Sprintf("连通正常：GitLab %s，%s %s，耗时 %dms", probe.Version, who, probe.Username, latency)
 	res.Warnings = gitLabProbeWarnings(probe)
 
 	if usingSaved && probe.Username != "" {
@@ -522,6 +609,9 @@ func gitLabSettingsDTO(cur *store.GitLabSettings, impl string) *GitLabSettingsDT
 		UpdatedAt:    formatTime(cur.UpdatedAt),
 		Impl:         impl,
 		TokenPageURL: gitLabTokenPage(cur.Cfg.BaseURL),
+		AuthMode:     cur.Cfg.NormalizedAuthMode(),
+		Username:     cur.Cfg.Username,
+		HasPassword:  cur.Cfg.Password != "",
 	}
 	if dto.Timeout <= 0 {
 		dto.Timeout = 10

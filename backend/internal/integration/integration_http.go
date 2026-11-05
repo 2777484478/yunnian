@@ -24,9 +24,12 @@ import (
 
 // GitLabRepository 通过 GitLab REST API v4 读取分支与提交。
 type GitLabRepository struct {
-	base  string
-	token string
+	base   string
 	client *http.Client
+	// auth 决定每次请求带什么鉴权头。两种模式的头**不一样**，这不是风格问题：
+	// OAuth 换来的 token 放 PRIVATE-TOKEN 会稳定 401（实测），必须走 Bearer。
+	// 为 nil 表示匿名（未配置任何凭据）。
+	auth gitlabAuth
 }
 
 // NewGitLabRepository 构造。
@@ -35,10 +38,22 @@ func NewGitLabRepository(cfg config.GitLabConfig) *GitLabRepository {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
+	client := &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
+
+	var auth gitlabAuth
+	if cfg.NormalizedAuthMode() == config.GitLabAuthPassword {
+		// 账号密码：用户名密码是否填全由 bridge.live() 负责拦，
+		// 这里只负责把 auth 装上 —— 让"能连上但缺凭据"报出具体缺什么，
+		// 而不是静默退化成匿名请求（匿名访问私有仓库只会得到 404，更难查）。
+		auth = oauthAuth{m: oauthManagerFor(cfg, client)}
+	} else if tok := strings.TrimSpace(cfg.Token); tok != "" {
+		auth = staticTokenAuth{token: tok}
+	}
+
 	return &GitLabRepository{
 		base:   strings.TrimRight(cfg.BaseURL, "/"),
-		token:  cfg.Token,
-		client: &http.Client{Timeout: timeout, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}},
+		client: client,
+		auth:   auth,
 	}
 }
 
@@ -114,7 +129,13 @@ func (g *GitLabRepository) Probe(ctx context.Context) (*GitLabProbe, error) {
 	case err != nil:
 		out.TokenMetaNote = "令牌元数据读取失败：" + err.Error()
 	case !ok:
-		out.TokenMetaNote = "当前 GitLab 版本不支持 /personal_access_tokens/self（需 13.10+），无法自动检查令牌作用域与到期时间"
+		if g.auth != nil && g.auth.Mode() == config.GitLabAuthPassword {
+			// 账号密码模式拿到的是 OAuth token，不是 PAT，这个接口天然查不到 ——
+			// 说成"GitLab 版本太老"会把人往错方向带。
+			out.TokenMetaNote = "账号密码模式：令牌由平台自动换取并续期（2 小时一轮），没有作用域/到期时间可读"
+		} else {
+			out.TokenMetaNote = "当前 GitLab 版本不支持 /personal_access_tokens/self（需 13.10+），无法自动检查令牌作用域与到期时间"
+		}
 	default:
 		out.TokenName, out.Scopes, out.ExpiresAt = tok.Name, tok.Scopes, tok.ExpiresAt
 		// 用组 / 项目令牌时该接口会返回 404，此时作用域同样读不到。
@@ -128,26 +149,15 @@ func (g *GitLabRepository) Probe(ctx context.Context) (*GitLabProbe, error) {
 // getOptional 与 get 相同，但把 404 视作"这个接口不存在"而不是失败。
 // 用于探测那些随 GitLab 版本增减的可选接口。
 func (g *GitLabRepository) getOptional(ctx context.Context, path string, out any) (bool, error) {
-	u := g.base + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	status, body, err := g.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return false, err
 	}
-	req.Header.Set("Accept", "application/json")
-	if g.token != "" {
-		req.Header.Set("PRIVATE-TOKEN", g.token)
-	}
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return false, UpstreamError("GitLab", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode == http.StatusNotFound {
+	if status == http.StatusNotFound {
 		return false, nil
 	}
-	if resp.StatusCode >= 300 {
-		return false, UpstreamError("GitLab", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 200)))
+	if status >= 300 {
+		return false, UpstreamError("GitLab", fmt.Errorf("HTTP %d: %s", status, truncate(string(body), 200)))
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return false, UpstreamError("GitLab", fmt.Errorf("响应解析失败: %w", err))
@@ -209,34 +219,68 @@ func (g *GitLabRepository) LatestCommit(ctx context.Context, gitURL, branch stri
 }
 
 func (g *GitLabRepository) get(ctx context.Context, path string, q url.Values, out any) error {
-	u := g.base + path
-	if len(q) > 0 {
-		u += "?" + q.Encode()
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	status, body, err := g.do(ctx, http.MethodGet, path, q)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
-	if g.token != "" {
-		// GitLab 同时接受 PRIVATE-TOKEN 与 Bearer，这里用前者（机器人令牌的通用写法）
-		req.Header.Set("PRIVATE-TOKEN", g.token)
-	}
-
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return UpstreamError("GitLab", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode >= 300 {
-		return UpstreamError("GitLab", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(body), 200)))
+	if status >= 300 {
+		return UpstreamError("GitLab", fmt.Errorf("HTTP %d: %s", status, truncate(string(body), 200)))
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return UpstreamError("GitLab", fmt.Errorf("响应解析失败: %w", err))
 	}
 	return nil
+}
+
+// do 发一次请求，返回状态码与响应体。
+//
+// **401 会换一次令牌重试**：OAuth 的 access_token 响应里没有 expires_in（只有 created_at），
+// 平台只能按默认 2 小时提前刷新 —— 提前量估错、或者令牌被 GitLab 侧提前撤销时，
+// 就会先用一个过期 token 撞一次 401。没有这个重试，用户看到的是"偶尔一次莫名失败"。
+//
+// 只对 password 模式重试：静态令牌重试没有意义（它不会因为再取一次而变有效），
+// 多打一次只会让人以为是网络抖动。
+func (g *GitLabRepository) do(ctx context.Context, method, path string, q url.Values) (int, []byte, error) {
+	u := g.base + path
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, u, nil)
+		if err != nil {
+			return 0, nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		if g.auth != nil {
+			key, val, herr := g.auth.Header(ctx)
+			if herr != nil {
+				// 已经是 UpstreamError（换令牌失败的那条会自带"GitLab 调用失败"前缀），
+				// 再包一层会得到 "GitLab 调用失败: GitLab 调用失败: ..." —— 实测踩过。
+				return 0, nil, herr
+			}
+			if key != "" {
+				req.Header.Set(key, val)
+			}
+		}
+
+		resp, err := g.client.Do(req)
+		if err != nil {
+			return 0, nil, UpstreamError("GitLab", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		_ = resp.Body.Close()
+
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 &&
+			g.auth != nil && g.auth.Mode() == config.GitLabAuthPassword {
+			g.auth.Invalidate()
+			continue
+		}
+		return resp.StatusCode, body, nil
+	}
+	// 两轮都 401：说明问题不在"令牌过期"，而是账号密码本身或权限有问题。
+	return http.StatusUnauthorized, nil, UpstreamError("GitLab",
+		fmt.Errorf("换到新令牌后仍被拒绝（401）：请确认该账号是否仍有 API 权限，或改用访问令牌"))
 }
 
 // projectPath 从各种 Git 地址形态里抽出 GitLab 的 project path。

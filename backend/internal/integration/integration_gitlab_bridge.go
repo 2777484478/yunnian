@@ -93,6 +93,26 @@ func (b *GitLabBridge) Auth(ctx context.Context) (username, password string, ok 
 	if err != nil || !cfg.Enabled {
 		return "", "", false
 	}
+	// 账号密码模式：用一个**现换的 OAuth 令牌**当密码去 clone，
+	// 而不是把明文密码交给 git。理由：
+	//   ① git 的凭据会落到 .git-credentials / 进程参数里，明文密码在那里比令牌危险得多；
+	//   ② 令牌能单独撤销，密码不能。
+	// GitLab 对「任意非空用户名 + 令牌作为密码」都接受，用户名固定 oauth2。
+	if cfg.NormalizedAuthMode() == config.GitLabAuthPassword {
+		repo, err := b.live(ctx)
+		if err != nil || repo == nil || repo.auth == nil {
+			return "", "", false
+		}
+		key, val, err := repo.auth.Header(ctx)
+		if err != nil || key == "" {
+			// 换不到令牌时**返回 ok=false 让调用方走匿名**，不把这次构建判失败：
+			// 有的仓库就是公开可读的，而 token 换不到的原因（账号被停用等）
+			// 会在「测试连接」里明确报出来，不必让 clone 承担诊断职责。
+			return "", "", false
+		}
+		return "oauth2", strings.TrimPrefix(val, "Bearer "), true
+	}
+
 	token := strings.TrimSpace(cfg.Token)
 	if token == "" {
 		return "", "", false
@@ -122,6 +142,16 @@ func (b *GitLabBridge) live(ctx context.Context) (*GitLabRepository, error) {
 	}
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		return nil, UpstreamError("GitLab", errors.New("已启用 GitLab 接入但未填写服务地址"))
+	}
+	if cfg.NormalizedAuthMode() == config.GitLabAuthPassword {
+		// 凭据不全要当场说清缺哪一项。放过去的话，请求会以匿名身份发出，
+		// 私有仓库回 404 —— 排查方向会被带偏到"地址写错/仓库不存在"。
+		if strings.TrimSpace(cfg.Username) == "" {
+			return nil, UpstreamError("GitLab", errors.New("认证方式为账号密码，但未填写用户名"))
+		}
+		if cfg.Password == "" {
+			return nil, UpstreamError("GitLab", errors.New("认证方式为账号密码，但未填写密码"))
+		}
 	}
 	return NewGitLabRepository(cfg), nil
 }

@@ -9,6 +9,7 @@ import {
   InputNumber,
   Popconfirm,
   Row,
+  Segmented,
   Space,
   Switch,
   Tag,
@@ -58,7 +59,10 @@ function isDirty(form: FormState, saved: GitLabSettings): boolean {
   return (
     form.baseUrl !== saved.baseUrl ||
     form.timeout !== saved.timeout ||
-    form.token.trim() !== ''
+    form.authMode !== (saved.authMode === 'password' ? 'password' : 'token') ||
+    form.username.trim() !== (saved.username ?? '') ||
+    form.token.trim() !== '' ||
+    form.password !== ''
   );
 }
 
@@ -66,10 +70,36 @@ interface FormState {
   enabled: boolean;
   baseUrl: string;
   timeout: number;
+  /** 认证方式：token=访问令牌，password=账号密码 */
+  authMode: 'token' | 'password';
+  username: string;
   token: string;
+  /** 只在"要改成新密码"时才有值；留空 = 不修改 */
+  password: string;
 }
 
-const emptyForm: FormState = { enabled: false, baseUrl: '', timeout: 10, token: '' };
+const emptyForm: FormState = {
+  enabled: false,
+  baseUrl: '',
+  timeout: 10,
+  authMode: 'token',
+  username: '',
+  token: '',
+  password: '',
+};
+
+/** 从服务端配置生成表单初值（凭据一律留空，靠"留空=不修改"表达）。 */
+function formOf(s: GitLabSettings): FormState {
+  return {
+    enabled: s.enabled,
+    baseUrl: s.baseUrl,
+    timeout: s.timeout,
+    authMode: s.authMode === 'password' ? 'password' : 'token',
+    username: s.username ?? '',
+    token: '',
+    password: '',
+  };
+}
 
 const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
   const { message, notification } = AntApp.useApp();
@@ -90,7 +120,7 @@ const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
     try {
       const s = await gitlabApi.settings();
       setSaved(s);
-      setForm({ enabled: s.enabled, baseUrl: s.baseUrl, timeout: s.timeout, token: '' });
+      setForm(formOf(s));
       setLoadError(null);
     } catch (e) {
       setLoadError(e instanceof ApiError ? e.message : '读取 GitLab 配置失败');
@@ -108,7 +138,7 @@ const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
   // 保存成功后后端会回一份权威配置，逐字段对齐，避免表单与库内不一致。
   const syncFromServer = (s: GitLabSettings) => {
     setSaved(s);
-    setForm({ enabled: s.enabled, baseUrl: s.baseUrl, timeout: s.timeout, token: '' });
+    setForm(formOf(s));
   };
 
   const dirty = useMemo(
@@ -123,8 +153,11 @@ const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
         enabled: form.enabled,
         baseUrl: form.baseUrl.trim(),
         timeout: form.timeout,
+        authMode: form.authMode,
+        username: form.username.trim(),
         // 留空即"不修改"：不传该字段，避免被当成清空
         ...(form.token.trim() ? { token: form.token.trim() } : {}),
+        ...(form.password ? { password: form.password } : {}),
       });
       syncFromServer(next);
       setResult(null);
@@ -173,7 +206,10 @@ const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
           ? {
               baseUrl: form.baseUrl.trim(),
               timeout: form.timeout,
+              authMode: form.authMode,
+              username: form.username.trim(),
               ...(form.token.trim() ? { token: form.token.trim() } : {}),
+              ...(form.password ? { password: form.password } : {}),
             }
           : {},
       );
@@ -225,29 +261,22 @@ const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
       bodyStyle={{ padding: '16px 20px' }}
       extra={statusTag()}
     >
-      {/* 认证方式说明放在最前面：这是用户最可能问的第一个问题，
-          与其让他在输入框上试错，不如一次说清为什么没有账号密码这一项。 */}
+      {/* 认证方式说明放在最前面：这是用户最可能问的第一个问题。
+          2026-11-05 之前这里写的是"只支持令牌、不支持账号密码"，后来用户明确要求支持
+          账号密码（令牌会过期，而平台里没有任何东西会提前提醒）。 */}
       <Alert
         type="info"
         showIcon
         icon={<GithubOutlined />}
         style={{ marginBottom: 16 }}
-        message="GitLab 只支持访问令牌（Personal Access Token），不支持账号密码"
+        message="支持两种认证方式：访问令牌（推荐）或 账号密码"
         description={
           <div style={{ fontSize: 12.5, lineHeight: 1.9 }}>
             <div>
-              GitLab 的 REST API 只认令牌，没有"用账号密码登录 API"这种方式
-              （<Text code>PRIVATE-TOKEN</Text> 头）。所以这里需要的是一个令牌，而不是密码。
-            </div>
-            <div style={{ marginTop: 4 }}>
-              用 GitLab 账号密码换令牌的那条路（OAuth 密码模式）也不建议用：开启了两步验证的账号
-              直接不可用，且换来的令牌只有 2 小时有效期，需要不断续期——一旦续期失败，
-              构建和部署会一起断掉。
-            </div>
-            <div style={{ marginTop: 4 }}>
-              创建方式：GitLab 右上角头像 → <Text strong>Edit profile</Text> →{' '}
-              <Text strong>Access tokens</Text>，作用域勾 <Text code>api</Text>
-              （只读场景 <Text code>read_api</Text> 也可），保存后令牌只显示一次。
+              <Text strong>① 访问令牌（推荐）</Text>：GitLab 右上角头像 →{' '}
+              <Text strong>Edit profile</Text> → <Text strong>Access tokens</Text>，
+              作用域勾 <Text code>api</Text>（只读场景 <Text code>read_api</Text> 也可），
+              保存后只显示一次。
               {saved?.tokenPageUrl ? (
                 <>
                   {' '}
@@ -256,6 +285,22 @@ const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
                   </Link>
                 </>
               ) : null}
+              <Text type="danger" style={{ marginLeft: 4 }}>
+                令牌会过期，到期后所有构建都拉不到代码 —— 建议把有效期设长一些。
+              </Text>
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <Text strong>② 账号密码</Text>：平台用 OAuth2 密码模式自己换令牌，
+              每 2 小时自动续期，<Text strong>你不需要再管过期</Text>。
+              <Text type="danger">
+                {' '}
+                账号开了两步验证（2FA）就不能用这种方式，只能用访问令牌。
+              </Text>
+            </div>
+            <div style={{ marginTop: 6 }}>
+              两种方式的凭据都加密存储（AES-256-GCM），保存后都无法读回明文。
+              但要知道：<Text strong>密码的风险比令牌高</Text> —— 令牌能单独撤销，
+              密码等于整个账号。能用令牌就优先用令牌。
             </div>
           </div>
         }
@@ -322,46 +367,115 @@ const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
           </Space>
         </Descriptions.Item>
 
-        <Descriptions.Item label="访问令牌" span={2}>
-          <Input.Password
-            size="small"
-            style={{ width: 280 }}
-            className="yn-mono"
-            autoComplete="new-password"
-            placeholder={saved?.hasToken ? '留空表示不修改现有令牌' : '粘贴令牌，如 glpat-xxxxxxxxxxxx'}
-            value={form.token}
-            onChange={(e) => setForm((f) => ({ ...f, token: e.target.value }))}
-          />
-          <Space size={8} style={{ marginLeft: 8 }}>
-            {saved?.hasToken ? (
-              <>
-                <Tooltip title="平台只保存密文，这里显示的是掩码">
-                  <Tag className="yn-mono" style={{ marginInlineEnd: 0 }}>
-                    已配置 {saved.tokenMasked}
-                  </Tag>
-                </Tooltip>
-                <Popconfirm
-                  title="清除已保存的访问令牌？"
-                  description="清除后平台将无法访问 GitLab 仓库，需要重新填写。"
-                  okText="清除"
-                  cancelText="取消"
-                  onConfirm={clearToken}
-                >
-                  <Button size="small" danger type="link" loading={saving}>
-                    清除
-                  </Button>
-                </Popconfirm>
-              </>
-            ) : (
-              <Tag style={{ marginInlineEnd: 0 }}>未配置</Tag>
-            )}
-          </Space>
-          <div>
+        <Descriptions.Item label="认证方式" span={3}>
+          <Space size={10} wrap>
+            <Segmented
+              size="small"
+              value={form.authMode}
+              // 切换时清空两套凭据的输入框：留着很容易在"切过去看一眼"之后
+              // 把上一个模式的凭据顺手带上保存，而那是另一套认证的凭据。
+              onChange={(v) =>
+                setForm((f) => ({ ...f, authMode: v as 'token' | 'password', token: '', password: '' }))
+              }
+              options={[
+                { label: '访问令牌', value: 'token' },
+                { label: '账号密码', value: 'password' },
+              ]}
+            />
             <Text type="secondary" style={{ fontSize: 11.5 }}>
-              令牌加密存储（AES-256-GCM），保存后无法读回明文，只能重新填一次
+              {form.authMode === 'token'
+                ? '需要一把有效的 Personal Access Token'
+                : '平台自动换取令牌并续期；账号不能开两步验证'}
             </Text>
-          </div>
+          </Space>
         </Descriptions.Item>
+
+        {form.authMode === 'token'
+          ? [
+              <Descriptions.Item key="token" label="访问令牌" span={2}>
+                <Input.Password
+                  size="small"
+                  style={{ width: 280 }}
+                  className="yn-mono"
+                  autoComplete="new-password"
+                  placeholder={
+                    saved?.hasToken ? '留空表示不修改现有令牌' : '粘贴令牌，如 glpat-xxxxxxxxxxxx'
+                  }
+                  value={form.token}
+                  onChange={(e) => setForm((f) => ({ ...f, token: e.target.value }))}
+                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {saved?.hasToken ? (
+                    <>
+                      <Tooltip title="平台只保存密文，这里显示的是掩码">
+                        <Tag className="yn-mono" style={{ marginInlineEnd: 0 }}>
+                          已配置 {saved.tokenMasked}
+                        </Tag>
+                      </Tooltip>
+                      <Popconfirm
+                        title="清除已保存的访问令牌？"
+                        description="清除后平台将无法访问 GitLab 仓库，需要重新填写。"
+                        okText="清除"
+                        cancelText="取消"
+                        onConfirm={clearToken}
+                      >
+                        <Button size="small" danger type="link" loading={saving}>
+                          清除
+                        </Button>
+                      </Popconfirm>
+                    </>
+                  ) : (
+                    <Tag style={{ marginInlineEnd: 0 }}>未配置</Tag>
+                  )}
+                </div>
+                <Text type="secondary" style={{ fontSize: 11.5 }}>
+                  令牌加密存储（AES-256-GCM），保存后无法读回明文，只能重新填一次
+                </Text>
+                </div>
+              </Descriptions.Item>,
+            ]
+          : [
+              <Descriptions.Item key="username" label="用户名" span={2}>
+                <Input
+                  size="small"
+                  style={{ width: 220 }}
+                  className="yn-mono"
+                  autoComplete="off"
+                  placeholder="GitLab 登录账号，如 CIUser"
+                  value={form.username}
+                  onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
+                />
+              </Descriptions.Item>,
+              <Descriptions.Item key="password" label="密码" span={2}>
+                {/* 输入框与标签放同一个 flex 行：Descriptions 的 content 区是块级，
+                    用 Space 会被撑满整行，把标签推到很远处（实测挤成一团）。 */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Input.Password
+                    size="small"
+                    style={{ width: 220 }}
+                    autoComplete="new-password"
+                    placeholder={saved?.hasPassword ? '留空表示不修改现有密码' : '填写 GitLab 登录密码'}
+                    value={form.password}
+                    onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+                  />
+                  {saved?.hasPassword ? (
+                    <Tooltip title="密码只保存密文，界面上不回显（连掩码都不给）">
+                      <Tag color="green" style={{ marginInlineEnd: 0 }}>
+                        已配置
+                      </Tag>
+                    </Tooltip>
+                  ) : (
+                    <Tag style={{ marginInlineEnd: 0 }}>未配置</Tag>
+                  )}
+                </div>
+                <Text type="secondary" style={{ fontSize: 11.5 }}>
+                  密码加密存储（AES-256-GCM），保存后不回显；只改地址或超时时留空即可
+                </Text>
+                </div>
+              </Descriptions.Item>,
+            ]}
       </Descriptions>
 
       <div style={{ marginTop: 16 }}>
@@ -377,7 +491,7 @@ const GitLabConnectCard: React.FC<Props> = ({ canWrite, onChanged }) => {
             disabled={!dirty || saving}
             onClick={() => {
               if (!saved) return;
-              setForm({ enabled: saved.enabled, baseUrl: saved.baseUrl, timeout: saved.timeout, token: '' });
+              setForm(formOf(saved));
               setResult(null);
             }}
           >

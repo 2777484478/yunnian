@@ -100,14 +100,31 @@ export interface GitLabSettings {
   impl: string;
   /** 由地址派生的"新建访问令牌"页面，地址为空时为空串。 */
   tokenPageUrl: string;
+  /** 认证方式：token（访问令牌）/ password（账号密码）。 */
+  authMode: 'token' | 'password';
+  /** 账号密码模式下的用户名（不是机密，明文回显）。 */
+  username: string;
+  /** 是否已存密码。密码本身永不回显，连掩码都不给。 */
+  hasPassword: boolean;
 }
 
-/** 保存入参。token 留空 = 不修改；clearToken = 显式删除。二者互斥。 */
+/**
+ * 保存入参。
+ *
+ * 凭据的"三种意图"必须分得清，否则会静默丢凭据：
+ *   - token/password 有值        → 覆盖
+ *   - 留空 + clearXxx            → 删除
+ *   - 留空且不带 clearXxx        → 保持原值
+ */
 export interface GitLabSettingsInput {
   enabled: boolean;
   baseUrl: string;
+  authMode?: 'token' | 'password';
+  username?: string;
   token?: string;
   clearToken?: boolean;
+  password?: string;
+  clearPassword?: boolean;
   timeout?: number;
 }
 
@@ -144,7 +161,14 @@ export const gitlabApi = {
    * 测试连接。不带参数表示测已保存的配置；
    * 带上 baseUrl/token 则测表单里还没保存的值，支持"先测再存"。
    */
-  test: (body?: { baseUrl?: string; token?: string; timeout?: number }) =>
+  test: (body?: {
+    baseUrl?: string;
+    token?: string;
+    authMode?: 'token' | 'password';
+    username?: string;
+    password?: string;
+    timeout?: number;
+  }) =>
     http.post<GitLabTestResult>('/system/integrations/gitlab/test', body ?? {}),
 };
 

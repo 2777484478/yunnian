@@ -37,6 +37,10 @@ const (
 	KeyGitLabBaseURL  = "integration.gitlab.baseUrl"
 	KeyGitLabTimeout  = "integration.gitlab.timeout"
 	KeyGitLabIdentity = "integration.gitlab.identity"
+	// KeyGitLabAuthMode 认证方式（token / password）。空值按 token 处理（兼容老库）。
+	KeyGitLabAuthMode = "integration.gitlab.authMode"
+	// KeyGitLabUsername 账号密码模式的用户名。不是机密：界面上要显示它是谁在连。
+	KeyGitLabUsername = "integration.gitlab.username"
 
 	gitlabConfigGroup = "integration"
 
@@ -45,6 +49,11 @@ const (
 	GitLabCredScope = "gitlab"
 	GitLabCredName  = "access-token"
 	GitLabCredType  = "git_token"
+	// GitLabPwdName 账号密码模式下的密码。与令牌**分开两行**而不是共用一行：
+	// 两种认证方式可能同时配着（切回来还能用），共用一行意味着切换即覆盖，
+	// 而覆盖掉的密码没人能还原（库里只有密文）。
+	GitLabPwdName = "password"
+	GitLabPwdType = "git_password"
 )
 
 // GitLabSettings 从库里读回的 GitLab 配置，附带"这份值从哪来"。
@@ -67,7 +76,8 @@ type GitLabSettings struct {
 func LoadGitLabConfig(ctx context.Context, db *gorm.DB, sealer *crypto.Sealer, fallback config.GitLabConfig) (*GitLabSettings, error) {
 	out := &GitLabSettings{Cfg: fallback}
 
-	keys := []string{KeyGitLabEnabled, KeyGitLabBaseURL, KeyGitLabTimeout, KeyGitLabIdentity}
+	keys := []string{KeyGitLabEnabled, KeyGitLabBaseURL, KeyGitLabTimeout, KeyGitLabIdentity,
+		KeyGitLabAuthMode, KeyGitLabUsername}
 	var rows []model.SystemConfig
 	if err := db.WithContext(ctx).Where("config_key IN ?", keys).Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("查询 GitLab 配置失败: %w", err)
@@ -84,6 +94,14 @@ func LoadGitLabConfig(ctx context.Context, db *gorm.DB, sealer *crypto.Sealer, f
 	if row, ok := byKey[KeyGitLabBaseURL]; ok {
 		out.FromDB = true
 		out.Cfg.BaseURL = strings.TrimSpace(row.ConfigValue)
+	}
+	if row, ok := byKey[KeyGitLabAuthMode]; ok {
+		out.FromDB = true
+		out.Cfg.AuthMode = strings.TrimSpace(row.ConfigValue)
+	}
+	if row, ok := byKey[KeyGitLabUsername]; ok {
+		out.FromDB = true
+		out.Cfg.Username = strings.TrimSpace(row.ConfigValue)
 	}
 	if row, ok := byKey[KeyGitLabTimeout]; ok {
 		out.FromDB = true
@@ -131,6 +149,29 @@ func LoadGitLabConfig(ctx context.Context, db *gorm.DB, sealer *crypto.Sealer, f
 			out.UpdatedAt = cred.UpdatedAt
 		}
 	}
+
+	// 账号密码模式下的密码（独立一行，见 GitLabPwdName 的注释）。
+	var pwd model.SecretCredential
+	err = db.WithContext(ctx).Where("scope = ? AND name = ?", GitLabCredScope, GitLabPwdName).First(&pwd).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// 与令牌同一口径：界面接管过（FromDB）就不回退到 config.yaml，
+		// 否则"清除密码"会被配置文件里那份悄悄顶回来。
+		if out.FromDB {
+			out.Cfg.Password = ""
+		}
+	case err != nil:
+		return nil, fmt.Errorf("查询 GitLab 密码失败: %w", err)
+	default:
+		plain, err := sealer.Open(crypto.Sealed{Cipher: pwd.Cipher, IV: pwd.IV, AuthTag: pwd.AuthTag})
+		if err != nil {
+			return nil, fmt.Errorf("GitLab 密码解密失败（security.masterKey 是否被更换过？）: %w", err)
+		}
+		out.Cfg.Password = plain
+		if pwd.UpdatedAt.After(out.UpdatedAt) {
+			out.UpdatedAt = pwd.UpdatedAt
+		}
+	}
 	return out, nil
 }
 
@@ -147,6 +188,14 @@ type GitLabSaveInput struct {
 	//      那么每次改地址都会顺手把令牌删掉）
 	Token      string
 	ClearToken bool
+	// AuthMode / Username 走 system_config；Password / ClearPassword 与令牌同口径：
+	//   - Password 非空            → 覆盖为新密码
+	//   - Password 空 && ClearPassword → 删除已存密码
+	//   - Password 空 && !ClearPassword → 保持原密码不变
+	AuthMode      string
+	Username      string
+	Password      string
+	ClearPassword bool
 	// FallbackToken 是 configs/config.yaml 里的 token。
 	// "保持原令牌不变"时若库里还没有令牌行，就把这份搬进加密存储——
 	// 这样"留空=不修改"在首次保存时也字面成立，而不是静默把令牌弄丢。
@@ -171,61 +220,107 @@ func SaveGitLabConfig(ctx context.Context, db *gorm.DB, sealer *crypto.Sealer, i
 			{KeyGitLabEnabled, enabled, "bool", "GitLab 接入开关"},
 			{KeyGitLabBaseURL, strings.TrimSpace(in.BaseURL), "string", "GitLab 服务地址（如 https://gitlab.example.com）"},
 			{KeyGitLabTimeout, strconv.Itoa(timeout), "number", "GitLab API 超时（秒）"},
+			{KeyGitLabAuthMode, normalizedAuthMode(in.AuthMode), "string", "GitLab 认证方式（token=访问令牌 / password=账号密码）"},
+			{KeyGitLabUsername, strings.TrimSpace(in.Username), "string", "GitLab 账号密码模式下的用户名"},
 		} {
 			if err := upsertSystemConfig(tx, kv.key, kv.val, kv.typ, gitlabConfigGroup, kv.desc, in.UserID); err != nil {
 				return err
 			}
 		}
 
-		// 清除令牌：直接删掉那行。删行而不是写空密文——密文列 NOT NULL，
-		// 而且留着一条"解不开也没用的密文"只会让后来人以为平台还持有凭据。
+		// 凭据有没有变，决定要不要清掉"上次识别到的身份"（它属于旧凭据）。
+		credChanged := false
+
+		// ---------------- 访问令牌
 		if in.ClearToken {
+			// 删行而不是写空密文——密文列 NOT NULL，
+			// 而且留着一条"解不开也没用的密文"只会让后来人以为平台还持有凭据。
 			if err := tx.Where("scope = ? AND name = ?", GitLabCredScope, GitLabCredName).
 				Delete(&model.SecretCredential{}).Error; err != nil {
 				return fmt.Errorf("清除 GitLab 令牌失败: %w", err)
 			}
+			credChanged = true
+		} else if token := strings.TrimSpace(in.Token); token != "" || !hasGitLabCred(tx, GitLabCredName) {
+			// 为空但有且仅有"库里还没有令牌行"这一种情况需要搬迁配置文件里的令牌，
+			// 让"留空=不修改"在首次保存时也字面成立。
+			if token == "" {
+				token = strings.TrimSpace(in.FallbackToken)
+			}
+			if token != "" {
+				if err := upsertGitLabCred(tx, sealer, GitLabCredName, GitLabCredType, token,
+					"平台调用 GitLab REST API（由「第三方集成」页维护）", in.UserID); err != nil {
+					return fmt.Errorf("保存 GitLab 令牌失败: %w", err)
+				}
+				credChanged = true
+			}
+		}
+
+		// ---------------- 账号密码（独立一行，与令牌互不覆盖）
+		if in.ClearPassword {
+			if err := tx.Where("scope = ? AND name = ?", GitLabCredScope, GitLabPwdName).
+				Delete(&model.SecretCredential{}).Error; err != nil {
+				return fmt.Errorf("清除 GitLab 密码失败: %w", err)
+			}
+			credChanged = true
+		} else if pwd := in.Password; strings.TrimSpace(pwd) != "" {
+			// ⚠️ 密码**不做 Trim**：前后空格也是密码的一部分，
+			// 裁掉会让人对着一个"我明明填对了"的账号查半天。只判空用 TrimSpace。
+			if err := upsertGitLabCred(tx, sealer, GitLabPwdName, GitLabPwdType, pwd,
+				"GitLab 账号密码模式下的密码（平台用它换 OAuth 令牌，由「第三方集成」页维护）", in.UserID); err != nil {
+				return fmt.Errorf("保存 GitLab 密码失败: %w", err)
+			}
+			credChanged = true
+		}
+
+		if credChanged {
+			// 凭据换了，之前识别到的身份与到期时间都属于旧凭据，清掉免得界面显示旧账号。
 			return resetGitLabIdentity(tx, in.UserID)
 		}
-
-		token := strings.TrimSpace(in.Token)
-		var existing model.SecretCredential
-		findErr := tx.Where("scope = ? AND name = ?", GitLabCredScope, GitLabCredName).First(&existing).Error
-		hasRow := findErr == nil
-
-		if token == "" && !hasRow && strings.TrimSpace(in.FallbackToken) != "" {
-			// 首次保存且只填了地址：把配置文件里的令牌搬进加密存储，
-			// 避免"界面接管后令牌凭空消失"。这是一次性的搬迁，不是持续回退。
-			token = strings.TrimSpace(in.FallbackToken)
-		}
-		if token == "" {
-			// 保持原令牌不变。
-			return nil
-		}
-
-		sealed, err := sealer.Seal(token)
-		if err != nil {
-			return fmt.Errorf("加密 GitLab 令牌失败: %w", err)
-		}
-		if !hasRow {
-			cred := model.SecretCredential{
-				Name: GitLabCredName, Type: GitLabCredType, Scope: GitLabCredScope,
-				Cipher: sealed.Cipher, IV: sealed.IV, AuthTag: sealed.AuthTag, KeyVersion: 1,
-				Description: "平台调用 GitLab REST API（由「第三方集成」页维护）",
-				CreatedBy:   in.UserID,
-			}
-			if err := tx.Create(&cred).Error; err != nil {
-				return fmt.Errorf("写入 GitLab 令牌失败: %w", err)
-			}
-		} else if err := tx.Model(&model.SecretCredential{}).Where("id = ?", existing.ID).Updates(map[string]any{
-			"cipher": sealed.Cipher, "iv": sealed.IV, "auth_tag": sealed.AuthTag,
-			"type": GitLabCredType, "updated_at": time.Now(),
-		}).Error; err != nil {
-			return fmt.Errorf("更新 GitLab 令牌失败: %w", err)
-		}
-
-		// 令牌换了，之前识别到的身份与到期时间都属于旧令牌，清掉免得界面继续显示旧账号。
-		return resetGitLabIdentity(tx, in.UserID)
+		return nil
 	})
+}
+
+// normalizedAuthMode 归一化落库值：空按 token（兼容老库）。
+func normalizedAuthMode(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), config.GitLabAuthPassword) {
+		return config.GitLabAuthPassword
+	}
+	return config.GitLabAuthToken
+}
+
+// hasGitLabCred 库里是否已有该名字的凭据行。
+func hasGitLabCred(tx *gorm.DB, name string) bool {
+	var n int64
+	_ = tx.Model(&model.SecretCredential{}).
+		Where("scope = ? AND name = ?", GitLabCredScope, name).Count(&n).Error
+	return n > 0
+}
+
+// upsertGitLabCred 写入或更新一条 GitLab 凭据（加密）。
+//
+// 抽出来是因为令牌与密码走完全相同的加密/更新逻辑 —— 两处各写一遍，
+// 早晚有一处忘了更新 type 或 key_version，而那种错只在解密时才暴露。
+func upsertGitLabCred(tx *gorm.DB, sealer *crypto.Sealer, name, credType, plain, desc string, userID *uint64) error {
+	enc, err := sealer.Seal(plain)
+	if err != nil {
+		return fmt.Errorf("加密凭据失败: %w", err)
+	}
+	var existing model.SecretCredential
+	findErr := tx.Where("scope = ? AND name = ?", GitLabCredScope, name).First(&existing).Error
+	switch {
+	case errors.Is(findErr, gorm.ErrRecordNotFound):
+		return tx.Create(&model.SecretCredential{
+			Name: name, Type: credType, Scope: GitLabCredScope,
+			Cipher: enc.Cipher, IV: enc.IV, AuthTag: enc.AuthTag, KeyVersion: 1,
+			Description: desc, CreatedBy: userID,
+		}).Error
+	case findErr != nil:
+		return findErr
+	}
+	return tx.Model(&model.SecretCredential{}).Where("id = ?", existing.ID).Updates(map[string]any{
+		"cipher": enc.Cipher, "iv": enc.IV, "auth_tag": enc.AuthTag,
+		"type": credType, "updated_at": time.Now(),
+	}).Error
 }
 
 // resetGitLabIdentity 清空"上次测试识别到的令牌身份"与到期时间。
