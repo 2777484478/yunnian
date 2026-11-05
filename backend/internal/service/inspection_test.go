@@ -18,6 +18,9 @@ func baseInspectData() inspectData {
 	d.Svcs = []model.ServiceInstance{
 		{ProjectKey: "svc-ok", Status: "running", Replicas: 1, ReadyReplicas: 1},
 	}
+	d.Probes = []svcProbe{
+		{Svc: d.Svcs[0], Exists: true, Replicas: 1, Actual: 1, Ready: 1},
+	}
 	d.Nodes = &integration.ClusterState{
 		Nodes: 1, MetricsAvailable: true,
 		NodeList: []integration.NodeStat{
@@ -44,8 +47,8 @@ func TestScoreInspection_Healthy(t *testing.T) {
 // TestScoreInspection_NotReadyService 未就绪服务每个扣 15，最多扣 45。
 func TestScoreInspection_NotReadyService(t *testing.T) {
 	d := baseInspectData()
-	d.NotReady = []model.ServiceInstance{
-		{ProjectKey: "a", Status: "pending", Replicas: 1, ReadyReplicas: 0},
+	d.NotReady = []svcProbe{
+		{Svc: model.ServiceInstance{ProjectKey: "a"}, Exists: true, Replicas: 1, Actual: 1, Ready: 0},
 	}
 	score, _, findings := scoreInspection(d)
 	if score != 85 {
@@ -65,30 +68,64 @@ func TestScoreInspection_NotReadyService(t *testing.T) {
 	}
 
 	// 5 个未就绪：扣分封顶 45
-	d.NotReady = make([]model.ServiceInstance, 5)
+	d.NotReady = make([]svcProbe, 5)
 	for i := range d.NotReady {
-		d.NotReady[i] = model.ServiceInstance{ProjectKey: "s", Status: "pending", Replicas: 1}
+		d.NotReady[i] = svcProbe{Svc: model.ServiceInstance{ProjectKey: "s"}, Exists: true, Replicas: 1}
 	}
 	if s, _, _ := scoreInspection(d); s != 55 {
 		t.Errorf("5 个未就绪应封顶扣 45 → 55，实际 %d", s)
 	}
 }
 
-// TestScoreInspection_StatusStale 副本齐但状态非 running：扣分要轻（不是故障）。
-func TestScoreInspection_StatusStale(t *testing.T) {
+// TestScoreInspection_PlatformStaleIsNotPenalized 平台记录不准**不扣分**。
+//
+// 用户明确要求「报告只看实际环境，平台标记是错的」。
+// 平台 status 是部署时的历史值（只有手动同步才刷新，且同步不覆盖 status），
+// 它不准是平台自己的问题，不该算进服务的健康分。
+func TestScoreInspection_PlatformStaleIsNotPenalized(t *testing.T) {
 	d := baseInspectData()
-	d.Degraded = []staleService{{
-		Svc:  model.ServiceInstance{ProjectKey: "aiobasic", Status: "error", Replicas: 1, ReadyReplicas: 1},
-		Note: "副本已齐（1/1），平台状态仍是 error",
+	d.Stale = []svcProbe{{
+		Svc:      model.ServiceInstance{ProjectKey: "aio-security-gateway", Status: "pending", Replicas: 1, ReadyReplicas: 0},
+		Exists:   true,
+		Replicas: 1, Actual: 1, Ready: 1,
 	}}
 	score, _, findings := scoreInspection(d)
-	if score != 95 {
-		t.Errorf("记录未刷新应扣 5 → 95，实际 %d", score)
+	if score != 100 {
+		t.Errorf("平台记录不一致不该扣分，应仍是 100，实际 %d", score)
 	}
+	found := false
 	for _, f := range findings {
-		if f.Kind == "status_stale" && f.Level != "warning" {
-			t.Errorf("这类应是 warning 而不是 %s —— 报成故障会让人白跑一趟", f.Level)
+		if f.Kind == "platform_stale" {
+			found = true
+			if f.Level != "info" || f.Penalty != 0 {
+				t.Errorf("应作为 info 且不扣分，实际 level=%s penalty=%d", f.Level, f.Penalty)
+			}
 		}
+	}
+	if !found {
+		t.Fatal("仍要提示平台记录不一致（否则用户以为平台上的红标是准的）")
+	}
+}
+
+// TestScoreInspection_ProbeFailedIsPenalized 探不到要扣分：那是报告的盲区。
+func TestScoreInspection_ProbeFailedIsPenalized(t *testing.T) {
+	d := baseInspectData()
+	d.ProbeFailed = 3
+	score, _, findings := scoreInspection(d)
+	if score != 95 {
+		t.Errorf("3 个服务探不到应扣 5 → 95，实际 %d", score)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Kind == "probe_failed" {
+			found = true
+			if f.Level != "warning" {
+				t.Errorf("探不到应是 warning，实际 %s", f.Level)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("探不到必须单独报，不能当作正常")
 	}
 }
 

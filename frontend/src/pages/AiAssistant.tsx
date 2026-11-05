@@ -763,6 +763,21 @@ const AiAssistant: React.FC = () => {
                 {s}
               </span>
             ))}
+            {/* 巡检报告入口：放在推荐问题这一排的末尾。
+                它和上面那些"提问"不同 —— 点了是去存档页，不是发消息，
+                所以用不同颜色（橙）区分，避免被当成又一个问句。 */}
+            {hasPerm('env:read') ? (
+              <Tooltip title="查看已存档的巡检报告，可下载 HTML">
+                <span
+                  className="yn-ai-chip"
+                  style={{ color: '#d46b08', borderColor: '#ffd591', background: '#fff7e6' }}
+                  onClick={() => navigate('/cd/inspections')}
+                >
+                  <SafetyCertificateOutlined style={{ marginRight: 5, color: '#fa8c16' }} />
+                  查看巡检报告
+                </span>
+              </Tooltip>
+            ) : null}
           </div>
           {/* 这里刻意**不用** Space.Compact：它的子元素是等高拉伸的，
               输入框长高时按钮会被一起拉成一条竖块。普通 flex + flex-end

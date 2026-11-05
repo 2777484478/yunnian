@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"html"
 	"strings"
-
-	"github.com/2777484478/yunnian/internal/model"
 )
 
 // renderInspectionHTML 生成可下载的彩色巡检报告。
@@ -142,15 +140,23 @@ func renderInspectionHTML(
 		`<div class="hint">共 <b>%d</b> 个服务：就绪 <b>%d</b>，未就绪 <b class="%s">%d</b>，状态未刷新 <b class="%s">%d</b>。</div>`,
 		st.SvcTotal, st.SvcReady, pick(st.SvcNotReady > 0, "t-bad", ""), st.SvcNotReady,
 		pick(st.SvcDegraded > 0, "t-warn", ""), st.SvcDegraded))
-	if len(d.NotReady) > 0 || len(d.Degraded) > 0 {
-		b.WriteString(`<table><thead><tr><th>服务</th><th>状态</th><th>副本</th><th>镜像</th><th>说明</th></tr></thead><tbody>`)
-		for _, sv := range d.NotReady {
-			b.WriteString(svcRow(sv, "bad", "未就绪"))
+	if len(d.NotReady) > 0 || len(d.Stale) > 0 {
+		b.WriteString(`<table><thead><tr><th>服务</th><th>集群状态</th><th>副本</th><th>镜像</th><th>说明</th></tr></thead><tbody>`)
+		for _, pr := range d.NotReady {
+			note := fmt.Sprintf("集群 %d/%d 就绪", pr.Ready, pr.Replicas)
+			if !pr.Exists {
+				note = "集群中不存在该工作负载"
+			}
+			b.WriteString(probeRow(pr, "bad", note))
 		}
-		for _, st := range d.Degraded {
-			b.WriteString(svcRow(st.Svc, "warn", st.Note))
+		for _, pr := range d.Stale {
+			// 集群是好的，只是平台记录没跟上 —— 用黄色，绝不显示成红色故障
+			b.WriteString(probeRow(pr, "warn", fmt.Sprintf("集群已就绪（%d/%d），平台记为 %s", pr.Ready, pr.Replicas, pr.platStatus())))
 		}
 		b.WriteString(`</tbody></table>`)
+	}
+	if d.ProbeFailed > 0 {
+		b.WriteString(fmt.Sprintf(`<div class="hint t-warn">另有 %d 个服务没能从集群探到状态（权限 / 网络 / 超时），未计入上表 —— 不等于正常。</div>`, d.ProbeFailed))
 	}
 
 	// ---------------- 证书
@@ -230,20 +236,26 @@ func renderFinding(f InspectFinding, cls string) string {
 	return b.String()
 }
 
-// svcRow 一个服务的一行。cls 决定状态文字的颜色（bad=红 / warn=黄）。
-func svcRow(sv model.ServiceInstance, cls, note string) string {
+// probeRow 一个服务的一行。**状态列写的是集群实测**，不是平台记录。
+func probeRow(pr svcProbe, cls, note string) string {
 	esc := html.EscapeString
 	tag := `<span class="muted">无镜像记录</span>`
-	if t := strings.TrimSpace(sv.CurrentTag); t != "" {
+	if t := strings.TrimSpace(pr.Svc.CurrentTag); t != "" {
 		tag = `<code>` + esc(t) + `</code>`
 	}
 	statusCls := "t-bad"
 	if cls == "warn" {
 		statusCls = "t-warn"
 	}
+	status := "未就绪"
+	if !pr.Exists {
+		status = "不存在"
+	} else if pr.healthy() {
+		status = "运行中"
+	}
 	return fmt.Sprintf(
 		`<tr><td><code>%s</code></td><td><span class="%s">%s</span></td><td>%d / %d</td><td>%s</td><td class="muted">%s</td></tr>`,
-		esc(sv.ProjectKey), statusCls, esc(sv.Status), sv.ReadyReplicas, sv.Replicas, tag, esc(note))
+		esc(pr.Svc.ProjectKey), statusCls, esc(status), pr.Ready, pr.Replicas, tag, esc(note))
 }
 
 func filterFindings(in []InspectFinding, level string) []InspectFinding {

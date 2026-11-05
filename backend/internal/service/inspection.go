@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/2777484478/yunnian/internal/errs"
@@ -77,6 +78,7 @@ type InspectStats struct {
 	SvcTotal   int `json:"svcTotal"`
 	SvcReady   int `json:"svcReady"`
 	SvcNotReady int `json:"svcNotReady"`
+	// SvcDegraded 平台记录与集群不一致的服务数（**不影响健康分**）。
 	SvcDegraded int `json:"svcDegraded"`
 	Nodes      int `json:"nodes"`
 	Deploys    int `json:"deploys"`
@@ -85,10 +87,32 @@ type InspectStats struct {
 	CertExpiring int `json:"certExpiring"`
 }
 
-// staleService 一个"平台记录与实际不一致"的服务。
-type staleService struct {
-	Svc  model.ServiceInstance
-	Note string
+// svcProbe 一个服务的集群实时状态。
+//
+// 巡检**只认这个**：平台库里的 status/ready_replicas 是部署时的历史值，
+// 2026-11-05 实测 aio-security-gateway 库里 pending 0/1、集群里已经 1/1 运行两天。
+// 拿历史值判健康，等于每次都在报一个早就修好的故障。
+type svcProbe struct {
+	Svc      model.ServiceInstance
+	Exists   bool
+	Replicas int
+	Actual   int
+	Ready    int
+	// Err 探不到的原因（权限 / 网络 / 超时）。有它就不是"正常"。
+	Err string
+}
+
+// healthy 集群侧是否真的就绪。探不到一律不算健康。
+func (p svcProbe) healthy() bool {
+	return p.Err == "" && p.Exists && p.Replicas > 0 && p.Ready >= p.Replicas
+}
+
+// platStatus 平台记录里的状态（仅用于展示差异，不参与判定）。
+func (p svcProbe) platStatus() string {
+	if p.Svc.Status == "" {
+		return "—"
+	}
+	return p.Svc.Status
 }
 
 // inspectData 采集到的原始数据（评分与渲染都基于它）。
@@ -96,15 +120,17 @@ type inspectData struct {
 	Env    *model.Environment
 	Window int
 
-	Svcs     []model.ServiceInstance
-	NotReady []model.ServiceInstance
-	// Degraded 平台记录与实际不一致、但实际是好的服务。
-	// 带 Note 是因为两类成因的处置完全不同：
-	//   - 库里 status=error 但副本已齐（部署失败后自行就绪）
-	//   - 库里 status=pending 0/1，集群里却 1/1 运行中（状态同步滞后）
-	Degraded []staleService
-	// 未就绪的服务里，有多少做了集群复核（读不到集群时报告要说明"未复核"）
-	NotReadyRechecked int
+	Svcs []model.ServiceInstance
+	// Probes 每个服务的**集群实时**探活结果。巡检以它为准，不看平台 status。
+	Probes []svcProbe
+	// NotReady 集群侧确实没就绪的服务
+	NotReady []svcProbe
+	// Stale 集群侧其实是好的、但平台记录不一致的服务。
+	// 它**不扣分**，只作为提示 —— 平台的 status 是部署时的历史值
+	// （只在手动「同步」时才刷新，而且同步并不覆盖 status），拿它判健康必然误报。
+	Stale []svcProbe
+	// ProbeFailed 多少个服务没能从集群探到（报告要说明"未探到"，不能当"正常"）
+	ProbeFailed int
 
 	Nodes    *integration.ClusterState
 	NodesErr string
@@ -124,6 +150,8 @@ const (
 	// 取证上限：一次最多列多少个未就绪服务。报告是给人看的，
 	// 50 个红色条目没人会读 —— 超出时明确说"还有 N 个未列出"。
 	inspectionMaxListed = 8
+	// inspectProbeConcurrency 探活并发度（见 probeServices 的说明）。
+	inspectProbeConcurrency = 6
 )
 
 // InspectEnvironment 采集 + 评分 + 渲染 + 存档。
@@ -188,67 +216,32 @@ func (s *CDService) collectInspection(ctx context.Context, env *model.Environmen
 		d.Notes = append(d.Notes, "服务清单读取失败："+err.Error())
 	}
 	d.Svcs = svcs
-	// 两类要分开：
-	//   - 副本没齐（或状态非 running 且副本没齐）→ **未就绪**，是真问题
-	//   - 状态非 running 但副本已齐 → **记录未刷新**，服务其实是好的
-	// 混成一类会让报告把"已经好了"的服务报成故障，运维白跑一趟。
-	for _, sv := range svcs {
-		readyShort := sv.ReadyReplicas < sv.Replicas
-		if sv.Status != "running" && !readyShort {
-			d.Degraded = append(d.Degraded, staleService{
-				Svc:  sv,
-				Note: fmt.Sprintf("副本已齐（%d/%d），平台状态仍是 %s", sv.ReadyReplicas, sv.Replicas, sv.Status),
-			})
-			continue
-		}
-		if readyShort || sv.Status != "running" {
-			d.NotReady = append(d.NotReady, sv)
+	// **全部以集群实时状态为准**，不用平台的 status 判健康。
+	//
+	// 为什么不看平台标记（2026-11-05 用户明确要求）：`service_instance.status`
+	// 是那次部署写下的历史值 —— 只有手动点「同步」才会刷新，而那个同步
+	// 只覆盖 replicas / ready_replicas，**从不更新 status**。
+	// 实测后果：aio-security-gateway 库里 pending 0/1，集群里 1/1 运行了两天。
+	// 拿它判健康等于每次都在报一个早就修好的故障。
+	d.Probes = s.probeServices(ctx, env, svcs)
+	for _, pr := range d.Probes {
+		switch {
+		case pr.Err != "":
+			// 探不到 ≠ 正常。单独计数，由评分说明"这份报告有盲区"。
+			d.ProbeFailed++
+		case pr.healthy():
+			// 集群里是好的。平台记录若不符，只作提示、**不扣分**。
+			if pr.Svc.Status != "running" || pr.Svc.ReadyReplicas != pr.Ready || pr.Svc.Replicas != pr.Replicas {
+				d.Stale = append(d.Stale, pr)
+			}
+		default:
+			d.NotReady = append(d.NotReady, pr)
 		}
 	}
-
-	// ⚠️ **对未就绪的服务读一次集群实时状态**。
-	//
-	// 为什么必须做：平台库里的 status / ready_replicas 由后台同步刷新，可能严重滞后。
-	// 2026-11-05 用户实测撞上：aio-security-gateway 库里 pending 0/1，集群里
-	// 1/1 运行了 2 天 —— 报告把它报成"未就绪 -15 分"，而服务是好的。
-	// 只信库会持续误报，而误报比漏报更伤信任（"这报告不准"）。
-	//
-	// 只复核"库里说没就绪"的那几个（通常 1~2 个），成本可控；
-	// 读不到集群时**保持库的结论**，但记进 notes 说明"未经集群复核"。
-	rechecked, recheckErr := 0, 0
-	kept := d.NotReady[:0]
-	for _, sv := range d.NotReady {
-		name := strings.TrimSpace(sv.WorkloadName)
-		if name == "" {
-			name = sv.ProjectKey
-		}
-		st, err := s.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, name))
-		if err != nil || st == nil || !st.Exists {
-			recheckErr++
-			kept = append(kept, sv)
-			continue
-		}
-		rechecked++
-		if st.Replicas > 0 && st.ReadyReplicas >= st.Replicas {
-			// 集群里其实是好的 → 归"记录未刷新"，不是故障
-			sv.Replicas, sv.ReadyReplicas = st.Replicas, st.ReadyReplicas
-			d.Degraded = append(d.Degraded, staleService{
-				Svc: sv,
-				Note: fmt.Sprintf("集群已就绪（%d/%d），平台记录仍是 %s —— 状态同步滞后",
-					st.ReadyReplicas, st.Replicas, sv.Status),
-			})
-			continue
-		}
-		// 集群里确实没齐：用集群的数字覆盖库里的（库可能更旧）
-		sv.Replicas, sv.ReadyReplicas = st.Replicas, st.ReadyReplicas
-		sv.Status = "集群侧 " + sv.Status
-		kept = append(kept, sv)
-	}
-	d.NotReady = kept
-	d.NotReadyRechecked = rechecked
-	if recheckErr > 0 {
-		d.Notes = append(d.Notes,
-			fmt.Sprintf("有 %d 个未就绪服务没能从集群复核（读不到工作负载状态），按平台记录判定 —— 可能包含已恢复的服务。", recheckErr))
+	if d.ProbeFailed > 0 {
+		d.Notes = append(d.Notes, fmt.Sprintf(
+			"有 %d 个服务没能从集群探到状态（权限 / 网络 / 超时），它们**未被计入健康判定** —— 不等于正常。",
+			d.ProbeFailed))
 	}
 
 	// 集群资源（实时）
@@ -282,6 +275,43 @@ func (s *CDService) collectInspection(ctx context.Context, env *model.Environmen
 	return d
 }
 
+// probeServices 并发探活每个服务的集群实时状态。
+//
+// 为什么并发：18 个服务串行 Describe 要 3~6 秒，巡检本来就慢，没必要再等。
+// 并发 6 是折中：够快（约 1 秒），又不会把集群 API 打出一片 429。
+func (s *CDService) probeServices(ctx context.Context, env *model.Environment, svcs []model.ServiceInstance) []svcProbe {
+	out := make([]svcProbe, len(svcs))
+	sem := make(chan struct{}, inspectProbeConcurrency)
+	var wg sync.WaitGroup
+	for i := range svcs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			p := svcProbe{Svc: svcs[i]}
+			name := strings.TrimSpace(svcs[i].WorkloadName)
+			if name == "" {
+				name = svcs[i].ProjectKey
+			}
+			st, err := s.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, name))
+			if err != nil {
+				p.Err = err.Error()
+				out[i] = p
+				return
+			}
+			if st != nil {
+				p.Exists = st.Exists
+				p.Replicas, p.Actual, p.Ready = st.Replicas, st.ActualReplicas, st.ReadyReplicas
+			}
+			out[i] = p
+		}(i)
+	}
+	wg.Wait()
+	return out
+}
+
 // --------------------------------------------------------------------------- 评分
 
 // scoreInspection 健康分。**扣分制、规则少、每一项都能说出理由**。
@@ -311,9 +341,12 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 			listed = listed[:inspectionMaxListed]
 		}
 		var parts []string
-		for _, sv := range listed {
-			parts = append(parts, fmt.Sprintf("%s（%s，%d/%d 就绪）",
-				sv.ProjectKey, sv.Status, sv.ReadyReplicas, sv.Replicas))
+		for _, pr := range listed {
+			if !pr.Exists {
+				parts = append(parts, pr.Svc.ProjectKey+"（集群中不存在该工作负载）")
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s（集群 %d/%d 就绪）", pr.Svc.ProjectKey, pr.Ready, pr.Replicas))
 		}
 		detail := strings.Join(parts, "；")
 		if more > 0 {
@@ -321,31 +354,47 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 		}
 		add(InspectFinding{
 			Level: "critical", Kind: "service_not_ready",
-			Title:  fmt.Sprintf("%d 个服务未就绪", n),
+			Title:  fmt.Sprintf("%d 个服务在集群里未就绪", n),
 			Detail: detail,
 			Action: "逐个确认：是镜像没构建成功、配置缺项，还是资源不足。可用 AI 助手问「为什么 X 起不来」拿到容器侧证据。",
 			Penalty: pen,
 		})
 	}
 
-	// 2. 状态异常但副本齐：这类**不是故障**，是记录没刷新，扣分要轻
-	if n := len(d.Degraded); n > 0 {
-		pen := n * 5
-		if pen > 15 {
-			pen = 15
-		}
+	// 2. 平台记录与集群不一致：**只提示、不扣分**。
+	//
+	// 用户明确要求"报告只看实际环境"。平台 status 是部署时的历史值，
+	// 它不准是平台自己的问题，不该算进服务的健康分里。
+	// 但它仍要说 —— 否则用户会以为平台上那些红色标记是准的。
+	if n := len(d.Stale); n > 0 {
 		var names []string
-		for i, st := range d.Degraded {
+		for i, pr := range d.Stale {
 			if i >= inspectionMaxListed {
 				break
 			}
-			names = append(names, st.Svc.ProjectKey+"（"+st.Note+"）")
+			names = append(names, fmt.Sprintf("%s（集群 %d/%d 就绪，平台记为 %s）",
+				pr.Svc.ProjectKey, pr.Ready, pr.Replicas, pr.platStatus()))
+		}
+		findings = append(findings, InspectFinding{
+			Level: "info", Kind: "platform_stale",
+			Title:  fmt.Sprintf("%d 个服务的平台记录与集群不一致（不影响健康分）", n),
+			Detail: strings.Join(names, "；"),
+			Action: "服务的实际状态是好的，是平台记录没跟上。" +
+				"可在环境详情点「同步」刷新副本数；status 字段目前不会自动更新，属平台已知问题。",
+		})
+	}
+
+	// 2.1 有服务探不到：这是**报告的盲区**，要扣分提醒
+	if n := d.ProbeFailed; n > 0 {
+		pen := 5
+		if pen > 10 {
+			pen = 10
 		}
 		add(InspectFinding{
-			Level: "warning", Kind: "status_stale",
-			Title:  fmt.Sprintf("%d 个服务的平台记录与实际不一致", n),
-			Detail: strings.Join(names, "；"),
-			Action: "副本已经齐了，说明服务其实是好的，只是状态没刷新。重新发布一次即可让记录对齐；长期不处理会误导后面排查的人。",
+			Level: "warning", Kind: "probe_failed",
+			Title:  fmt.Sprintf("%d 个服务的状态没能探到", n),
+			Detail: "读集群时这些服务返回错误（权限 / 网络 / 超时），它们未被计入健康判定。",
+			Action: "确认集群凭据是否覆盖该命名空间；这部分服务在这份报告里是盲区，不能当作正常。",
 			Penalty: pen,
 		})
 	}
@@ -536,10 +585,13 @@ func inspectSummary(findings []InspectFinding, score int, level string) string {
 }
 
 func inspectStats(d inspectData) InspectStats {
-	st := InspectStats{SvcTotal: len(d.Svcs), Deploys: d.DeployTotal, DeployFail: d.DeployFail}
+	st := InspectStats{SvcTotal: len(d.Probes), Deploys: d.DeployTotal, DeployFail: d.DeployFail}
 	st.SvcNotReady = len(d.NotReady)
-	st.SvcDegraded = len(d.Degraded)
-	st.SvcReady = st.SvcTotal - st.SvcNotReady - st.SvcDegraded
+	st.SvcDegraded = len(d.Stale)
+	st.SvcReady = st.SvcTotal - st.SvcNotReady - d.ProbeFailed
+	if st.SvcReady < 0 {
+		st.SvcReady = 0
+	}
 	if d.Nodes != nil {
 		st.Nodes = d.Nodes.Nodes
 	}

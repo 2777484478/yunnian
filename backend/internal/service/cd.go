@@ -4232,12 +4232,26 @@ func (s *CDService) syncServiceReplicas(ctx context.Context, env *model.Environm
 			}
 			continue
 		}
-		if state.Replicas == svcs[i].Replicas && state.ReadyReplicas == svcs[i].ReadyReplicas {
+		// ⚠️ 顺带纠正 status：它只在**部署时**写入（成功写 running、失败写 error/pending），
+		// 之后没有任何地方再更新它 —— 于是"部署失败后 Pod 自己起来了"这种情形会
+		// 永久留着一个 error/pending 的红标（2026-11-05 实测：aio-security-gateway
+		// 库里 pending，集群里已 1/1 运行两天）。
+		//
+		// 这里只做**最安全的一半**：集群确认已就绪时把 status 纠正为 running。
+		// 反过来的方向（集群没好而库存 running）不在这里改 —— 那等于把"检测到故障"
+		// 写进库，可能连带触发通知等副作用，需要单独评估。
+		updates := map[string]any{
+			"replicas": state.Replicas, "ready_replicas": state.ReadyReplicas,
+		}
+		if state.Replicas > 0 && state.ReadyReplicas >= state.Replicas && svcs[i].Status != "running" {
+			updates["status"] = "running"
+		}
+		if state.Replicas == svcs[i].Replicas && state.ReadyReplicas == svcs[i].ReadyReplicas &&
+			len(updates) == 2 {
 			continue
 		}
-		if err := s.db(ctx).Model(&model.ServiceInstance{}).Where("id = ?", svcs[i].ID).Updates(map[string]any{
-			"replicas": state.Replicas, "ready_replicas": state.ReadyReplicas,
-		}).Error; err != nil {
+		if err := s.db(ctx).Model(&model.ServiceInstance{}).Where("id = ?", svcs[i].ID).
+			Updates(updates).Error; err != nil {
 			s.log("cd").Warn("同步副本数失败", "serviceId", svcs[i].ID, "err", err)
 		}
 	}
