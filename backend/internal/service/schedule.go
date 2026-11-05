@@ -126,7 +126,7 @@ type ScheduleDTO struct {
 // ScheduleInput 新建 / 编辑入参。
 type ScheduleInput struct {
 	Name     string `json:"name" binding:"required,max=64"`
-	TaskType string `json:"taskType" binding:"required,oneof=build deploy"`
+	TaskType string `json:"taskType" binding:"required,oneof=build deploy inspect"`
 	// Targets 多目标（批量构建 / 批量部署）。
 	//
 	// 兼容旧的单目标写法：只给 ProjectKey/Branch/ImageTag 时，normalize 会把它
@@ -536,6 +536,11 @@ func (s *ScheduleService) tick(ctx context.Context) {
 // 目标之间**互相独立**：一个项目失败不影响其余继续建（这正好是运维要的 ——
 // 8 个包里有 1 个分支写错，不该连累另外 7 个）。最终按三档汇报结果。
 func (s *ScheduleService) execute(ctx context.Context, t *model.ScheduleTask, triggerNote string) error {
+	// 巡检任务没有"逐项目建单"这回事，直接生成一份报告就走单独分支。
+	if t.TaskType == "inspect" {
+		return s.executeInspect(ctx, t)
+	}
+
 	// 用 DisplayName 而不是冒充某个用户：
 	// 定时任务没有"当前登录人"，冒用创建者的身份会让审计失真。
 	// 同时 User 为 nil 意味着跳过部署的权限校验 —— 权限在**创建任务时**校验过。
@@ -595,6 +600,29 @@ func (s *ScheduleService) execute(ctx context.Context, t *model.ScheduleTask, tr
 		// 手动"立即执行"时这就是用户唯一能看到的原因。
 		return errs.Upstream(nil, "%s", summary)
 	}
+	return nil
+}
+
+// executeInspect 定时巡检：对任务指定的环境生成一份巡检报告并存档。
+//
+// 它是**同步**的（探活 + 渲染 + 存档，几秒内完成），不建任何构建/部署单，
+// 所以不需要 stillRunning 那套"上次还没跑完就跳过"的判断。
+// 报告本体走现有 inspection_report 表，与「AI 巡检报告」页是同一份逻辑、同一张表。
+func (s *ScheduleService) executeInspect(ctx context.Context, t *model.ScheduleTask) error {
+	caller := Caller{DisplayName: "定时任务：" + t.Name}
+	res, err := s.cd.InspectEnvironment(ctx, InspectInput{
+		EnvKey: t.EnvKey,
+		Hours:  inspectionDefaultHours,
+	}, caller)
+	if err != nil {
+		s.finishTask(ctx, t.ID, "failed", userMessage(err), 0, 0, nil, "")
+		return errs.Upstream(nil, "%s", userMessage(err))
+	}
+	// 成功：把报告编号与健康分写进"上次执行说明"（finishTask 的 errMsg 参数，
+	// 落库到 last_error 列）。字段名虽然叫 error，但列表页会把它展示成
+	// "上次结果"的说明 —— 让用户一眼看到健康分，不用每次都点进巡检页。
+	summary := fmt.Sprintf("已生成巡检报告 #%d（%s），健康分 %d/100", res.ReportID, res.EnvName, res.Score)
+	s.finishTask(ctx, t.ID, "success", summary, 0, 0, nil, "")
 	return nil
 }
 
@@ -889,6 +917,12 @@ func (s *ScheduleService) normalize(ctx context.Context, in ScheduleInput, c Cal
 			"例如 0 2 * * * 表示每天 02:00", err)
 	}
 
+	// 巡检任务与 build/deploy 完全不同：它是**环境级**动作，没有"项目目标"这一层，
+	// 所以提前分流，不进下面的项目归一化（那会要求至少一个 projectKey）。
+	if out.TaskType == "inspect" {
+		return s.normalizeInspect(ctx, out, c)
+	}
+
 	// 目标归一化 + 项目存在性（一次查完，别 N+1）
 	targets, projs, err := s.normalizeTargets(ctx, in)
 	if err != nil {
@@ -978,11 +1012,39 @@ func (s *ScheduleService) normalize(ctx context.Context, in ScheduleInput, c Cal
 				"你没有 %s 环境的部署权限，无法在那里配置定时部署", out.EnvKey))
 		}
 	default:
-		return out, errs.Invalid("任务类型只能是 build 或 deploy")
+		return out, errs.Invalid("任务类型只能是 build、deploy 或 inspect")
 	}
 
 	// Enabled 保持指针语义（nil = "没传"，由调用方决定默认值），
 	// 这里不强行赋默认值 —— 编辑时不传就表示"不改启停状态"。
+	return out, nil
+}
+
+// normalizeInspect 校验定时巡检任务：只认环境，不分项目。
+//
+// 巡检是环境级的（一份报告覆盖整个环境的所有服务），所以这里没有"目标归一化"，
+// 只校验：环境选了没、存不存在、当前用户有没有 env:read 权限（巡检是只读）。
+func (s *ScheduleService) normalizeInspect(ctx context.Context, in ScheduleInput, c Caller) (ScheduleInput, error) {
+	out := in
+	if out.EnvKey == "" {
+		return out, errs.Invalid("定时巡检必须选择环境")
+	}
+	var en int64
+	if err := s.db(ctx).Model(&model.Environment{}).Where("env_key = ?", out.EnvKey).Count(&en).Error; err != nil {
+		return out, errs.Internalf(err, "查询环境失败")
+	}
+	if en == 0 {
+		return out, errs.NotFoundf("环境 %s 不存在", out.EnvKey)
+	}
+	// 巡检是只读动作，env:read 即可（与「AI 巡检报告」页同一权限点）。
+	if c.User != nil && !c.User.HasAnyPerm("env:read", "*") {
+		return out, errs.Forbidden("你没有查看环境的权限（env:read），无法配置定时巡检")
+	}
+	// 清掉与巡检无关的字段，避免界面上出现"这条巡检任务挂着某个项目的分支"这种误导。
+	out.Targets = nil
+	out.ProjectKey, out.Branch, out.ImageTag, out.ImageRecordID = "", "", "", ""
+	out.ImageSource, out.Replicas = "", nil
+	out.BuildParams = nil
 	return out, nil
 }
 

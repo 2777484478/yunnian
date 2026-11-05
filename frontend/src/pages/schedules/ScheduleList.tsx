@@ -26,6 +26,7 @@ import {
   PlayCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SafetyCertificateOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
@@ -464,7 +465,10 @@ const TargetRowEditor: React.FC<TargetRowProps> = ({
 
 const ScheduleList: React.FC = () => {
   const { message } = AntApp.useApp();
-  const canWrite = hasPerm('build:trigger') || hasPerm('deploy:read');
+  // 能配置「至少一种」定时任务即可看到新增/操作入口：
+  // 构建要 build:trigger、部署要 deploy:{env}、巡检只要 env:read（只读）。
+  // 具体某次保存能否通过，由后端按任务类型校验（前端这里只控制入口显隐）。
+  const canWrite = hasPerm('build:trigger') || hasPerm('deploy:read') || hasPerm('env:read');
 
   const [taskType, setTaskType] = useState<string>('');
   const listApi = useApi((signal) => scheduleApi.list(), []);
@@ -577,12 +581,12 @@ const ScheduleList: React.FC = () => {
       message.warning('给任务起个名字：它会显示在构建/部署记录的"操作人"上');
       return;
     }
-    if (!targets.length) {
+    if (kind !== 'inspect' && !targets.length) {
       message.warning('至少选一个项目');
       return;
     }
-    if (kind === 'deploy' && !envKey) {
-      message.warning('定时部署必须选择环境');
+    if ((kind === 'deploy' || kind === 'inspect') && !envKey) {
+      message.warning(kind === 'deploy' ? '定时部署必须选择环境' : '定时巡检必须选择环境');
       return;
     }
     if (!cron.trim()) {
@@ -632,6 +636,11 @@ const ScheduleList: React.FC = () => {
     if (kind === 'deploy') {
       body.envKey = envKey;
       body.imageSource = imageSource;
+    }
+    if (kind === 'inspect') {
+      // 巡检是环境级动作，不按项目建单：targets 一律清空，只带环境。
+      body.envKey = envKey;
+      body.targets = [];
     }
 
     setSaving(true);
@@ -723,6 +732,10 @@ const ScheduleList: React.FC = () => {
           <Tag color="blue" icon={<ThunderboltOutlined />}>
             构建
           </Tag>
+        ) : v === 'inspect' ? (
+          <Tag color="cyan" icon={<SafetyCertificateOutlined />}>
+            巡检
+          </Tag>
         ) : (
           <Tag color="geekblue" icon={<CloudServerOutlined />}>
             部署
@@ -733,6 +746,17 @@ const ScheduleList: React.FC = () => {
       title: '目标',
       width: 300,
       render: (_: unknown, r: ScheduleTask) => {
+        // 巡检是**环境级**动作，没有"项目目标"这一层，单独显示环境。
+        if (r.taskType === 'inspect') {
+          return (
+            <Space size={6}>
+              <Tag style={{ marginInlineEnd: 0 }}>巡检报告</Tag>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                → {r.envKey}
+              </Text>
+            </Space>
+          );
+        }
         const list = r.targets ?? [];
         const n = list.length;
         const desc = (t: ScheduleTarget) => {
@@ -866,7 +890,7 @@ const ScheduleList: React.FC = () => {
       <PageHeader
         breadcrumb={[{ title: '定时任务' }]}
         title="定时任务"
-        description="到点自动触发构建或部署。一条任务可以对多个项目 / 服务批量执行；它只负责「建单」——排队、并发、失败通知都走现有链路，与手动点击完全一致。"
+        description="到点自动触发构建、部署或环境巡检。构建 / 部署一条任务可以对多个项目批量建单；巡检按环境生成报告并自动存档。排队、并发、失败通知都走现有链路，与手动点击完全一致。"
       />
 
       <SectionCard bodyStyle={{ padding: 0 }}>
@@ -887,6 +911,7 @@ const ScheduleList: React.FC = () => {
               { label: '全部', value: '' },
               { label: '定时构建', value: 'build' },
               { label: '定时部署', value: 'deploy' },
+              { label: '定时巡检', value: 'inspect' },
             ]}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -953,40 +978,43 @@ const ScheduleList: React.FC = () => {
               options={[
                 { label: '定时构建', value: 'build' },
                 { label: '定时部署', value: 'deploy' },
+                { label: '定时巡检', value: 'inspect' },
               ]}
             />
           </Form.Item>
 
+          {(kind === 'deploy' || kind === 'inspect') && (
+            <Form.Item label="环境" required style={{ marginBottom: 14 }}>
+              <Select
+                value={envKey || undefined}
+                onChange={setEnvKey}
+                placeholder={kind === 'inspect' ? '巡检哪个环境' : '发到哪个环境'}
+                options={envs.map((e) => ({ value: e.key, label: `${e.name}（${e.key}）` }))}
+                style={{ width: '100%' }}
+              />
+            </Form.Item>
+          )}
+
           {kind === 'deploy' ? (
-            <>
-              <Form.Item label="环境" required style={{ marginBottom: 14 }}>
-                <Select
-                  value={envKey || undefined}
-                  onChange={setEnvKey}
-                  placeholder="发到哪个环境"
-                  options={envs.map((e) => ({ value: e.key, label: `${e.name}（${e.key}）` }))}
-                  style={{ width: '100%' }}
-                />
-              </Form.Item>
-              <Form.Item label="发哪个版本" required style={{ marginBottom: 14 }}>
-                <Segmented
-                  value={imageSource}
-                  onChange={(v) => setImageSource(v as 'fixed' | 'latest')}
-                  options={[
-                    { label: '每次取最新构建', value: 'latest' },
-                    { label: '每个服务指定版本', value: 'fixed' },
-                  ]}
-                />
-                <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 12 }}>
-                  {imageSource === 'latest'
-                    ? '每次执行时取每个服务此刻最新的成功构建。选这个就不用在每次构建后回来改任务。'
-                    : '给每个服务各选一个固定版本，每次执行都发同一版。'}
-                </Text>
-              </Form.Item>
-            </>
+            <Form.Item label="发哪个版本" required style={{ marginBottom: 14 }}>
+              <Segmented
+                value={imageSource}
+                onChange={(v) => setImageSource(v as 'fixed' | 'latest')}
+                options={[
+                  { label: '每次取最新构建', value: 'latest' },
+                  { label: '每个服务指定版本', value: 'fixed' },
+                ]}
+              />
+              <Text type="secondary" style={{ display: 'block', marginTop: 6, fontSize: 12 }}>
+                {imageSource === 'latest'
+                  ? '每次执行时取每个服务此刻最新的成功构建。选这个就不用在每次构建后回来改任务。'
+                  : '给每个服务各选一个固定版本，每次执行都发同一版。'}
+              </Text>
+            </Form.Item>
           ) : null}
 
-          {/* ---- 目标（批量）---- */}
+          {/* ---- 目标（批量）：巡检是环境级动作、不分项目，不显示这一块 ---- */}
+          {kind !== 'inspect' && (
           <Form.Item
             label={`目标（${targets.length}）`}
             required
@@ -1042,6 +1070,7 @@ const ScheduleList: React.FC = () => {
               </Text>
             )}
           </Form.Item>
+          )}
 
           <Form.Item label="什么时候跑" required style={{ marginBottom: 8 }}>
             <Space size={8} wrap style={{ marginBottom: 8 }}>

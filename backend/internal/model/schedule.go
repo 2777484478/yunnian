@@ -43,9 +43,12 @@ type ScheduleTask struct {
 	ID   uint64 `gorm:"primaryKey;autoIncrement" json:"-"`
 	Name string `gorm:"size:64;not null" json:"name"`
 
-	// TaskType build / deploy。比"一个任务里既构建又部署"更好：
-	// 两者失败面完全不同（构建失败是代码问题，部署失败是集群问题），
-	// 混在一个任务里，用户看不出是哪一步卡住。
+	// TaskType build / deploy / inspect。比"一个任务里既构建又部署"更好：
+	// 三者失败面完全不同（构建失败是代码问题，部署失败是集群问题，
+	// 巡检失败是集群/证书读取问题），混在一个任务里，用户看不出是哪一步卡住。
+	//
+	// inspect = 定时 AI 巡检：到点对某个环境生成一份健康巡检报告并存档（可下载）。
+	// 它是**环境级**动作（不分项目），所以目标就是 EnvKey，Targets 为空。
 	TaskType string `gorm:"column:task_type;size:16;not null;index:idx_schedule_type" json:"taskType"`
 
 	// Targets 这条任务要处理的目标列表（项目 + 各自的分支 / 版本），JSON 数组。

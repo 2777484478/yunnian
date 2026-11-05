@@ -707,3 +707,67 @@ func TestAggregateScheduleStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeInspect 定时巡检任务的归一化：只认环境，不分项目。
+func TestNormalizeInspect(t *testing.T) {
+	db := newTestDB(t)
+	s := &ScheduleService{base: &base{deps: Deps{DB: db}}}
+	ctx := context.Background()
+	if err := db.Create(&model.Environment{EnvKey: "test-152", Name: "机房测试环境152"}).Error; err != nil {
+		t.Fatalf("造环境失败：%v", err)
+	}
+
+	full := Caller{User: &auth.CurrentUser{ID: 1, Name: "管理员", Permissions: []string{"*"}}}
+	readonly := Caller{User: &auth.CurrentUser{ID: 2, Name: "只读", Permissions: []string{"env:read"}}}
+	noPerm := Caller{User: &auth.CurrentUser{ID: 3, Name: "无权限", Permissions: []string{}}}
+
+	base := ScheduleInput{Name: "每日巡检", TaskType: "inspect", EnvKey: "test-152", Cron: "0 8 * * *"}
+
+	cases := []struct {
+		name       string
+		mutate     func(*ScheduleInput)
+		caller     Caller
+		wantErrHas string
+	}{
+		{"合法巡检任务", func(*ScheduleInput) {}, full, ""},
+		{"env:read 即可（巡检是只读）", func(*ScheduleInput) {}, readonly, ""},
+		{"缺环境", func(in *ScheduleInput) { in.EnvKey = "" }, full, "必须选择环境"},
+		{"环境不存在", func(in *ScheduleInput) { in.EnvKey = "nope" }, full, "不存在"},
+		{"无 env:read 权限", func(*ScheduleInput) {}, noPerm, "env:read"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := base
+			c.mutate(&in)
+			_, err := s.normalize(ctx, in, c.caller)
+			if c.wantErrHas == "" {
+				if err != nil {
+					t.Fatalf("不该报错：%v", userMessage(err))
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("应该报错（含 %q），却通过了", c.wantErrHas)
+			}
+			if msg := userMessage(err); !strings.Contains(msg, c.wantErrHas) {
+				t.Errorf("错误信息里没有 %q，实际：%q", c.wantErrHas, msg)
+			}
+		})
+	}
+
+	t.Run("巡检任务清掉项目字段", func(t *testing.T) {
+		in := base
+		in.ProjectKey = "demo"
+		in.Branch = "master"
+		in.ImageSource = "fixed"
+		in.ImageTag = "1.0"
+		out, err := s.normalize(ctx, in, full)
+		if err != nil {
+			t.Fatalf("不该报错：%v", err)
+		}
+		if out.ProjectKey != "" || out.Branch != "" || out.ImageSource != "" || len(out.Targets) != 0 {
+			t.Errorf("巡检任务不该保留项目/版本字段：%+v", out)
+		}
+	})
+}

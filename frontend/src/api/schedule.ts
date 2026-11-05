@@ -11,8 +11,8 @@ import { unwrapList } from './shape';
 // 想看执行过程请点任务里的「上次构建 / 上次部署」跳到对应记录页。
 // ---------------------------------------------------------------------------
 
-/** 任务类型：build = 定时构建，deploy = 定时部署。 */
-export type ScheduleTaskType = 'build' | 'deploy';
+/** 任务类型：build = 定时构建，deploy = 定时部署，inspect = 定时 AI 巡检。 */
+export type ScheduleTaskType = 'build' | 'deploy' | 'inspect';
 
 /** 定时部署发哪个版本。 */
 export type ScheduleImageSource = 'fixed' | 'latest';
