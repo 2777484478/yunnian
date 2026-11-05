@@ -203,7 +203,12 @@ func (s *ScheduleService) CreateSchedule(ctx context.Context, in ScheduleInput, 
 		return nil, err
 	}
 	uid := c.UserID()
-	first := norm.Targets[0]
+	// 巡检任务没有项目目标（Targets 为空），first 取零值即可 —— 不能直接
+	// norm.Targets[0]，空切片越界会 panic（实测创建定时巡检任务直接 500）。
+	var first model.ScheduleTarget
+	if len(norm.Targets) > 0 {
+		first = norm.Targets[0]
+	}
 	t := &model.ScheduleTask{
 		Name:     norm.Name,
 		TaskType: norm.TaskType,
@@ -252,7 +257,11 @@ func (s *ScheduleService) UpdateSchedule(ctx context.Context, id uint64, in Sche
 		return nil, err
 	}
 	uid := c.UserID()
-	first := norm.Targets[0]
+	// 巡检任务 Targets 为空，first 取零值（同 CreateSchedule）。
+	var first model.ScheduleTarget
+	if len(norm.Targets) > 0 {
+		first = norm.Targets[0]
+	}
 	updates := map[string]any{
 		"name":            norm.Name,
 		"task_type":       norm.TaskType,
