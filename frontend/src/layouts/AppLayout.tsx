@@ -118,12 +118,20 @@ const MENU: MenuGroup[] = [
         label: '发布拓扑',
         perms: ['deploy:read', 'env:read'],
       },
-      { key: '/cd/environments', icon: <ApartmentOutlined />, label: '环境管理', perms: ['env:read'] },
       { key: '/cd/deploys', icon: <DeploymentUnitOutlined />, label: '部署记录', perms: ['deploy:read'] },
       { key: '/cd/rollbacks', icon: <RollbackOutlined />, label: '回滚记录', perms: ['rollback:read'] },
-      // 巡检报告：只读巡检 + 存档。放在 CD 分组末尾 —— 它回答的是
-      // "这个环境现在健不健康"，与上面四个（拓扑/环境/部署/回滚）同一域。
-      { key: '/cd/inspections', icon: <SafetyCertificateOutlined />, label: '巡检报告', perms: ['env:read'] },
+    ],
+  },
+  {
+    // 「集群管理」独立成组（2026-11-05 用户要求）：环境 + 巡检关注的是
+    // "集群/环境这一层的现状"，与上面的发布动作（拓扑/部署/回滚）不是一回事。
+    // 巡检报告同时改名「AI 巡检报告」。
+    key: 'cluster',
+    icon: <ClusterOutlined />,
+    label: '集群管理',
+    children: [
+      { key: '/cd/environments', icon: <ApartmentOutlined />, label: '环境管理', perms: ['env:read'] },
+      { key: '/cd/inspections', icon: <SafetyCertificateOutlined />, label: 'AI 巡检报告', perms: ['env:read'] },
     ],
   },
   {
@@ -252,8 +260,13 @@ export const AppLayout: React.FC = () => {
 
   const openKeys = useMemo(() => {
     const p = location.pathname;
+    // 精确到「当前路由属于哪个分组」：旧写法按二级路径前缀（/cd）匹配，
+    // 当「环境管理 / AI 巡检报告」被移到独立的「集群管理」组后，访问它们时
+    // /cd 前缀会同时命中 CD 组，导致 CD 组被错误展开。
     return menu
-      .filter((g) => g.children.length > 1 && g.children.some((c) => p.startsWith(c.key.split('/').slice(0, 2).join('/'))))
+      .filter(
+        (g) => g.children.length > 1 && g.children.some((c) => p === c.key || p.startsWith(`${c.key}/`)),
+      )
       .map((g) => g.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, menu]);

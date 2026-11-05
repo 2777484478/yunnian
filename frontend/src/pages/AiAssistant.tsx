@@ -763,20 +763,22 @@ const AiAssistant: React.FC = () => {
                 {s}
               </span>
             ))}
-            {/* 巡检报告入口：放在推荐问题这一排的末尾。
-                它和上面那些"提问"不同 —— 点了是去存档页，不是发消息，
-                所以用不同颜色（橙）区分，避免被当成又一个问句。 */}
+            {/* 一键生成巡检报告：和上面的提问 chip 一样，点了就是发这条消息，
+                触发 AI 生成报告（保留橙色，突出它是"生成报告"而非普通问答）。 */}
             {hasPerm('env:read') ? (
-              <Tooltip title="查看已存档的巡检报告，可下载 HTML">
-                <span
-                  className="yn-ai-chip"
-                  style={{ color: '#d46b08', borderColor: '#ffd591', background: '#fff7e6' }}
-                  onClick={() => navigate('/cd/inspections')}
-                >
-                  <SafetyCertificateOutlined style={{ marginRight: 5, color: '#fa8c16' }} />
-                  查看巡检报告
-                </span>
-              </Tooltip>
+              <span
+                className="yn-ai-chip"
+                style={{
+                  color: '#d46b08',
+                  borderColor: '#ffd591',
+                  background: '#fff7e6',
+                  opacity: streaming ? 0.5 : 1,
+                }}
+                onClick={() => (streaming ? undefined : ask('帮我生成152测试环境的巡检报告'))}
+              >
+                <SafetyCertificateOutlined style={{ marginRight: 5, color: '#fa8c16' }} />
+                帮我生成152测试环境的巡检报告
+              </span>
             ) : null}
           </div>
           {/* 这里刻意**不用** Space.Compact：它的子元素是等高拉伸的，
