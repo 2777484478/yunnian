@@ -140,7 +140,7 @@ func renderInspectionHTML(
 		`<div class="hint">共 <b>%d</b> 个服务：就绪 <b>%d</b>，未就绪 <b class="%s">%d</b>，状态未刷新 <b class="%s">%d</b>。</div>`,
 		st.SvcTotal, st.SvcReady, pick(st.SvcNotReady > 0, "t-bad", ""), st.SvcNotReady,
 		pick(st.SvcDegraded > 0, "t-warn", ""), st.SvcDegraded))
-	if len(d.NotReady) > 0 || len(d.Stale) > 0 {
+	if len(d.NotReady) > 0 || len(d.Stale) > 0 || len(d.Idle) > 0 {
 		b.WriteString(`<table><thead><tr><th>服务</th><th>集群状态</th><th>副本</th><th>镜像</th><th>说明</th></tr></thead><tbody>`)
 		for _, pr := range d.NotReady {
 			note := fmt.Sprintf("集群 %d/%d 就绪", pr.Ready, pr.Replicas)
@@ -152,6 +152,11 @@ func renderInspectionHTML(
 		for _, pr := range d.Stale {
 			// 集群是好的，只是平台记录没跟上 —— 用黄色，绝不显示成红色故障
 			b.WriteString(probeRow(pr, "warn", fmt.Sprintf("集群已就绪（%d/%d），平台记为 %s", pr.Ready, pr.Replicas, pr.platStatus())))
+		}
+		for _, pr := range d.Idle {
+			// 期望 0 副本：灰色，不是告警。写清"未运行"而不是"未就绪"，
+			// 因为前者可能是有意的，后者一定是问题。
+			b.WriteString(probeRow(pr, "muted", "副本数为 0，当前未运行（若本应在跑，请调回 1 副本以上）"))
 		}
 		b.WriteString(`</tbody></table>`)
 	}
@@ -244,13 +249,20 @@ func probeRow(pr svcProbe, cls, note string) string {
 		tag = `<code>` + esc(t) + `</code>`
 	}
 	statusCls := "t-bad"
-	if cls == "warn" {
+	switch cls {
+	case "warn":
 		statusCls = "t-warn"
+	case "muted":
+		statusCls = "muted"
 	}
 	status := "未就绪"
-	if !pr.Exists {
+	switch {
+	case !pr.Exists:
 		status = "不存在"
-	} else if pr.healthy() {
+	case pr.Replicas == 0:
+		// 期望 0 副本：不是"未就绪"，也不是"运行中"
+		status = "未运行"
+	case pr.healthy():
 		status = "运行中"
 	}
 	return fmt.Sprintf(
@@ -393,4 +405,3 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;colo
 @media (max-width:640px){.kpis{grid-template-columns:repeat(2,1fr)}.hero{flex-direction:column;align-items:flex-start}}
 `
 }
-

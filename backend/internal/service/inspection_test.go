@@ -129,6 +129,40 @@ func TestScoreInspection_ProbeFailedIsPenalized(t *testing.T) {
 	}
 }
 
+// TestScoreInspection_ScaledToZeroIsNotFailure 副本数为 0 **不是故障**。
+//
+// 2026-11-05 实测：escdatastorageservice 的 Deployment 存在但 spec.replicas=0
+// （有意停用），被判成"未就绪 -15"，把 77 分的环境压到 62 —— 用户最反感的就是这种误报。
+// 0/0 的语义是"当前没有实例"，不是"起不来"。
+func TestScoreInspection_ScaledToZeroIsNotFailure(t *testing.T) {
+	d := baseInspectData()
+	d.Idle = []svcProbe{{
+		Svc:      model.ServiceInstance{ProjectKey: "escdatastorageservice", Status: "running", Replicas: 1, ReadyReplicas: 1},
+		Exists:   true,
+		Replicas: 0, Actual: 0, Ready: 0,
+	}}
+	score, _, findings := scoreInspection(d)
+	if score != 100 {
+		t.Errorf("副本 0 不该扣分，应仍 100，实际 %d", score)
+	}
+	found := false
+	for _, f := range findings {
+		if f.Kind == "scaled_to_zero" {
+			found = true
+			if f.Penalty != 0 || f.Level != "info" {
+				t.Errorf("应为 info 且不扣分，实际 level=%s penalty=%d", f.Level, f.Penalty)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("仍要说出来（否则 KPI 显示 17/18 但找不到缺的是谁）")
+	}
+	// svcReady 不能把它算成就绪
+	if st := inspectStats(d); st.SvcIdle != 1 || st.SvcReady != 0 {
+		t.Errorf("统计不对：idle=%d ready=%d（应为 1 / 0）", st.SvcIdle, st.SvcReady)
+	}
+}
+
 // TestScoreInspection_NodeMemoryUsesPercent 节点内存必须按百分比判读。
 //
 // 这条是防回归的关键：NodeStat.MemUsage 是**字节**，直接拿去和 75 比

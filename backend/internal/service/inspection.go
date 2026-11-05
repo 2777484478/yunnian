@@ -65,8 +65,8 @@ type InspectResult struct {
 	// Stats 概要计数，供前端/AI 直接用，不必自己数
 	Stats InspectStats `json:"stats"`
 	// HTML 彩色报告正文（自包含）
-	HTML    string `json:"html,omitempty"`
-	Size    int64  `json:"size"`
+	HTML    string    `json:"html,omitempty"`
+	Size    int64     `json:"size"`
 	Created time.Time `json:"createdAt"`
 	// Notes 采集过程中的"没读到"说明（集群不可达等）。有它就说明这份报告
 	// **不是全量巡检**，不能当作"环境很干净"。
@@ -75,15 +75,17 @@ type InspectResult struct {
 
 // InspectStats 报告里要显示的计数。
 type InspectStats struct {
-	SvcTotal   int `json:"svcTotal"`
-	SvcReady   int `json:"svcReady"`
+	SvcTotal    int `json:"svcTotal"`
+	SvcReady    int `json:"svcReady"`
 	SvcNotReady int `json:"svcNotReady"`
 	// SvcDegraded 平台记录与集群不一致的服务数（**不影响健康分**）。
 	SvcDegraded int `json:"svcDegraded"`
-	Nodes      int `json:"nodes"`
-	Deploys    int `json:"deploys"`
-	DeployFail int `json:"deployFail"`
-	Certs      int `json:"certs"`
+	// SvcIdle 期望副本为 0、当前未运行的服务数（**不影响健康分**）。
+	SvcIdle      int `json:"svcIdle"`
+	Nodes        int `json:"nodes"`
+	Deploys      int `json:"deploys"`
+	DeployFail   int `json:"deployFail"`
+	Certs        int `json:"certs"`
 	CertExpiring int `json:"certExpiring"`
 }
 
@@ -129,6 +131,15 @@ type inspectData struct {
 	// 它**不扣分**，只作为提示 —— 平台的 status 是部署时的历史值
 	// （只在手动「同步」时才刷新，而且同步并不覆盖 status），拿它判健康必然误报。
 	Stale []svcProbe
+	// Idle 副本数被设为 0 的服务（Deployment 存在但 spec.replicas=0）。
+	//
+	// 它**不是故障**：0/0 既不是"起不来"也不是"崩了"，而是"当前没有实例"——
+	// 通常是有意停用（省资源、临时下线）。2026-11-05 实测 escdatastorageservice
+	// 就是这种，被判成"未就绪 -15"，白白把 77 分的环境压到 62。
+	//
+	// 但也不能当没看见：一个服务没在跑，用户看 KPI 时会以为 18 个都在服务。
+	// 所以单独一档、不扣分、报告里明确写"副本数为 0（未运行）"。
+	Idle []svcProbe
 	// ProbeFailed 多少个服务没能从集群探到（报告要说明"未探到"，不能当"正常"）
 	ProbeFailed int
 
@@ -234,6 +245,10 @@ func (s *CDService) collectInspection(ctx context.Context, env *model.Environmen
 			if pr.Svc.Status != "running" || pr.Svc.ReadyReplicas != pr.Ready || pr.Svc.Replicas != pr.Replicas {
 				d.Stale = append(d.Stale, pr)
 			}
+		case pr.Exists && pr.Replicas == 0:
+			// **期望就是 0 副本**：已缩容/停用，不是"未就绪"。
+			// 放在 healthy() 之后判，是因为 Replicas==0 时 healthy() 本来就 false。
+			d.Idle = append(d.Idle, pr)
 		default:
 			d.NotReady = append(d.NotReady, pr)
 		}
@@ -365,9 +380,9 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 		}
 		add(InspectFinding{
 			Level: "critical", Kind: "service_not_ready",
-			Title:  fmt.Sprintf("%d 个服务在集群里未就绪", n),
-			Detail: detail,
-			Action: "逐个确认：是镜像没构建成功、配置缺项，还是资源不足。可用 AI 助手问「为什么 X 起不来」拿到容器侧证据。",
+			Title:   fmt.Sprintf("%d 个服务在集群里未就绪", n),
+			Detail:  detail,
+			Action:  "逐个确认：是镜像没构建成功、配置缺项，还是资源不足。可用 AI 助手问「为什么 X 起不来」拿到容器侧证据。",
 			Penalty: pen,
 		})
 	}
@@ -395,6 +410,24 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 		})
 	}
 
+	// 2.05 副本数为 0 的服务：不扣分，但要说出来。
+	if n := len(d.Idle); n > 0 {
+		var names []string
+		for i, pr := range d.Idle {
+			if i >= inspectionMaxListed {
+				break
+			}
+			names = append(names, pr.Svc.ProjectKey)
+		}
+		findings = append(findings, InspectFinding{
+			Level: "info", Kind: "scaled_to_zero",
+			Title:  fmt.Sprintf("%d 个服务的副本数为 0（当前未运行）", n),
+			Detail: strings.Join(names, "、"),
+			Action: "这些服务在集群里期望副本就是 0，通常是有意停用，所以**不计入异常、不扣分**。" +
+				"如果其中某个本应在跑，去环境详情把副本数调回 1 以上。",
+		})
+	}
+
 	// 2.1 有服务探不到：这是**报告的盲区**，要扣分提醒
 	if n := d.ProbeFailed; n > 0 {
 		pen := 5
@@ -403,9 +436,9 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 		}
 		add(InspectFinding{
 			Level: "warning", Kind: "probe_failed",
-			Title:  fmt.Sprintf("%d 个服务的状态没能探到", n),
-			Detail: "读集群时这些服务返回错误（权限 / 网络 / 超时），它们未被计入健康判定。",
-			Action: "确认集群凭据是否覆盖该命名空间；这部分服务在这份报告里是盲区，不能当作正常。",
+			Title:   fmt.Sprintf("%d 个服务的状态没能探到", n),
+			Detail:  "读集群时这些服务返回错误（权限 / 网络 / 超时），它们未被计入健康判定。",
+			Action:  "确认集群凭据是否覆盖该命名空间；这部分服务在这份报告里是盲区，不能当作正常。",
 			Penalty: pen,
 		})
 	}
@@ -447,10 +480,10 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 			}
 			add(InspectFinding{
 				Level: level, Kind: "node_memory",
-				Title:  fmt.Sprintf("节点内存使用 %.0f%%", worstMem),
+				Title: fmt.Sprintf("节点内存使用 %.0f%%", worstMem),
 				Detail: fmt.Sprintf("节点 %s 已用 %.1f%%（超过 75%% 即视为有压力）；%d 个节点中最高值。",
 					worstMemNode, worstMem, len(d.Nodes.NodeList)),
-				Action: "先看谁在吃内存：kubectl top pods -n " + d.Env.Namespace + " --sort-by=memory。持续高于 90% 会开始 OOMKill 或调度失败。",
+				Action:  "先看谁在吃内存：kubectl top pods -n " + d.Env.Namespace + " --sort-by=memory。持续高于 90% 会开始 OOMKill 或调度失败。",
 				Penalty: pen,
 			})
 		}
@@ -462,9 +495,9 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 			}
 			add(InspectFinding{
 				Level: level, Kind: "node_cpu",
-				Title:  fmt.Sprintf("节点 CPU 使用 %.0f%%", worstCPU),
-				Detail: fmt.Sprintf("节点 %s 已用 %.1f%%。", worstCPUNode, worstCPU),
-				Action: "确认是否有异常进程或突发流量；CPU 打满会让就绪探针超时，进而触发反复重启。",
+				Title:   fmt.Sprintf("节点 CPU 使用 %.0f%%", worstCPU),
+				Detail:  fmt.Sprintf("节点 %s 已用 %.1f%%。", worstCPUNode, worstCPU),
+				Action:  "确认是否有异常进程或突发流量；CPU 打满会让就绪探针超时，进而触发反复重启。",
 				Penalty: pen,
 			})
 		}
@@ -485,25 +518,25 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 		case worst.DaysLeft < 0:
 			add(InspectFinding{
 				Level: "critical", Kind: "cert_expired",
-				Title:  fmt.Sprintf("证书已过期 %d 天", -worst.DaysLeft),
-				Detail: certDetail(worst),
-				Action: "立刻续期并更新 Secret；已过期的 HTTPS 入口在浏览器侧会直接报错。",
+				Title:   fmt.Sprintf("证书已过期 %d 天", -worst.DaysLeft),
+				Detail:  certDetail(worst),
+				Action:  "立刻续期并更新 Secret；已过期的 HTTPS 入口在浏览器侧会直接报错。",
 				Penalty: 30,
 			})
 		case worst.DaysLeft <= 7:
 			add(InspectFinding{
 				Level: "critical", Kind: "cert_expiring",
-				Title:  fmt.Sprintf("证书 %d 天后到期", worst.DaysLeft),
-				Detail: certDetail(worst),
-				Action: "一周内必须续期，否则 HTTPS 会中断。续期后更新对应 Secret 即可，无需改 Ingress。",
+				Title:   fmt.Sprintf("证书 %d 天后到期", worst.DaysLeft),
+				Detail:  certDetail(worst),
+				Action:  "一周内必须续期，否则 HTTPS 会中断。续期后更新对应 Secret 即可，无需改 Ingress。",
 				Penalty: 15,
 			})
 		case worst.DaysLeft <= 30:
 			add(InspectFinding{
 				Level: "warning", Kind: "cert_expiring",
-				Title:  fmt.Sprintf("证书 %d 天后到期", worst.DaysLeft),
-				Detail: certDetail(worst),
-				Action: "安排在本月内续期；如果用的是 cert-manager，确认自动续期没被关掉。",
+				Title:   fmt.Sprintf("证书 %d 天后到期", worst.DaysLeft),
+				Detail:  certDetail(worst),
+				Action:  "安排在本月内续期；如果用的是 cert-manager，确认自动续期没被关掉。",
 				Penalty: 8,
 			})
 		}
@@ -527,9 +560,9 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 		if failRate > 0.3 {
 			add(InspectFinding{
 				Level: "warning", Kind: "deploy_fail_rate",
-				Title:  fmt.Sprintf("近 %d 天部署失败率 %.0f%%", d.Window/24, failRate*100),
-				Detail: fmt.Sprintf("%d 次部署里 %d 次未成功。", d.DeployTotal, d.DeployFail),
-				Action: "去部署记录看失败单的共同原因；如果集中在同一个服务，多半是配置或镜像的问题。",
+				Title:   fmt.Sprintf("近 %d 天部署失败率 %.0f%%", d.Window/24, failRate*100),
+				Detail:  fmt.Sprintf("%d 次部署里 %d 次未成功。", d.DeployTotal, d.DeployFail),
+				Action:  "去部署记录看失败单的共同原因；如果集中在同一个服务，多半是配置或镜像的问题。",
 				Penalty: 10,
 			})
 		}
@@ -607,7 +640,9 @@ func inspectStats(d inspectData) InspectStats {
 	st := InspectStats{SvcTotal: len(d.Probes), Deploys: d.DeployTotal, DeployFail: d.DeployFail}
 	st.SvcNotReady = len(d.NotReady)
 	st.SvcDegraded = len(d.Stale)
-	st.SvcReady = st.SvcTotal - st.SvcNotReady - d.ProbeFailed
+	st.SvcIdle = len(d.Idle)
+	// 探不到的不算"就绪"（那是盲区）；副本 0 的也不算（它确实没在服务）。
+	st.SvcReady = st.SvcTotal - st.SvcNotReady - d.ProbeFailed - st.SvcIdle
 	if st.SvcReady < 0 {
 		st.SvcReady = 0
 	}
@@ -700,4 +735,3 @@ func trimRunes(s string, n int) string {
 	}
 	return string(r[:n]) + "…"
 }
-

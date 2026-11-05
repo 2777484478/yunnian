@@ -14,7 +14,10 @@ export interface InspectionStats {
   svcTotal: number;
   svcReady: number;
   svcNotReady: number;
+  /** 平台记录与集群不一致的服务数（不影响健康分） */
   svcDegraded: number;
+  /** 期望副本为 0、当前未运行的服务数（不影响健康分） */
+  svcIdle: number;
   nodes: number;
   deploys: number;
   deployFail: number;
