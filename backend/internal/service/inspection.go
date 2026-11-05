@@ -205,7 +205,8 @@ func (s *CDService) collectInspection(ctx context.Context, env *model.Environmen
 	certs, cerr := s.deps.Up.Cluster.IngressTLS(ctx, ref)
 	if cerr != nil {
 		d.CertsErr = cerr.Error()
-		d.Notes = append(d.Notes, "TLS 证书没读到（该环境可能未接入集群，或凭据无权读 Ingress / Secret）—— 证书一栏为空不代表没有快要过期的证书。")
+		// 带上原始错误：只说"没读到"会让人无从下手（是没权限？还是集群连不上？）。
+		d.Notes = append(d.Notes, "TLS 证书没读到："+cerr.Error()+"（证书一栏为空不代表没有快要过期的证书）")
 	} else {
 		d.Certs = certs
 	}

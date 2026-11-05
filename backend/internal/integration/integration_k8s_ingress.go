@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -46,8 +47,11 @@ type TLSCertInfo struct {
 //   - Ingress 配了 tls 但 Secret 不存在 → 该项带 Err，不是空列表
 //   - 根本没有权限读 Ingress/Secret → 返回 error（调用方应把整节标成"读取失败"）
 func (k *K8sCluster) IngressTLS(ctx context.Context, ref WorkloadRef) ([]TLSCertInfo, error) {
-	if err := ref.validate(); err != nil {
-		return nil, err
+	// ⚠️ 只校验命名空间，**不校验工作负载名**：证书是按命名空间读的，
+	// 与具体工作负载无关。用 ref.validate() 会把"扫整个环境的证书"
+	// 误判成"工作负载名为空"而直接失败（实测踩过：证书一节永远显示读不到）。
+	if strings.TrimSpace(ref.Namespace) == "" {
+		return nil, errors.New("命名空间为空，无法读取 Ingress 证书")
 	}
 	cs, _, err := k.clientset(ctx, ref.ClusterRef)
 	if err != nil {

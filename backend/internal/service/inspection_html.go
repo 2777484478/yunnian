@@ -59,7 +59,13 @@ func renderInspectionHTML(
 	b.WriteString(`<div class="kpis">`)
 	b.WriteString(kpi(fmt.Sprintf("%d", st.SvcTotal), "服务总数", ""))
 	b.WriteString(kpi(fmt.Sprintf("%d", st.SvcNotReady), "未就绪", pick(st.SvcNotReady > 0, "bad", "")))
-	b.WriteString(kpi(fmt.Sprintf("%d", st.Certs), "TLS 证书", pick(st.CertExpiring > 0, "warn", "")))
+	// 读不到证书时**不能显示 0**：那会被读成"这个环境没有证书"，
+	// 与"有但没读到"是两件事。用 — 明确表示未知。
+	certKPI := fmt.Sprintf("%d", st.Certs)
+	if d.CertsErr != "" {
+		certKPI = "—"
+	}
+	b.WriteString(kpi(certKPI, "TLS 证书", pick(st.CertExpiring > 0, "warn", "")))
 	b.WriteString(kpi(fmt.Sprintf("%d", st.Deploys), fmt.Sprintf("近 %d 天部署", d.Window/24), ""))
 	b.WriteString(`</div>`)
 
