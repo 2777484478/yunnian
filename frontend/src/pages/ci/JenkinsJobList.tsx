@@ -32,7 +32,7 @@ const { Text } = Typography;
 // Jenkins Job 列表页
 //
 // 这个页面是「复用现有 Jenkins」这条路的入口：不去把 Jenkins 的 job 重新建模成
-// 平台项目，而是把 Jenkins 上已有的 job 拉过来看、点着跑。
+// 平台项目，而是把 Jenkins 上已有的 job 拉过来看。
 //
 // 它是**独立菜单项**而不是项目管理里的一个抽屉。原因很实际：真实的 Jenkins
 // （实测那台）有 **531 个 job**，那是一个需要搜索、筛选、翻页的正式列表，
@@ -51,7 +51,9 @@ const { Text } = Typography;
 //      日志与历史，后端也只受理**已绑定平台项目**的 Job（未绑定回 40901）。
 //      在这里放一个"点一下就构建"的按钮，等于对 531 个未绑定的 job 做了个
 //      点得动、发不出的承诺，还容易让人以为绕过项目也能构建。
-//      所以本页只做浏览、筛选、以及跳到 Jenkins 页面自己构建。
+//      所以本页只做浏览与筛选。**连 Job 名都不做成外链**（2026-11-05 用户要求）：
+//      这一页是"看绑定关系"的地方，点一下就被带到 Jenkins 会打断这件事；
+//      真要打开 Jenkins 走浏览器书签，不在名字上挂跳转。
 //
 //   3. **绑定关系在本页只读展示**。Job 与项目的绑定在项目编辑里维护，
 //      Jenkins 本身并不知道平台的存在，所以这里只是把平台侧的标注显示出来。
@@ -159,11 +161,11 @@ const JenkinsJobList: React.FC = () => {
               <ThunderboltOutlined style={{ color: '#1677ff' }} />
             )}
             <Text strong className="yn-mono" style={{ fontSize: 13 }}>
-              {/* Job 名就是去 Jenkins 的链接：这一页没有写动作，
-                  唯一的"动手"就是跳到 Jenkins 页面上自己构建 */}
-              <a href={r.url} target="_blank" rel="noreferrer" title="在 Jenkins 中打开">
-                {r.name}
-              </a>
+              {/* Job 名**只做展示**，不是外链（2026-11-05 用户要求：不需要点名字跳去 Jenkins）。
+                  以前这里包着 <a href={r.url} target="_blank">，用户反馈"点一下就被带走"，
+                  而这个列表是用来认"哪个 Job 绑了哪个项目"的，名字只是标识。
+                  真要打开 Jenkins，走浏览器书签 —— 平台不在名字上承担跳转。 */}
+              {r.name}
             </Text>
             {r.parameterized ? (
               <Tooltip
