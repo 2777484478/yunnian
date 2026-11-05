@@ -77,9 +77,10 @@ func TestScoreInspection_NotReadyService(t *testing.T) {
 // TestScoreInspection_StatusStale 副本齐但状态非 running：扣分要轻（不是故障）。
 func TestScoreInspection_StatusStale(t *testing.T) {
 	d := baseInspectData()
-	d.Degraded = []model.ServiceInstance{
-		{ProjectKey: "aiobasic", Status: "error", Replicas: 1, ReadyReplicas: 1},
-	}
+	d.Degraded = []staleService{{
+		Svc:  model.ServiceInstance{ProjectKey: "aiobasic", Status: "error", Replicas: 1, ReadyReplicas: 1},
+		Note: "副本已齐（1/1），平台状态仍是 error",
+	}}
 	score, _, findings := scoreInspection(d)
 	if score != 95 {
 		t.Errorf("记录未刷新应扣 5 → 95，实际 %d", score)

@@ -147,8 +147,8 @@ func renderInspectionHTML(
 		for _, sv := range d.NotReady {
 			b.WriteString(svcRow(sv, "bad", "未就绪"))
 		}
-		for _, sv := range d.Degraded {
-			b.WriteString(svcRow(sv, "warn", "副本已齐，状态未刷新"))
+		for _, st := range d.Degraded {
+			b.WriteString(svcRow(st.Svc, "warn", st.Note))
 		}
 		b.WriteString(`</tbody></table>`)
 	}

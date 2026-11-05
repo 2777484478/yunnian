@@ -1,4 +1,5 @@
 import { http } from './client';
+import { tokenStore } from './client';
 
 export interface InspectionFinding {
   level: 'critical' | 'warning' | 'info';
@@ -75,3 +76,24 @@ export const inspectionApi = {
   /** 下载走浏览器原生：后端带 Content-Disposition，这里只要把 token 拼进直链 */
   downloadUrl: (id: string) => `/api/v1/inspection-reports/${id}/download`,
 };
+
+/** 带 token 拉报告 HTML 并触发浏览器下载（下载接口需要 Authorization） */
+export async function downloadInspectionFile(id: string, fallbackName: string): Promise<void> {
+  const token = tokenStore.get();
+  const res = await fetch(`/api/v1/inspection-reports/${id}/download`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const blob = await res.blob();
+  let name = fallbackName;
+  const cd = res.headers.get('Content-Disposition') ?? '';
+  const m = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  if (m) name = decodeURIComponent(m[1]);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}

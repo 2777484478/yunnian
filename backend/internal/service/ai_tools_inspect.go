@@ -21,7 +21,9 @@ func (a *AIService) toolInspectEnvironment() aiTool {
 			"集群资源水位、服务就绪情况、TLS 证书到期时间、近期部署失败率，并给出 0-100 健康分与逐项结论。" +
 			"用户说「帮我巡检一下 X 环境」「生成 X 的体检报告」「X 环境最近健康吗」时用它。" +
 			"⚠️ 它一次就能拿到全部体检信息，**不要**再用 list_env_services / get_cluster_resources 逐个凑。" +
-			"返回里 reportId 是存档编号，用户可在「巡检报告」页查看彩色报告并下载。" +
+			"返回里 reportId 是存档编号。" +
+			"⚠️ **不要在正文里拼下载链接或让用户手动访问某个路径** —— 前端会在工具卡片上" +
+			"自动给出「查看报告」「下载 HTML」按钮，你只需说明报告编号、健康分与关键发现。" +
 			"healthScore 的扣分依据都列在 findings 里（每条带 penalty），引用分数时请一并说明是哪些项扣的。",
 		Parameters: schema(map[string]any{
 			"envKey": map[string]any{"type": "string", "description": "环境的 env_key，先用 list_environments 确认"},

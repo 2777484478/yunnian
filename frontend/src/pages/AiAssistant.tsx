@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, App as AntApp, Button, Input, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Input, Modal, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
   ClearOutlined,
   DeleteOutlined,
+  DownloadOutlined,
+  EyeOutlined,
   LoadingOutlined,
   PlusOutlined,
   RobotOutlined,
@@ -17,7 +19,8 @@ import {
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/ui';
-import { aiApi, environmentApi, modelApi } from '@/api';
+import { aiApi, environmentApi, modelApi, inspectionApi } from '@/api';
+import { downloadInspectionFile } from '@/api/inspection';
 import type { ChatAttachment, Conversation, StoredMessage, ToolStep } from '@/api';
 import { hasPerm } from '@/auth';
 import { useApi } from '@/hooks/useApi';
@@ -162,6 +165,8 @@ const AiAssistant: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
+  /** 巡检报告的在线预览（iframe srcDoc 渲染，样式隔离） */
+  const [reportView, setReportView] = useState<{ title: string; html: string } | null>(null);
   const [conversationId, setConversationId] = useState<string | undefined>();
   /** 左栏会话列表（只含当前账号自己的，后端按登录用户过滤）。 */
   const [convs, setConvs] = useState<Conversation[]>([]);
@@ -381,8 +386,38 @@ const AiAssistant: React.FC = () => {
     if (!streaming) ask(input);
   };
 
+  /** 从工具结果里取巡检报告编号（不是巡检工具 / 失败 / 无编号时返回空串）。 */
+  const reportIdOf = (t: ToolStep): string => {
+    if (t.name !== 'inspect_environment' || t.error) return '';
+    try {
+      const r = JSON.parse(t.result) as { reportId?: number };
+      return r.reportId ? String(r.reportId) : '';
+    } catch {
+      return '';
+    }
+  };
+
+  const openReport = async (id: string) => {
+    try {
+      const d = await inspectionApi.detail(id);
+      setReportView({ title: `${d.envName} · ${d.createdAt}`, html: d.html });
+    } catch {
+      message.error('读取报告失败');
+    }
+  };
+
+  const saveReport = async (id: string) => {
+    try {
+      await downloadInspectionFile(id, `inspection-${id}.html`);
+    } catch {
+      message.error('下载失败，请检查网络');
+    }
+  };
+
   /** 渲染一次工具调用。 */
-  const renderTool = (t: ToolStep, key: number) => (
+  const renderTool = (t: ToolStep, key: number) => {
+    const rid = reportIdOf(t);
+    return (
     <div className="yn-ai-tool" key={key}>
       <div className="yn-ai-tool__head">
         <span className="yn-ai-tool__dot" />
@@ -391,6 +426,19 @@ const AiAssistant: React.FC = () => {
           {t.name}
         </span>
         {t.error ? <span style={{ color: '#ff4d4f', fontSize: 11 }}>失败</span> : null}
+        {/* 巡检报告：模型只会在正文里说"报告 #N"，真正能点的入口放在这里 ——
+            正文是纯文本不渲染 markdown，而且下载接口要 Bearer 令牌，
+            直接给 URL 点了也只会 401。 */}
+        {rid ? (
+          <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 4 }}>
+            <Button size="small" type="link" icon={<EyeOutlined />} onClick={() => void openReport(rid)}>
+              查看报告
+            </Button>
+            <Button size="small" type="link" icon={<DownloadOutlined />} onClick={() => void saveReport(rid)}>
+              下载 HTML
+            </Button>
+          </span>
+        ) : null}
       </div>
       <div className="yn-ai-tool__body">
         <div style={{ color: '#9aa0aa' }}>入参</div>
@@ -399,7 +447,8 @@ const AiAssistant: React.FC = () => {
         <pre className="yn-mono">{prettyJson(t.error ? JSON.stringify({ error: t.error }) : t.result)}</pre>
       </div>
     </div>
-  );
+    );
+  };
 
   const renderAttachment = (att: ChatAttachment, key: number) => {
     const data = att.data as any;
@@ -800,6 +849,23 @@ const AiAssistant: React.FC = () => {
 
         </div>
       </div>
+
+      {/* 巡检报告预览：iframe + srcDoc 隔离样式（报告 CSS 是全局选择器） */}
+      <Modal
+        open={!!reportView}
+        title={`巡检报告 · ${reportView?.title ?? ''}`}
+        width={920}
+        footer={<Button onClick={() => setReportView(null)}>关闭</Button>}
+        onCancel={() => setReportView(null)}
+        styles={{ body: { padding: 0 } }}
+      >
+        <iframe
+          title="inspection-report"
+          srcDoc={reportView?.html ?? ''}
+          style={{ width: '100%', height: '68vh', border: 'none', borderRadius: 8, background: '#f4f6f9' }}
+          sandbox="allow-same-origin"
+        />
+      </Modal>
     </div>
   );
 };

@@ -85,6 +85,12 @@ type InspectStats struct {
 	CertExpiring int `json:"certExpiring"`
 }
 
+// staleService 一个"平台记录与实际不一致"的服务。
+type staleService struct {
+	Svc  model.ServiceInstance
+	Note string
+}
+
 // inspectData 采集到的原始数据（评分与渲染都基于它）。
 type inspectData struct {
 	Env    *model.Environment
@@ -92,7 +98,13 @@ type inspectData struct {
 
 	Svcs     []model.ServiceInstance
 	NotReady []model.ServiceInstance
-	Degraded []model.ServiceInstance
+	// Degraded 平台记录与实际不一致、但实际是好的服务。
+	// 带 Note 是因为两类成因的处置完全不同：
+	//   - 库里 status=error 但副本已齐（部署失败后自行就绪）
+	//   - 库里 status=pending 0/1，集群里却 1/1 运行中（状态同步滞后）
+	Degraded []staleService
+	// 未就绪的服务里，有多少做了集群复核（读不到集群时报告要说明"未复核"）
+	NotReadyRechecked int
 
 	Nodes    *integration.ClusterState
 	NodesErr string
@@ -183,12 +195,60 @@ func (s *CDService) collectInspection(ctx context.Context, env *model.Environmen
 	for _, sv := range svcs {
 		readyShort := sv.ReadyReplicas < sv.Replicas
 		if sv.Status != "running" && !readyShort {
-			d.Degraded = append(d.Degraded, sv)
+			d.Degraded = append(d.Degraded, staleService{
+				Svc:  sv,
+				Note: fmt.Sprintf("副本已齐（%d/%d），平台状态仍是 %s", sv.ReadyReplicas, sv.Replicas, sv.Status),
+			})
 			continue
 		}
 		if readyShort || sv.Status != "running" {
 			d.NotReady = append(d.NotReady, sv)
 		}
+	}
+
+	// ⚠️ **对未就绪的服务读一次集群实时状态**。
+	//
+	// 为什么必须做：平台库里的 status / ready_replicas 由后台同步刷新，可能严重滞后。
+	// 2026-11-05 用户实测撞上：aio-security-gateway 库里 pending 0/1，集群里
+	// 1/1 运行了 2 天 —— 报告把它报成"未就绪 -15 分"，而服务是好的。
+	// 只信库会持续误报，而误报比漏报更伤信任（"这报告不准"）。
+	//
+	// 只复核"库里说没就绪"的那几个（通常 1~2 个），成本可控；
+	// 读不到集群时**保持库的结论**，但记进 notes 说明"未经集群复核"。
+	rechecked, recheckErr := 0, 0
+	kept := d.NotReady[:0]
+	for _, sv := range d.NotReady {
+		name := strings.TrimSpace(sv.WorkloadName)
+		if name == "" {
+			name = sv.ProjectKey
+		}
+		st, err := s.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, name))
+		if err != nil || st == nil || !st.Exists {
+			recheckErr++
+			kept = append(kept, sv)
+			continue
+		}
+		rechecked++
+		if st.Replicas > 0 && st.ReadyReplicas >= st.Replicas {
+			// 集群里其实是好的 → 归"记录未刷新"，不是故障
+			sv.Replicas, sv.ReadyReplicas = st.Replicas, st.ReadyReplicas
+			d.Degraded = append(d.Degraded, staleService{
+				Svc: sv,
+				Note: fmt.Sprintf("集群已就绪（%d/%d），平台记录仍是 %s —— 状态同步滞后",
+					st.ReadyReplicas, st.Replicas, sv.Status),
+			})
+			continue
+		}
+		// 集群里确实没齐：用集群的数字覆盖库里的（库可能更旧）
+		sv.Replicas, sv.ReadyReplicas = st.Replicas, st.ReadyReplicas
+		sv.Status = "集群侧 " + sv.Status
+		kept = append(kept, sv)
+	}
+	d.NotReady = kept
+	d.NotReadyRechecked = rechecked
+	if recheckErr > 0 {
+		d.Notes = append(d.Notes,
+			fmt.Sprintf("有 %d 个未就绪服务没能从集群复核（读不到工作负载状态），按平台记录判定 —— 可能包含已恢复的服务。", recheckErr))
 	}
 
 	// 集群资源（实时）
@@ -275,16 +335,15 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 			pen = 15
 		}
 		var names []string
-		for i, sv := range d.Degraded {
+		for i, st := range d.Degraded {
 			if i >= inspectionMaxListed {
 				break
 			}
-			names = append(names, fmt.Sprintf("%s（状态 %s，但 %d/%d 已就绪）",
-				sv.ProjectKey, sv.Status, sv.ReadyReplicas, sv.Replicas))
+			names = append(names, st.Svc.ProjectKey+"（"+st.Note+"）")
 		}
 		add(InspectFinding{
 			Level: "warning", Kind: "status_stale",
-			Title:  fmt.Sprintf("%d 个服务状态记录与实际不一致", n),
+			Title:  fmt.Sprintf("%d 个服务的平台记录与实际不一致", n),
 			Detail: strings.Join(names, "；"),
 			Action: "副本已经齐了，说明服务其实是好的，只是状态没刷新。重新发布一次即可让记录对齐；长期不处理会误导后面排查的人。",
 			Penalty: pen,
