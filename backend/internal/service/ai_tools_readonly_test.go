@@ -23,6 +23,7 @@ func TestAIToolsAreReadOnly(t *testing.T) {
 		"diagnose_service",
 		"get_cluster_resources",
 		"get_service_status",
+		"inspect_environment",
 		"list_builds",
 		"list_deployments",
 		"list_env_services",

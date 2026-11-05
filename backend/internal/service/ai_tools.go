@@ -46,7 +46,7 @@ type aiTool struct {
 	Description string
 	// Parameters JSON Schema；nil 表示无入参。
 	Parameters map[string]any
-	Run func(ctx context.Context, c Caller, args map[string]any) (string, error)
+	Run        func(ctx context.Context, c Caller, args map[string]any) (string, error)
 }
 
 // aiToolDecls 转成给模型看的工具声明。
@@ -94,6 +94,7 @@ func (a *AIService) aiTools() []aiTool {
 		a.toolGetServiceStatus(),
 		a.toolDiagnoseService(),
 		a.toolSearchServiceLogs(),
+		a.toolInspectEnvironment(),
 		a.toolListDeployments(),
 		a.toolListBuilds(),
 		a.toolClusterResources(),
@@ -588,6 +589,8 @@ func aiToolLabel(name string) string {
 		return "采集集群侧故障证据"
 	case "search_service_logs":
 		return "检索服务日志里的异常"
+	case "inspect_environment":
+		return "巡检环境并生成报告"
 	case "list_deployments":
 		return "读取部署记录"
 	case "list_builds":

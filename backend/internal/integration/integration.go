@@ -364,6 +364,12 @@ type Cluster interface {
 	DiagnoseFailure(ctx context.Context, ref WorkloadRef) (*FailureEvidence, error)
 	// Nodes 查询集群节点与容量。
 	Nodes(ctx context.Context, ref ClusterRef) (*ClusterState, error)
+	// IngressTLS 列出该命名空间 Ingress 引用的 TLS 证书与到期时间（只读）。
+	//
+	// 巡检要用它回答"证书什么时候到期"。为什么读集群而不是探域名：
+	// 集群常在内网、域名只在集群内解析，平台未必能连上；而 Ingress→Secret
+	// 拿到的正是集群实际在用的那张证书，且不需要额外网络。
+	IngressTLS(ctx context.Context, ref WorkloadRef) ([]TLSCertInfo, error)
 	// Ping 连通性测试。测的是**这个引用指向的集群**，所以需要 ref：
 	// 无参版本在"环境自带凭据"的场景下无法表达"测哪一个"。
 	Ping(ctx context.Context, ref ClusterRef) error

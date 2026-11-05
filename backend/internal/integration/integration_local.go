@@ -208,6 +208,15 @@ func (l *LocalCluster) PodLogs(context.Context, WorkloadRef, string, string, int
 	return nil, errors.New(localClusterHint)
 }
 
+// IngressTLS 未接入时没有证书可读。
+//
+// 返回错误而不是空列表：空列表的含义是"这个环境没有配 HTTPS 入口"，
+// 而本地实现的真实情况是"根本连不上集群"。混为一谈会让巡检报告
+// 把一个没接入的环境报成"证书检查通过"。
+func (l *LocalCluster) IngressTLS(context.Context, WorkloadRef) ([]TLSCertInfo, error) {
+	return nil, errors.New(localClusterHint)
+}
+
 // DiagnoseFailure 未接入时没有任何证据可取，**返回错误**。
 //
 // 不能返回一个空证据：下游会把它读成"采集过了，容器侧没有异常"，

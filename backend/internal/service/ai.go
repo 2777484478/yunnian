@@ -31,6 +31,9 @@ type AIService struct {
 	*base
 	// sys 复用系统服务的模型通道解析逻辑（含密钥解密），避免第二份实现。
 	sys *SystemService
+	// cd 巡检工具要走它（采集 + 评分 + 存档都在 CD 域）。
+	// 不复用 base.deps 自己拼一套：那种"第二份实现"迟早与页面上的报告不一致。
+	cd *CDService
 }
 
 // 一次提问的预算。

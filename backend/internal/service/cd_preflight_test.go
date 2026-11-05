@@ -74,6 +74,11 @@ func (c *stubCluster) Restart(context.Context, integration.WorkloadRef) error { 
 func (c *stubCluster) Pods(context.Context, integration.WorkloadRef) ([]integration.PodInfo, error) {
 	return nil, nil
 }
+// IngressTLS 测试桩：默认没有证书。巡检用例需要时在用例里另造数据。
+func (c *stubCluster) IngressTLS(context.Context, integration.WorkloadRef) ([]integration.TLSCertInfo, error) {
+	return nil, nil
+}
+
 func (c *stubCluster) PodLogs(context.Context, integration.WorkloadRef, string, string, int) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }

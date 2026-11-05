@@ -18,6 +18,7 @@ const Topology = lazy(() => import('@/pages/cd/Topology'));
 const EnvironmentDetail = lazy(() => import('@/pages/cd/EnvironmentDetail'));
 const DeployList = lazy(() => import('@/pages/cd/DeployList'));
 const RollbackList = lazy(() => import('@/pages/cd/RollbackList'));
+const InspectionList = lazy(() => import('@/pages/cd/InspectionList'));
 const AiAssistant = lazy(() => import('@/pages/AiAssistant'));
 const UsageDocs = lazy(() => import('@/pages/UsageDocs'));
 const ScheduleList = lazy(() => import('@/pages/schedules/ScheduleList'));
@@ -115,6 +116,7 @@ const RoutedApp: React.FC = () => {
             <Route path="cd/environments/:key" element={<RequirePerm codes={['env:read']}><EnvironmentDetail /></RequirePerm>} />
             <Route path="cd/deploys" element={<RequirePerm codes={['deploy:read']}><DeployList /></RequirePerm>} />
             <Route path="cd/rollbacks" element={<RequirePerm codes={['rollback:read']}><RollbackList /></RequirePerm>} />
+            <Route path="cd/inspections" element={<RequirePerm codes={['env:read']}><InspectionList /></RequirePerm>} />
 
             <Route path="ai" element={<RequirePerm codes={['ai:query']}><AiAssistant /></RequirePerm>} />
             {/* 使用文档不挂权限点：它是"这个平台怎么用"的说明，能登录就该能看。

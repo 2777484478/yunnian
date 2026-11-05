@@ -43,6 +43,8 @@ func Models() []any {
 		// 4. 环境 / 服务实例
 		&model.Environment{},
 		&model.EnvironmentVar{},
+		// 环境巡检报告（存档，2026-11-05）
+		&model.InspectionReport{},
 		&model.EnvironmentProject{},
 		&model.ServiceInstance{},
 

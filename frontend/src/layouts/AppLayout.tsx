@@ -36,6 +36,7 @@ import {
   QuestionCircleOutlined,
   RobotOutlined,
   RollbackOutlined,
+  SafetyCertificateOutlined,
   SearchOutlined,
   SettingOutlined,
   TeamOutlined,
@@ -120,6 +121,9 @@ const MENU: MenuGroup[] = [
       { key: '/cd/environments', icon: <ApartmentOutlined />, label: '环境管理', perms: ['env:read'] },
       { key: '/cd/deploys', icon: <DeploymentUnitOutlined />, label: '部署记录', perms: ['deploy:read'] },
       { key: '/cd/rollbacks', icon: <RollbackOutlined />, label: '回滚记录', perms: ['rollback:read'] },
+      // 巡检报告：只读巡检 + 存档。放在 CD 分组末尾 —— 它回答的是
+      // "这个环境现在健不健康"，与上面四个（拓扑/环境/部署/回滚）同一域。
+      { key: '/cd/inspections', icon: <SafetyCertificateOutlined />, label: '巡检报告', perms: ['env:read'] },
     ],
   },
   {

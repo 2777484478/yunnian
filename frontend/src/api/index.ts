@@ -95,3 +95,4 @@ export type {
 export { clusterApi } from './cluster';
 
 export * from './schedule';
+export * from './inspection';

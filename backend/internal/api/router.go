@@ -79,6 +79,7 @@ func NewRouter(d Deps) *gin.Engine {
 	h.registerClusters(g)
 	h.registerAudit(g)
 	h.registerSchedules(g)
+	h.registerInspections(g)
 	h.registerNotify(g)
 	h.registerModels(g)
 	h.registerAI(g)
@@ -222,6 +223,19 @@ func (h *handler) registerEnvironments(g *gin.RouterGroup) {
 	e.POST("/:key/sync", middleware.RequirePerm("env:write"), h.requireEnvVisible(), h.syncEnvironment)
 	e.GET("/:key/events", middleware.RequirePerm("env:read"), h.requireEnvVisible(), h.envEvents)
 	e.POST("/:key/test-connection", middleware.RequirePerm("env:write"), h.requireEnvVisible(), h.testEnvConnection)
+}
+
+// registerInspections 环境巡检报告（生成 / 存档 / 下载）。
+//
+// 生成是**只读巡检 + 写一份存档**：不碰集群、不碰环境配置，所以权限只要求
+// env:read。真正的读权限收敛在 service 里（AssertEnvVisible），与其它
+// 环境接口同一条规则。
+func (h *handler) registerInspections(g *gin.RouterGroup) {
+	r := g.Group("/inspection-reports")
+	r.GET("", middleware.RequirePerm("env:read"), h.listInspectionReports)
+	r.POST("", middleware.RequirePerm("env:read"), h.inspectEnvironment)
+	r.GET("/:id", middleware.RequirePerm("env:read"), h.getInspectionReport)
+	r.GET("/:id/download", middleware.RequirePerm("env:read"), h.downloadInspectionReport)
 }
 
 func (h *handler) registerServices(g *gin.RouterGroup) {

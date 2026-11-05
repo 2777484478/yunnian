@@ -98,11 +98,13 @@ func New(d Deps) *Service {
 		CI: ci,
 		// CD 的失败诊断同样要走模型通道：它比 CI 更需要——部署失败几乎没有
 		// 可机读的错误码能区分场景（都是"没起来"），真实原因只在容器侧证据里。
-		CD: cd,
+		CD:     cd,
 		System: sys,
 		// AI 服务复用 SystemService 的"默认模型通道"解析（含密钥解密），
 		// 避免把同一段解密逻辑写两遍——那种重复最容易在换加密方案时漏改一处。
-		AI:     &AIService{base: b, sys: sys},
+		// AI 挂 cd：巡检工具直接调 CD 的 InspectEnvironment，
+		// 保证「AI 生成的报告」与「页面上生成的报告」是同一份逻辑、同一份存档表。
+		AI:     &AIService{base: b, sys: sys, cd: cd},
 		Notify: b.notify,
 		// 定时任务复用上面这两个**同一个实例**：
 		// 再 new 一份 CI 会得到另一套内部状态（如 Jenkins 客户端缓存），
