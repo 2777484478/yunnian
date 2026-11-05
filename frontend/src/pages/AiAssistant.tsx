@@ -678,7 +678,7 @@ const AiAssistant: React.FC = () => {
                 <span className="yn-ai-hero__tag yn-ai-hero__tag--violet">
                   {/* 数字要跟后端的 aiTools() 一致：加工具时连同
                       ai_tools_test.go 的精确清单一起改（那条断言会先红，不会静默漏掉）。 */}
-                  <ApiOutlined /> 9 个只读工具
+                  <ApiOutlined /> 10 个只读工具
                 </span>
               </div>
             </div>
@@ -763,20 +763,15 @@ const AiAssistant: React.FC = () => {
                 {s}
               </span>
             ))}
-            {/* 一键生成巡检报告：和上面的提问 chip 一样，点了就是发这条消息，
-                触发 AI 生成报告（保留橙色，突出它是"生成报告"而非普通问答）。 */}
+            {/* 一键生成巡检报告：与上面的提问 chip 完全同款（都是点一下发消息），
+                不再用橙色区分 —— 用户要求颜色统一。 */}
             {hasPerm('env:read') ? (
               <span
                 className="yn-ai-chip"
-                style={{
-                  color: '#d46b08',
-                  borderColor: '#ffd591',
-                  background: '#fff7e6',
-                  opacity: streaming ? 0.5 : 1,
-                }}
+                style={{ opacity: streaming ? 0.5 : 1 }}
                 onClick={() => (streaming ? undefined : ask('帮我生成152测试环境的巡检报告'))}
               >
-                <SafetyCertificateOutlined style={{ marginRight: 5, color: '#fa8c16' }} />
+                <SafetyCertificateOutlined style={{ marginRight: 5, color: '#1677ff' }} />
                 帮我生成152测试环境的巡检报告
               </span>
             ) : null}

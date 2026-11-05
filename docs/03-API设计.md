@@ -1365,7 +1365,7 @@ data: {"reason":"finished","conversationId":"conv_8f2c1a9b","tokensUsed":412}
 
 **模型自己取数（2026-10-09 起）**
 
-`/ai/chat` 背后挂了 9 个**只读**工具，模型会在回答前自行调用：
+`/ai/chat` 背后挂了 10 个**只读**工具，模型会在回答前自行调用：
 
 | 工具 | 用途 |
 | --- | --- |
@@ -1374,6 +1374,7 @@ data: {"reason":"finished","conversationId":"conv_8f2c1a9b","tokensUsed":412}
 | `get_service_status` | **集群实时**状态：镜像 tag、期望/实际/就绪副本 |
 | `diagnose_service` | **集群侧故障取证**：Pod 容器状态、事件、崩溃前那轮日志 |
 | `search_service_logs` | **运行中服务的日志检索**：只回异常片段（error/exception/超时…），带前后 2 行上下文 |
+| `inspect_environment` | **环境健康巡检**：集群资源/服务就绪/TLS 证书到期/近期部署失败率，产出 0-100 健康分并**存档**（可下载彩色 HTML 报告） |
 | `get_cluster_resources` | 集群实时资源（含 `metricsAvailable` 语义） |
 | `list_deployments` / `list_builds` | 部署与构建记录 |
 
