@@ -2,10 +2,13 @@ package integration
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +22,8 @@ import (
 // 而集群往往在内网、域名只在集群内解析。读 Ingress → Secret 是**不需要额外网络**
 // 就能拿到到期时间的办法，而且拿到的正是集群实际在用的那张证书。
 type TLSCertInfo struct {
+	// Kind 来源：ingress（Ingress 引用的 TLS Secret）/ apiserver（集群 API Server 自身证书）
+	Kind string `json:"kind"`
 	// Secret 证书所在的 Secret 名（同一张证书常被多个 Ingress 引用，按 Secret 去重）
 	Secret string `json:"secret"`
 	// Hosts 该 Secret 覆盖的域名（来自 Ingress 的 tls.hosts）
@@ -98,7 +103,7 @@ func (k *K8sCluster) IngressTLS(ctx context.Context, ref WorkloadRef) ([]TLSCert
 	out := make([]TLSCertInfo, 0, len(order))
 	for _, secretName := range order {
 		a := bySecret[secretName]
-		info := TLSCertInfo{Secret: secretName, Hosts: a.hosts, Ingresses: a.ingresses}
+		info := TLSCertInfo{Kind: "ingress", Secret: secretName, Hosts: a.hosts, Ingresses: a.ingresses}
 
 		sec, err := cs.CoreV1().Secrets(ref.Namespace).Get(ctx, secretName, metav1.GetOptions{})
 		if err != nil {
@@ -149,4 +154,79 @@ func containsStr(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// --------------------------------------------------------------------------- API Server 证书
+
+// APIServerCert 探测集群 API Server 的 TLS 证书到期时间。
+//
+// 用途（2026-11-05 用户提供的方法）：环境里没有 Ingress TLS 时，
+// 巡检至少要能看到**集群本身**的证书还剩多久。命令等价于：
+//
+//	curl https://172.16.1.152:6443 -k -v
+//	→ expire date: Oct 4 19:00:02 2027 GMT
+//
+// 实现要点：
+//   - 地址取自 kubeconfig 的 server（restConfigFor 已经解析好，不必再解一遍 YAML）；
+//   - **不校验信任链**（InsecureSkipVerify）：这是内网自签证书，平台要的是
+//     "它什么时候到期"，不是"我信不信它"。校验会直接失败，什么也拿不到；
+//   - 只读叶子证书（PeerCertificates[0]），与 curl -v 显示的那张一致。
+func (k *K8sCluster) APIServerCert(ctx context.Context, ref ClusterRef) (*TLSCertInfo, error) {
+	rc, err := k.restConfigFor(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	host := strings.TrimSpace(rc.Host)
+	if host == "" {
+		return nil, errors.New("kubeconfig 里没有 server 地址")
+	}
+	u, err := url.Parse(host)
+	if err != nil || u.Host == "" {
+		return nil, fmt.Errorf("kubeconfig 的 server 地址无法解析：%s", host)
+	}
+	if u.Scheme != "https" {
+		// 明文 API Server 没有可查的证书。如实说，不返回空结构让人误以为"没问题"。
+		return nil, fmt.Errorf("API Server 使用明文 http（%s），没有 TLS 证书可查", host)
+	}
+
+	timeout := k.readTimeout
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	// 内网自签证书：只要证书本体，不验证信任链（见函数注释）。
+	conn, err := tls.DialWithDialer(dialer, "tcp", u.Host, &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // 只为读到期时间，不做任何鉴权决策
+		ServerName:         u.Hostname(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("连接 %s 失败：%w", u.Host, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return nil, errors.New("TLS 握手成功但服务端没有提供证书")
+	}
+	cert := state.PeerCertificates[0]
+	info := &TLSCertInfo{
+		Kind:      "apiserver",
+		Secret:    "（集群 API Server）",
+		Hosts:     []string{u.Host},
+		Subject:   firstNonEmpty(cert.Subject.CommonName, cert.Subject.String()),
+		Issuer:    cert.Issuer.CommonName,
+		NotBefore: cert.NotBefore,
+		NotAfter:  cert.NotAfter,
+		DaysLeft:  int(time.Until(cert.NotAfter).Hours() / 24),
+	}
+	return info, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }

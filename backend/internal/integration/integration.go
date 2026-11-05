@@ -370,6 +370,12 @@ type Cluster interface {
 	// 集群常在内网、域名只在集群内解析，平台未必能连上；而 Ingress→Secret
 	// 拿到的正是集群实际在用的那张证书，且不需要额外网络。
 	IngressTLS(ctx context.Context, ref WorkloadRef) ([]TLSCertInfo, error)
+	// APIServerCert 探测集群 API Server 自身的 TLS 证书（等价于 `curl https://<server> -k -v`）。
+	//
+	// 为什么需要它：环境里常常没有 Ingress TLS（服务走 NodePort 直连），
+	// 那时 IngressTLS 返回空列表，巡检就看不到任何证书 —— 而 API Server 证书
+	// 同样是会过期、过期就整个集群连不上的东西。
+	APIServerCert(ctx context.Context, ref ClusterRef) (*TLSCertInfo, error)
 	// Ping 连通性测试。测的是**这个引用指向的集群**，所以需要 ref：
 	// 无参版本在"环境自带凭据"的场景下无法表达"测哪一个"。
 	Ping(ctx context.Context, ref ClusterRef) error

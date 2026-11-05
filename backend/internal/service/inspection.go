@@ -260,9 +260,20 @@ func (s *CDService) collectInspection(ctx context.Context, env *model.Environmen
 		d.CertsErr = cerr.Error()
 		// 带上原始错误：只说"没读到"会让人无从下手（是没权限？还是集群连不上？）。
 		d.Notes = append(d.Notes, "TLS 证书没读到："+cerr.Error()+"（证书一栏为空不代表没有快要过期的证书）")
-	} else {
-		d.Certs = certs
+	} else if len(certs) == 0 {
+		// Ingress 没配 TLS 时，退一步看**集群 API Server 自身**的证书。
+		//
+		// 用户 2026-11-05 提供的方法：`curl https://<server> -k -v` 能看到
+		// "expire date"。很多环境服务走 NodePort 直连、根本不建 Ingress，
+		// 但 API Server 证书同样是会过期、过期整个集群就连不上的东西。
+		if ap, aerr := s.deps.Up.Cluster.APIServerCert(ctx, clusterRefOf(env)); aerr == nil && ap != nil {
+			certs = []integration.TLSCertInfo{*ap}
+		} else if aerr != nil {
+			d.Notes = append(d.Notes,
+				"该环境的 Ingress 没有配置 TLS；集群 API Server 的证书也没探到："+aerr.Error())
+		}
 	}
+	d.Certs = certs
 
 	// 部署活动（平台记录）
 	since := d.Now.Add(-time.Duration(hours) * time.Hour)
@@ -545,6 +556,14 @@ func certDetail(c integration.TLSCertInfo) string {
 	hosts := "未标注域名"
 	if len(c.Hosts) > 0 {
 		hosts = strings.Join(c.Hosts, "、")
+	}
+	if c.Kind == "apiserver" {
+		// API Server 证书过期 = 整个集群连不上，比业务证书更要紧，说清楚
+		s := fmt.Sprintf("集群 API Server（%s）的证书，到期 %s", hosts, c.NotAfter.Format("2006-01-02"))
+		if c.Issuer != "" {
+			s += "，签发者 " + c.Issuer
+		}
+		return s
 	}
 	s := fmt.Sprintf("Secret %s（%s），到期 %s", c.Secret, hosts, c.NotAfter.Format("2006-01-02"))
 	if c.Issuer != "" {

@@ -217,6 +217,11 @@ func (l *LocalCluster) IngressTLS(context.Context, WorkloadRef) ([]TLSCertInfo, 
 	return nil, errors.New(localClusterHint)
 }
 
+// APIServerCert 未接入时没有集群可探。
+func (l *LocalCluster) APIServerCert(context.Context, ClusterRef) (*TLSCertInfo, error) {
+	return nil, errors.New(localClusterHint)
+}
+
 // DiagnoseFailure 未接入时没有任何证据可取，**返回错误**。
 //
 // 不能返回一个空证据：下游会把它读成"采集过了，容器侧没有异常"，
