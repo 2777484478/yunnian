@@ -377,7 +377,6 @@ const Topology: React.FC = () => {
     message.error(e instanceof ApiError ? e.message : fallback);
 
   const [projectKey, setProjectKey] = useState<string>('');
-  const [layout, setLayout] = useState<'pipeline' | 'cluster'>('pipeline');
   const [activeEnv, setActiveEnv] = useState<string | null>(null);
   const [action, setAction] = useState<{ type: ActionType; envKey: string } | null>(null);
   /**
@@ -682,7 +681,7 @@ const Topology: React.FC = () => {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, envList.length, projectKey, allServices.length]);
+  }, [envList.length, projectKey, allServices.length]);
 
   const stats = useMemo(() => {
     const list = envList.map((e) => nodeOf(e.key));
@@ -1100,11 +1099,13 @@ const Topology: React.FC = () => {
   };
 
   /**
-   * 按发布阶段（stageOrder）把环境分组：**同一序号的环境并排**，不同序号之间才是先后。
+   * 按发布阶段（stageOrder）把环境分组：**一个阶段 = 一列**。
    *
    * 之前是所有环境被一条链串起来（每个节点前插一个箭头），于是 stageOrder 相同的
    * 两个环境看起来也成了"先发 A、再发 B"。但相同 stageOrder 表达的是**同一阶段的两个
-   * 环境、彼此并列**（比如两台测试机），不该有箭头、也不该有先后。
+   * 环境、彼此并列**（比如阿里云预生产 + gcp 预生产），不该有箭头、也不该有先后。
+   *
+   * 现在它们在同一列里**上下堆叠**；列与列之间才横向连接。
    *
    * 前提：envs 已按 stage 排序（`sortByStage`），同序号的必然相邻 —— 所以这里
    * 只比较"相邻两项"即可，不需要 Map 聚合（Map 还会打乱同序号内部的相对顺序）。
@@ -1121,7 +1122,18 @@ const Topology: React.FC = () => {
       }
       lastOrder = order;
     }
-    return groups;
+    // 列内**按创建时间升序**：先建的在上、后加的排在下面。
+    // 不依赖后端返回顺序 —— 否则编辑环境或刷新后上下位置会跳，
+    // 看起来像"环境被换了位置"。
+    return groups.map((g) =>
+      [...g].sort((a, b) => {
+        const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
+        const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
+        if (ta !== tb) return ta - tb;
+        // 创建时间相同（同一秒批量建的）时用 key 兜底，保证顺序稳定可复现
+        return a.key.localeCompare(b.key);
+      }),
+    );
   };
 
   const renderChain = (envs: Environment[]) => {
@@ -1149,27 +1161,6 @@ const Topology: React.FC = () => {
       </div>
     );
   };
-
-  /**
-   * 集群视图：按集群分组。
-   *
-   * **自带凭据的环境单独分桶**：它们的 `env.cluster` 只是个名字标签，实际集群不是注册表里
-   * 那条同名记录（见 `envClusterView`）。若与"引用平台集群"的环境混在一组，组头再贴上
-   * 注册表的探测结果，等于对着一批别的集群做总结。
-   * 组键加 `#own` 后缀把它隔开，展示时仍用用户填的标识（`label`）。
-   */
-  const clusterGroups = useMemo(() => {
-    const map = new Map<string, { label: string; own: boolean; envs: Environment[] }>();
-    envList.forEach((env) => {
-      const label = clusterKeyOf(env.cluster);
-      const own = isOwnCluster(env);
-      const k = own ? `${label}#own` : label;
-      const g = map.get(k) ?? { label, own, envs: [] };
-      g.envs.push(env);
-      map.set(k, g);
-    });
-    return [...map.entries()].map(([key, g]) => ({ key, ...g }));
-  }, [envList]);
 
   // ------------------------------------------------------------------ 首屏状态
   const pageError = envsApi.error || projectsApi.error;
@@ -1255,15 +1246,6 @@ const Topology: React.FC = () => {
               }))}
             />
           </div>
-
-          <Segmented
-            value={layout}
-            onChange={(v) => setLayout(v as 'pipeline' | 'cluster')}
-            options={[
-              { value: 'pipeline', label: '发布流水线', icon: <NodeIndexOutlined /> },
-              { value: 'cluster', label: '按集群分组', icon: <ClusterOutlined /> },
-            ]}
-          />
 
           <Tooltip title="一次勾选多个微服务，读取最新构建版本后排队发布">
             <Button
@@ -1357,66 +1339,14 @@ const Topology: React.FC = () => {
         <div className="yn-topo__canvas-wrap">
           <div className="yn-topo__canvas" ref={canvasRef} onScroll={syncScrollHint}>
             <div className="yn-topo__canvas-head">
-              <span>
-                {layout === 'pipeline'
-                  ? `发布链路 · 按发布阶段从左到右排列（共 ${envList.length} 个环境）`
-                  : `按集群分组 · 共 ${clusterGroups.length} 个集群`}
-              </span>
+              <span>{`发布链路 · 按发布阶段从左到右排列，同阶段的环境上下堆叠（共 ${envList.length} 个环境）`}</span>
               <span className="yn-topo__flow">
                 研发提交 → 自测 → 预发 → 灰度 → 生产
                 <span className="yn-topo__flow-rail" />
               </span>
             </div>
 
-            {layout === 'pipeline'
-              ? renderChain(envList)
-              : clusterGroups.map((g) => {
-                  // 自带凭据的组**不查注册表**：那条同名记录是另一个集群（见 envClusterView）。
-                  const cluster = g.own ? undefined : clusterByKey.get(g.key);
-                  const svcCount = g.envs.filter((e) => isDeployed(nodeOf(e.key))).length;
-                  // 自带凭据时组头只能**如实汇总**组内环境自己同步回来的值：
-                  // 一个值就写这个值，多个值就说明有多个 —— 它们其实可能不是同一个集群，
-                  // 只是用户给的名字标签恰好相同。编一个"这个集群的版本"是没有来源的。
-                  const ownVersions = uniqOf(g.envs.map((e) => e.clusterVersion).filter(Boolean));
-                  const ownNodes = uniqOf(
-                    g.envs.filter((e) => e.lastSyncAt).map((e) => e.nodes),
-                  );
-                  const summed = (list: readonly (string | number)[]): string =>
-                    list.length === 1 ? String(list[0]) : list.length ? `${list.length} 个值` : '—';
-                  return (
-                    <div className="yn-topo__lane" key={g.key}>
-                      <div className="yn-topo__lane-head">
-                        <div className="yn-topo__lane-provider">
-                          <span className="yn-topo__lane-badge">
-                            {g.own ? '自带凭据' : badgeOf(cluster)}
-                          </span>
-                          {g.own
-                            ? `${g.label}（环境自带 kubeconfig）`
-                            : cluster?.name ||
-                              (clusterRegistryKnown ? '未接入平台' : '集群列表读取失败')}
-                        </div>
-                        <div className="yn-topo__lane-key">{g.label}</div>
-                        <div className="yn-topo__lane-info">
-                          {/* 只显示真实读得到的：云厂商/区域/可用区已删——
-                              kubeconfig 里没有这些信息，原先那三行是前端编的。 */}
-                          <div>
-                            K8s 版本 <b>{g.own ? summed(ownVersions) : cluster?.k8sVersion || '—'}</b>
-                          </div>
-                          <div>
-                            节点 <b>{g.own ? summed(ownNodes) : (cluster?.nodes ?? '—')}</b>
-                            {!g.own && typeof cluster?.nodesReady === 'number'
-                              ? ` · 就绪 ${cluster.nodesReady}`
-                              : ''}
-                          </div>
-                          <div>
-                            本项目已部署 <b>{svcCount}</b> / {g.envs.length} 个环境
-                          </div>
-                        </div>
-                      </div>
-                      <div className="yn-topo__lane-body">{renderChain(g.envs)}</div>
-                    </div>
-                  );
-                })}
+            {renderChain(envList)}
           </div>
           {scrollHint.right ? <div className="yn-topo__fade yn-topo__fade--right" /> : null}
           {scrollHint.left ? <div className="yn-topo__fade yn-topo__fade--left" /> : null}

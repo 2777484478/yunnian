@@ -314,15 +314,16 @@
 }
 
 /**
- * 同一发布阶段的多个环境并排（组内不插箭头）。
+ * 一个发布阶段 = 一列。同序号的环境在这一列里**上下堆叠**。
  *
- * 靠得比"阶段之间"更近：组间有箭头和它自带的留白，组内只留一点点缝 ——
- * 视觉上就分成"阶段 = 一组圆圈"的节拍，而不是一长串等距珠子。
+ * 列本身是纵向 flex；外层 `.yn-topo__chain` 的 `align-items: center` 负责
+ * 让「只有一个环境的列」垂直居中 —— 所有列的中线对齐，箭头才是水平的。
  */
 .yn-topo__stage-group {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 12px;
 }
 
 .yn-topo__chain--empty {
