@@ -837,15 +837,27 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       key: 'last',
       // 顺带把**分支**也放出来：第 2 步的默认分支取的就是它，
       // 在这里能提前看到"我大概会构建哪个分支"。
-      width: 200,
+      width: 212,
       render: (_, p) =>
         p.lastBuild?.branch ? (
-          <Space size={6}>
-            <BuildStatusTag status={p.lastBuild.status} />
-            <span className="yn-mono" style={{ fontSize: 11.5, color: '#8c8c95' }}>
+          // ⚠️ 不能用 antd 的 <Space> 包这两个元素：Space 会给每个子项套一层
+          // `.ant-space-item`（默认 min-width:auto），长分支名会把列撑破、
+          // 文字直接压到右边「负责人」列上（2026-11-05 用户截图报的）。
+          // 正解是与「项目」列同一套写法：flex 容器 + minWidth:0 + yn-ellipsis。
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <span style={{ display: 'inline-flex', flex: 'none' }}>
+              <BuildStatusTag status={p.lastBuild.status} />
+            </span>
+            <span
+              className="yn-mono yn-ellipsis"
+              // title 给全名：截断之后 `origin/Release_aio…` 分辨不出是哪个版本，
+              // 而这一列就是让人确认"会构建哪个分支"的。
+              title={p.lastBuild.branch}
+              style={{ flex: '1 1 auto', minWidth: 0, fontSize: 11.5, color: '#8c8c95' }}
+            >
               {p.lastBuild.branch}
             </span>
-          </Space>
+          </div>
         ) : (
           <BuildStatusTag status={p.lastBuild?.status} />
         ),
