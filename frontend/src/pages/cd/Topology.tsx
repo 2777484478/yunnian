@@ -1099,22 +1099,56 @@ const Topology: React.FC = () => {
     );
   };
 
-  const renderChain = (envs: Environment[]) => (
-    <div className="yn-topo__chain">
-      {envs.map((env, i) => {
-        const n = nodeOf(env.key);
-        const deployed = isDeployed(n);
-        return (
-          <React.Fragment key={env.key}>
-            {i > 0 ? (
-              <TopoLink gate={gateOf(env)} color={stageOf(env).color} active={deployed} index={i} />
-            ) : null}
-            {renderNode(env, i)}
-          </React.Fragment>
-        );
-      })}
-    </div>
-  );
+  /**
+   * 按发布阶段（stageOrder）把环境分组：**同一序号的环境并排**，不同序号之间才是先后。
+   *
+   * 之前是所有环境被一条链串起来（每个节点前插一个箭头），于是 stageOrder 相同的
+   * 两个环境看起来也成了"先发 A、再发 B"。但相同 stageOrder 表达的是**同一阶段的两个
+   * 环境、彼此并列**（比如两台测试机），不该有箭头、也不该有先后。
+   *
+   * 前提：envs 已按 stage 排序（`sortByStage`），同序号的必然相邻 —— 所以这里
+   * 只比较"相邻两项"即可，不需要 Map 聚合（Map 还会打乱同序号内部的相对顺序）。
+   */
+  const groupByStageOrder = (envs: Environment[]): Environment[][] => {
+    const groups: Environment[][] = [];
+    let lastOrder: number | null = null;
+    for (const env of envs) {
+      const order = stageOf(env).order;
+      if (lastOrder !== null && order === lastOrder && groups.length > 0) {
+        groups[groups.length - 1].push(env);
+      } else {
+        groups.push([env]);
+      }
+      lastOrder = order;
+    }
+    return groups;
+  };
+
+  const renderChain = (envs: Environment[]) => {
+    const groups = groupByStageOrder(envs);
+    let nodeIndex = 0;
+    return (
+      <div className="yn-topo__chain">
+        {groups.map((group, gi) => {
+          // 箭头属于"阶段之间"，门禁/颜色取该阶段的代表环境（组内第一个）；
+          // 是否点亮取组内**任一**环境已部署 —— 一个阶段里只要有一个发上去了，
+          // 这条阶段推进就是发生过的。
+          const head = group[0];
+          const active = group.some((e) => isDeployed(nodeOf(e.key)));
+          return (
+            <React.Fragment key={`stage-${stageOf(head).order}-${gi}`}>
+              {gi > 0 ? (
+                <TopoLink gate={gateOf(head)} color={stageOf(head).color} active={active} index={gi} />
+              ) : null}
+              <div className="yn-topo__stage-group">
+                {group.map((env) => renderNode(env, nodeIndex++))}
+              </div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    );
+  };
 
   /**
    * 集群视图：按集群分组。

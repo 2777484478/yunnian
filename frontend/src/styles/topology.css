@@ -313,6 +313,18 @@
   padding: 6px 0;
 }
 
+/**
+ * 同一发布阶段的多个环境并排（组内不插箭头）。
+ *
+ * 靠得比"阶段之间"更近：组间有箭头和它自带的留白，组内只留一点点缝 ——
+ * 视觉上就分成"阶段 = 一组圆圈"的节拍，而不是一长串等距珠子。
+ */
+.yn-topo__stage-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .yn-topo__chain--empty {
   min-width: 0;
 }
