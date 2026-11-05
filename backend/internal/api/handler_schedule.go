@@ -23,17 +23,17 @@ func (h *handler) registerSchedules(g *gin.RouterGroup) {
 	s := g.Group("/schedules")
 	// 预览 cron 不需要写权限：它只做纯计算，不落库。
 	// 放在最前面，避免 /:id 那条把 "preview" 当成 id 解析。
-	s.GET("/preview", middleware.RequirePerm("build:read", "deploy:read"), h.previewSchedule)
+	s.GET("/preview", middleware.RequirePerm("build:read", "deploy:read", "env:read"), h.previewSchedule)
 
-	s.GET("", middleware.RequirePerm("build:read", "deploy:read"), h.listSchedules)
-	s.GET("/:id", middleware.RequirePerm("build:read", "deploy:read"), h.getSchedule)
-	s.POST("", middleware.RequirePerm("build:trigger", "deploy:read"), h.createSchedule)
-	s.PUT("/:id", middleware.RequirePerm("build:trigger", "deploy:read"), h.updateSchedule)
-	s.DELETE("/:id", middleware.RequirePerm("build:trigger", "deploy:read"), h.deleteSchedule)
-	s.POST("/:id/enabled", middleware.RequirePerm("build:trigger", "deploy:read"), h.setScheduleEnabled)
+	s.GET("", middleware.RequirePerm("build:read", "deploy:read", "env:read"), h.listSchedules)
+	s.GET("/:id", middleware.RequirePerm("build:read", "deploy:read", "env:read"), h.getSchedule)
+	s.POST("", middleware.RequirePerm("build:trigger", "deploy:read", "env:read"), h.createSchedule)
+	s.PUT("/:id", middleware.RequirePerm("build:trigger", "deploy:read", "env:read"), h.updateSchedule)
+	s.DELETE("/:id", middleware.RequirePerm("build:trigger", "deploy:read", "env:read"), h.deleteSchedule)
+	s.POST("/:id/enabled", middleware.RequirePerm("build:trigger", "deploy:read", "env:read"), h.setScheduleEnabled)
 	// 立即执行一次：调试用。它**不推进下次计划时间**，
 	// 否则"点一下试试"会把当晚的执行吃掉。
-	s.POST("/:id/run", middleware.RequirePerm("build:trigger", "deploy:read"), h.runScheduleNow)
+	s.POST("/:id/run", middleware.RequirePerm("build:trigger", "deploy:read", "env:read"), h.runScheduleNow)
 }
 
 // previewSchedule GET /schedules/preview?cron=0 2 * * *
