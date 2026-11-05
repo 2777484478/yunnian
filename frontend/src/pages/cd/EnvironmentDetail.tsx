@@ -1117,7 +1117,9 @@ const EnvironmentDetail: React.FC = () => {
       title: '操作',
       key: 'action',
       fixed: 'right',
-      // 三个动作（部署 / 日志 / 更多）都是 link 按钮，放不下会被挤成换行。
+      // 三个动作（重启 / 日志 / 更多）都是 link 按钮，放不下会被挤成换行。
+      // 「部署」入口已撤（2026-11-05 用户：统一从发布拓扑部署），行内第一个动作
+      // 改成「重启」—— 它是运维动作（不换镜像，只滚动重建 Pod），与"部署"是两回事。
       width: 170,
       render: (_, r) => (
         <Space size={2}>
@@ -1128,11 +1130,11 @@ const EnvironmentDetail: React.FC = () => {
               type="link"
               size="small"
               style={{ paddingInline: 4 }}
-              icon={<ThunderboltOutlined />}
+              icon={<SwapOutlined />}
               disabled={!canDeploy}
-              onClick={() => openDeploy(r)}
+              onClick={() => doRestart(r)}
             >
-              部署
+              重启
             </Button>
           </DisabledTip>
           <Button type="link" size="small" style={{ paddingInline: 4 }} icon={<FileTextOutlined />} onClick={() => openLogs(r)}>
@@ -1185,17 +1187,6 @@ const EnvironmentDetail: React.FC = () => {
                     </DisabledTip>
                   ),
                 },
-                {
-                  key: 'restart',
-                  icon: <SwapOutlined />,
-                  // POST /services/:id/restart → guardServiceEnv(c,"deploy",id)
-                  disabled: !canDeploy,
-                  label: (
-                    <DisabledTip title={deployGuardTip}>
-                      <span>重启 Deployment</span>
-                    </DisabledTip>
-                  ),
-                },
                 { type: 'divider' },
                 {
                   key: 'offline',
@@ -1217,7 +1208,6 @@ const EnvironmentDetail: React.FC = () => {
                 else if (k === 'rollback') openRollback(r);
                 else if (k === 'params') openParams(r);
                 else if (k === 'scale') openScale(r);
-                else if (k === 'restart') doRestart(r);
                 else if (k === 'offline') doOffline(r);
               },
             }}
@@ -1378,35 +1368,10 @@ const EnvironmentDetail: React.FC = () => {
             <Button icon={<ReloadOutlined />} onClick={syncCluster} disabled={!canWrite}>
               同步集群
             </Button>
-            {/* 「部署历史」按钮已去掉（2026-10-20 用户："多余，有入口了"）：
-                它只是 setTab('deploys')，而页面下方的 Tabs 里本来就有「部署历史」这一栏 ——
-                同一个动作两个入口，其中一个还是纯重复，只会让这一排按钮变长。
-                「部署新服务」保留：拓扑页虽然也能部署，但这里**环境已经选好了**，少一步；
-                而且它是这一页唯一的主操作（primary），去掉后整排只剩"管理类"动作。 */}
-            {/* 禁用有两个理由，都要说清：缺 deploy:{env} 权限，或该环境还没有纳管服务
-                （部署向导的项目下拉就是 env.projectKeys，空列表时无可选项；
-                后端对未纳管项目也是 40400「该环境尚未纳管此项目」）。 */}
-            <DisabledTip
-              title={
-                canDeploy
-                  ? services.length
-                    ? undefined
-                    : '该环境还没有纳管服务，暂无可部署的项目'
-                  : `当前账号没有 deploy:${key} 权限`
-              }
-            >
-              <Button
-                type="primary"
-                icon={<ThunderboltOutlined />}
-                onClick={() => openDeploy()}
-                disabled={!canDeploy || !services.length}
-              >
-                部署新服务
-              </Button>
-            </DisabledTip>
+            {/* 「部署历史」与「部署新服务」两个按钮都已去掉（2026-11-05 用户拍板）：
+                部署统一走发布拓扑，环境详情页不再承担部署入口。 */}
             {/* 环境级动作：与列表页共用同一个组件（权限门控、实例数预检、二次确认
-                都只有一份）。用常规按钮而不是文字链接 —— 这一排已经有
-                「纳管项目 / 同步集群 / 部署新服务」，两个裸的"编辑 / 删除"会分不清在编辑什么。 */}
+                都只有一份）。用常规按钮而不是文字链接 —— 两个裸的"编辑 / 删除"会分不清在编辑什么。 */}
             <EnvironmentActions
               env={env}
               svcCount={servicesApi.error || servicesApi.loading ? null : services.length}
