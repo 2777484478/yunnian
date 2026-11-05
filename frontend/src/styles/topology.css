@@ -307,8 +307,15 @@
 /* --------------------------------------------------------------------------- 链路 */
 
 .yn-topo__chain {
+  /* 与 .yn-topo-node__disc 同高：第一行的圆心落在 88px 处。
+     箭头容器也用这个高度，靠 justify-content:center 自动对齐中线 ——
+     不需要写死像素，disc 改尺寸时这里跟着改一处即可。 */
+  --topo-disc-h: 176px;
   display: flex;
-  align-items: center;
+  /* 顶部对齐（不是 center）：每列的第一个环境因此落在同一条水平主线上，
+     第二、第三个环境往下挂。用 center 会让单环境列被推进中间，
+     和双环境列的首节点错开半格。 */
+  align-items: flex-start;
   min-width: max-content;
   padding: 6px 0;
 }
@@ -612,13 +619,16 @@
 /* --------------------------------------------------------------------------- 连接段 */
 
 .yn-topo-link {
+  /* 高度对齐第一行的圆盘：内部 track 靠 align/justify center 落在圆心高度上。
+     不这么做的话，chain 改成 flex-start 后箭头会贴到整列的顶部，
+     和第一行圆圈差半格。 */
+  position: relative;
   flex: none;
   width: 92px;
+  height: var(--topo-disc-h, 176px);
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
   animation: yn-link-in 0.5s ease both;
 }
 
@@ -634,6 +644,13 @@
 }
 
 .yn-topo-link__gate {
+  /* 闸门文案浮在箭头上方（绝对定位）——不能留在文档流里：
+     track 需要独占 flex 居中位才能精确落在圆心高度上，
+     gate 在流里会把 track 往下压一小截。 */
+  position: absolute;
+  left: 50%;
+  bottom: calc(50% + 9px);
+  transform: translateX(-50%);
   font-size: 10.5px;
   padding: 1px 8px;
   border-radius: 999px;
