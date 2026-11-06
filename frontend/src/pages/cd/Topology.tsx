@@ -900,7 +900,12 @@ const Topology: React.FC = () => {
 
   const podLogUrl =
     action?.type === 'podlog' && actionSvc && podName ? serviceApi.podLogStream(actionSvc.id, podName, 500) : null;
-  const podLogs = useLogStream(podLogUrl, { enabled: !!podLogUrl });
+  const [logPaused, setLogPaused] = useState(false);
+  const podLogs = useLogStream(podLogUrl, { enabled: !!podLogUrl, paused: logPaused });
+  // 换 Pod（URL 变化）时回到"追踪中"：新开的日志窗不该继承上次的暂停状态。
+  useEffect(() => {
+    setLogPaused(false);
+  }, [podLogUrl]);
 
   // 回滚目标版本的**预选**也随组件走（见 RollbackTargetField）：
   // 留在这里就会用"上一个项目的旧 data"先在 `action?.type` 变化时跑一次，
@@ -1765,7 +1770,11 @@ const Topology: React.FC = () => {
             options={(podsApi.data ?? []).map((p) => ({ value: p.name, label: `${p.name}（${p.status}）` }))}
             notFoundContent="该服务当前没有运行中的 Pod"
           />
-          {podLogUrl && !podLogs.ended ? <Tag color="processing">实时跟随中</Tag> : null}
+          {podLogUrl && !podLogs.ended ? (
+            <Tag color={logPaused ? 'default' : 'processing'}>
+              {logPaused ? '已暂停追踪' : '自动追踪中'}
+            </Tag>
+          ) : null}
           <Tag className="yn-mono" style={{ marginInlineStart: 8 }}>
             {clusterKeyOf(actionEnv?.cluster ?? '')} / {actionEnv?.namespace}
           </Tag>
@@ -1776,6 +1785,9 @@ const Topology: React.FC = () => {
           title={`pod: ${podName || '<pod>'}`}
           lines={podLogs.lines}
           live={!!podLogUrl && !podLogs.ended}
+          paused={logPaused}
+          onPausedChange={setLogPaused}
+          buffered={podLogs.buffered}
           emptyText={podName ? '暂无日志输出…' : '请先选择一个 Pod'}
         />
       </Drawer>

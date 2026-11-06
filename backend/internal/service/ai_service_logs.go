@@ -161,7 +161,8 @@ func (a *AIService) toolSearchServiceLogs() aiTool {
 			hits := make([]logHit, 0, logScanHitsTotal)
 			matchedTotal, scannedTotal := 0, 0
 			for _, p := range candidates {
-				rc, err := a.deps.Up.Cluster.PodLogs(ctx, ref, p.Name, container, lines)
+				// follow=false：这里只扫尾部若干行就要出结论，跟随会永远读不完。
+				rc, err := a.deps.Up.Cluster.PodLogs(ctx, ref, p.Name, container, lines, false)
 				if err != nil {
 					// 读不到就如实说（含 K8s 原文：多容器 Pod 的报错里带着可选容器名）。
 					scans = append(scans, map[string]any{"pod": p.Name, "readError": err.Error()})

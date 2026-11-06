@@ -83,6 +83,18 @@ export interface LogPanelProps {
   title?: React.ReactNode;
   extra?: React.ReactNode;
   emptyText?: string;
+  /**
+   * 暂停追踪（仅实时流场景）。传了 `onPausedChange` 才会显示这个开关 ——
+   * 静态日志没有"追踪"可言，多一个开关只会让人以为点了会有效果。
+   *
+   * 与旧的 "跟随（自动滚动）" 的区别：
+   *   跟随 = 有新行时把视口滚到底部（纯显示层，日志照样进）；
+   *   追踪 = 要不要继续接收新日志（数据层，暂停时新行不进来）。
+   */
+  paused?: boolean;
+  onPausedChange?: (paused: boolean) => void;
+  /** 暂停期间已缓冲、尚未显示的行数 */
+  buffered?: number;
 }
 
 /**
@@ -98,11 +110,18 @@ export const LogPanel: React.FC<LogPanelProps> = ({
   title,
   extra,
   emptyText = '暂无日志',
+  paused = false,
+  onPausedChange,
+  buffered = 0,
 }) => {
   const [keyword, setKeyword] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
   const [visibleCount, setVisibleCount] = useState(streaming ? 1 : lines.length);
   const boxRef = useRef<HTMLDivElement>(null);
+  // 记住"这次暂停是滚动触发的"还是用户点的开关：
+  // 只有滚动触发的暂停，才会在滚回底部时自动恢复；
+  // 用户手动暂停的，滚到底也不该自作主张恢复。
+  const autoPausedRef = useRef(false);
 
   // 统一成 { 文本, 配色, 时刻 } —— 下游逻辑只认这一种形状
   const rows = useMemo(() => normalize(lines), [lines]);
@@ -132,6 +151,26 @@ export const LogPanel: React.FC<LogPanelProps> = ({
     }
   }, [display.length, autoScroll]);
 
+  /**
+   * 滚动时自动暂停/恢复追踪。
+   *
+   * 为什么需要：追踪开着时新日志一来就把视口拽到底部，你正看第 300 行的报错根本读不完。
+   * 所以往上翻就自动停住（常见的终端行为），滚回底部再自动续上。
+   * 只对"滚动触发的暂停"负责 —— 用户手动点的暂停，滚回底部也不恢复。
+   */
+  const handleScroll = () => {
+    const el = boxRef.current;
+    if (!el || !onPausedChange) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (!atBottom && !paused) {
+      autoPausedRef.current = true;
+      onPausedChange(true);
+    } else if (atBottom && paused && autoPausedRef.current) {
+      autoPausedRef.current = false;
+      onPausedChange(false);
+    }
+  };
+
   const done = visibleCount >= rows.length;
 
   /** 导出/复制时把时刻拼回行首，保留时序信息 */
@@ -148,7 +187,11 @@ export const LogPanel: React.FC<LogPanelProps> = ({
           <span className="yn-logdot" style={{ background: '#febc2e' }} />
           <span className="yn-logdot" style={{ background: '#28c840' }} />
           {title ? <span className="yn-logpanel__title">{title}</span> : null}
-          {(streaming && !done) || live ? (
+          {paused ? (
+            <span className="yn-logpanel__done">
+              已暂停{buffered > 0 ? ` · 待显示 ${buffered} 行` : ''}
+            </span>
+          ) : (streaming && !done) || live ? (
             <span className="yn-logpanel__live">
               <span className="yn-logpanel__pulse" />
               LIVE
@@ -167,12 +210,29 @@ export const LogPanel: React.FC<LogPanelProps> = ({
             onChange={(e) => setKeyword(e.target.value)}
             style={{ width: 168 }}
           />
-          <Tooltip title="自动滚动到底部">
-            <Space size={4}>
-              <Switch size="small" checked={autoScroll} onChange={setAutoScroll} />
-              <Text style={{ fontSize: 12, color: '#b5bac4' }}>跟随</Text>
-            </Space>
-          </Tooltip>
+          {onPausedChange ? (
+            // 实时流场景：用「自动追踪 / 暂停追踪」一个开关说两件事 ——
+            // 要不要继续收新日志，以及（收的时候）视口是否跟着走。
+            // 与之并列的旧「跟随」开关在这里会重复，所以只在没有 onPausedChange 时显示。
+            <Tooltip title={paused ? '继续接收新日志（会补齐暂停期间的行）' : '暂停接收，方便查看已有日志'}>
+              <Space size={4}>
+                <Switch size="small" checked={!paused} onChange={(v) => {
+                  autoPausedRef.current = false;
+                  onPausedChange(!v);
+                }} />
+                <Text style={{ fontSize: 12, color: paused ? '#d48806' : '#b5bac4' }}>
+                  {paused ? '暂停追踪' : '自动追踪'}
+                </Text>
+              </Space>
+            </Tooltip>
+          ) : (
+            <Tooltip title="自动滚动到底部">
+              <Space size={4}>
+                <Switch size="small" checked={autoScroll} onChange={setAutoScroll} />
+                <Text style={{ fontSize: 12, color: '#b5bac4' }}>跟随</Text>
+              </Space>
+            </Tooltip>
+          )}
           <Tooltip title="复制全部">
             <Button
               type="text"
@@ -206,7 +266,7 @@ export const LogPanel: React.FC<LogPanelProps> = ({
         </div>
       </div>
 
-      <div className="yn-logpanel__body" ref={boxRef} style={{ height }}>
+      <div className="yn-logpanel__body" ref={boxRef} style={{ height }} onScroll={handleScroll}>
         {display.length === 0 ? (
           <div className="yn-logpanel__empty">{keyword ? '未匹配到日志行' : emptyText}</div>
         ) : (
@@ -226,13 +286,25 @@ export const LogPanel: React.FC<LogPanelProps> = ({
           type="link"
           size="small"
           icon={<VerticalAlignBottomOutlined />}
-          onClick={() => setVisibleCount(rows.length)}
-          disabled={!live && done}
+          onClick={() => {
+            setVisibleCount(rows.length);
+            // 「跳到最新」在暂停状态下也顺手恢复追踪 —— 用户的意图就是"我要看最新的"，
+            // 只滚到底但日志不再进来，等于点了个寂寞。
+            if (paused && onPausedChange) {
+              autoPausedRef.current = false;
+              onPausedChange(false);
+            }
+          }}
+          disabled={!live && done && !paused}
         >
           跳到最新
         </Button>
         <Text style={{ fontSize: 12, color: '#8c8c8c' }}>
-          {live ? `已输出 ${rows.length} 行 · 持续接收中` : `已加载 ${shown.length} / ${rows.length} 行`}
+          {paused
+            ? `已暂停 · 待显示 ${buffered} 行（点「自动追踪」补齐）`
+            : live
+              ? `已输出 ${rows.length} 行 · 持续接收中`
+              : `已加载 ${shown.length} / ${rows.length} 行`}
         </Text>
       </div>
     </div>

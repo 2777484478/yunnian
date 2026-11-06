@@ -96,7 +96,7 @@ func (c *stubCluster) IngressTLS(context.Context, integration.WorkloadRef) ([]in
 	return c.ingressCerts, c.ingressErr
 }
 
-func (c *stubCluster) PodLogs(context.Context, integration.WorkloadRef, string, string, int) (io.ReadCloser, error) {
+func (c *stubCluster) PodLogs(context.Context, integration.WorkloadRef, string, string, int, bool) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
 func (c *stubCluster) DiagnoseFailure(context.Context, integration.WorkloadRef) (*integration.FailureEvidence, error) {

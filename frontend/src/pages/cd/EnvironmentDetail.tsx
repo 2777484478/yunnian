@@ -694,12 +694,16 @@ const EnvironmentDetail: React.FC = () => {
   }, [pods, logOpen]);
 
   const podLogUrl = logService && logPod ? serviceApi.podLogStream(logService.id, logPod, logTail) : null;
-  const podLogs = useLogStream(podLogUrl, { enabled: !!podLogUrl });
+  // 自动追踪开关（默认开）。关掉后新日志不进来、只缓冲，方便安静读历史；
+  // 往上滚动会自动关掉、滚回底部自动开（见 LogPanel 的 handleScroll）。
+  const [logPaused, setLogPaused] = useState(false);
+  const podLogs = useLogStream(podLogUrl, { enabled: !!podLogUrl, paused: logPaused });
 
   const openLogs = (svc: EnvService) => {
     setLogService(svc);
     setLogPod('');
     setLogTail(500);
+    setLogPaused(false);
     setLogOpen(true);
   };
 
@@ -2172,6 +2176,9 @@ const EnvironmentDetail: React.FC = () => {
               height={420}
               streaming={false}
               live={!!podLogUrl && !podLogs.ended}
+              paused={logPaused}
+              onPausedChange={setLogPaused}
+              buffered={podLogs.buffered}
               emptyText={logPod ? (podLogs.error ? '日志流不可用' : '暂无日志输出…') : '请先选择一个 Pod'}
               title={`kubectl logs ${logPod || '<pod>'} --tail=${logTail}`}
             />

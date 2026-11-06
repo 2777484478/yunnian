@@ -218,7 +218,7 @@ func (k *K8sCluster) Pods(ctx context.Context, ref WorkloadRef) ([]PodInfo, erro
 }
 
 // PodLogs 读取某个 Pod 的日志（tail 最近 n 行）。container 为空时走 K8s 默认规则。
-func (k *K8sCluster) PodLogs(ctx context.Context, ref WorkloadRef, pod, container string, tailLines int) (io.ReadCloser, error) {
+func (k *K8sCluster) PodLogs(ctx context.Context, ref WorkloadRef, pod, container string, tailLines int, follow bool) (io.ReadCloser, error) {
 	if err := ref.validate(); err != nil {
 		return nil, err
 	}
@@ -237,6 +237,12 @@ func (k *K8sCluster) PodLogs(ctx context.Context, ref WorkloadRef, pod, containe
 	if c := strings.TrimSpace(container); c != "" {
 		opts.Container = c
 	}
+	// Follow 是"自动追踪"的开关：
+	//   - false（默认）：先给 tail 行，读完即 EOF，流随即结束；
+	//   - true：补完 tail 行后继续跟随，直到容器终止或 ctx 取消。
+	// 没有它时页面表现为"日志看着像是实时的，其实一直停在打开那一刻"。
+	// 与 TailLines 同时给是合法的：K8s 先回放 tail 行，再跟随新内容。
+	opts.Follow = follow
 	rc, err := cs.CoreV1().Pods(ref.Namespace).GetLogs(pod, opts).Stream(ctx)
 	if err != nil {
 		if apierrors.IsNotFound(err) {

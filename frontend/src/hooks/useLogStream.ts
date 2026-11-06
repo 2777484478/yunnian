@@ -36,6 +36,8 @@ export interface UseLogStreamResult {
   endReason: string;
   /** 连接异常信息（自动重连中也会置上，用于提示"正在重连"） */
   error: string;
+  /** 暂停期间缓冲、尚未并入 lines 的行数（>0 表示"有 N 行待显示"） */
+  buffered: number;
 }
 
 export interface UseLogStreamOptions {
@@ -43,23 +45,55 @@ export interface UseLogStreamOptions {
   enabled?: boolean;
   /** 最多保留多少行，防止长任务把内存吃爆。默认 5000 */
   maxLines?: number;
+  /**
+   * 暂停追踪：**连接保持不断**，新到的事件先攒在缓冲里，恢复时一次性并入。
+   *
+   * 为什么不直接断开连接再重连：重连会重新走一遍 tail（日志从头再来一遍），
+   * 重复的行混进视图，还得靠时间戳去重 —— 而时间戳并不保证唯一。
+   * 这里选"保持连接 + 缓冲"，代价是暂停期间内存里攒着行（已有 maxLines 上限）。
+   */
+  paused?: boolean;
 }
 
 export function useLogStream(
   url: string | null,
   options: UseLogStreamOptions = {},
 ): UseLogStreamResult {
-  const { enabled = true, maxLines = 5000 } = options;
+  const { enabled = true, maxLines = 5000, paused = false } = options;
 
   const [lines, setLines] = useState<LogLine[]>([]);
   const [status, setStatus] = useState<LogStatusEvent | null>(null);
   const [ended, setEnded] = useState(false);
   const [endReason, setEndReason] = useState('');
   const [error, setError] = useState('');
+  const [buffered, setBuffered] = useState(0);
 
   // 用 ref 持有上限，避免把它塞进 effect 依赖导致重连
   const maxRef = useRef(maxLines);
   maxRef.current = maxLines;
+
+  // paused 同理必须走 ref：它一变就要重跑 effect 的话，等于暂停/恢复各重连一次，
+  // 每次都会重新 tail 一遍，日志重复一大片。
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
+  // 暂停期间攒下的行；恢复时一次性并入 lines
+  const pendingRef = useRef<LogLine[]>([]);
+
+  // 恢复追踪：把暂停期间缓冲的行一次补上
+  useEffect(() => {
+    if (paused) return;
+    const queued = pendingRef.current;
+    if (queued.length === 0) {
+      setBuffered(0);
+      return;
+    }
+    pendingRef.current = [];
+    setBuffered(0);
+    setLines((prev) => {
+      const next = [...prev, ...queued];
+      return next.length > maxRef.current ? next.slice(next.length - maxRef.current) : next;
+    });
+  }, [paused]);
 
   useEffect(() => {
     if (!enabled || !url) return;
@@ -71,13 +105,26 @@ export function useLogStream(
     setEnded(false);
     setEndReason('');
     setError('');
+    pendingRef.current = [];
+    setBuffered(0);
 
     const handle = subscribeLogStream(url, {
-      onLog: (item) =>
+      onLog: (item) => {
+        // 暂停中：只攒不显示。界面停在你正在看的那一屏，恢复时再补齐。
+        if (pausedRef.current) {
+          pendingRef.current.push(item);
+          // 缓冲同样受 maxLines 约束，避免暂停很久把内存吃满
+          if (pendingRef.current.length > maxRef.current) {
+            pendingRef.current.splice(0, pendingRef.current.length - maxRef.current);
+          }
+          setBuffered(pendingRef.current.length);
+          return;
+        }
         setLines((prev) => {
           const next = prev.length >= maxRef.current ? prev.slice(prev.length - maxRef.current + 1) : prev;
           return [...next, item];
-        }),
+        });
+      },
       onStatus: setStatus,
       onEnd: (reason) => {
         setEndReason(reason);
@@ -93,5 +140,5 @@ export function useLogStream(
     return () => handle.close();
   }, [url, enabled]);
 
-  return { lines, status, ended, endReason, error };
+  return { lines, status, ended, endReason, error, buffered };
 }

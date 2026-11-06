@@ -356,7 +356,12 @@ type Cluster interface {
 	// **多容器 Pod 会被 K8s 拒绝**（原文里带着可选容器名）。要读 sidecar 或
 	// 多容器 Pod 时必须显式给名字 —— 不给就报错，不做"随便挑一个"的猜测：
 	// 挑错容器返回的日志看起来很正常，会让人以为"没问题"。
-	PodLogs(ctx context.Context, ref WorkloadRef, pod, container string, tailLines int) (io.ReadCloser, error)
+	//
+	// follow=true 时先补 tail 行，之后持续读到容器终止（等价 `kubectl logs -f`），
+	// 用于页面上"自动追踪"的日志窗。
+	// ⚠️ **批量取尾部必须传 false**：`search_service_logs`（AI 工具）只要尾部若干行
+	// 就要出结论，传 true 会让它永远读不完、把整轮对话挂住。
+	PodLogs(ctx context.Context, ref WorkloadRef, pod, container string, tailLines int, follow bool) (io.ReadCloser, error)
 	// DiagnoseFailure 采集"这个工作负载为什么没起来"的证据（只读）。
 	//
 	// 拿不到证据时必须返回 error，不能返回一个空结构体装作"没有异常证据"——
