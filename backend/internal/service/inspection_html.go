@@ -217,7 +217,7 @@ func renderInspectionHTML(
 	b.WriteString(`<div><b>数据口径</b></div>`)
 	b.WriteString(`<div>· 集群资源：巡检当时从集群实时读取（<code>` + esc(d.Env.Cluster) + `</code>）</div>`)
 	b.WriteString(`<div>· 集群证书：取 kubeconfig 里 server 的地址做 TLS 握手（等价于 <code>curl -k -v https://&lt;server&gt;:6443</code>），` +
-		`巡检当时现场读取。<b>不检查 Ingress 的业务域名证书</b></div>`)
+		`巡检当时现场读取；只检查集群证书，业务域名证书不在巡检范围内</div>`)
 	b.WriteString(`<div>· 服务状态与部署记录：平台数据库。服务的「就绪数」由平台定期同步，可能略滞后于集群</div>`)
 	if d.NodesErr != "" || d.CertsErr != "" {
 		b.WriteString(`<div class="t-warn">· 本次有项目没读到（见上方灰色说明），报告不完整</div>`)
