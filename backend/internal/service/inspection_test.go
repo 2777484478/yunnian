@@ -243,9 +243,12 @@ func TestRenderInspectionHTML_SelfContained(t *testing.T) {
 	st := inspectStats(d)
 	doc := renderInspectionHTML(d, score, level, "未发现异常", findings, st, Caller{})
 
-	for _, bad := range []string{"http://", "https://", "<link", "<script src"} {
+	// 只禁**资源引用**，不禁正文里的网址文本。
+	// 页脚要写「等价于 curl -k -v https://<server>:6443」——那是给用户看的验证命令，
+	// 不是加载外链；早年这条断言用裸 "https://" 判，会把它误判成外部依赖。
+	for _, bad := range []string{"<link", "<script src", `src="http`, `href="http`} {
 		if strings.Contains(doc, bad) {
-			t.Errorf("报告里出现了外部依赖 %q —— 下载后断网就打不开了", bad)
+			t.Errorf("报告里引用了外部资源 %q —— 下载后断网就打不开了", bad)
 		}
 	}
 	if !strings.Contains(doc, "<style>") {

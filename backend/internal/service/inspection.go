@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -269,14 +268,12 @@ func (s *CDService) collectInspection(ctx context.Context, env *model.Environmen
 		d.Nodes = st
 	}
 
-	// 证书（实时）。读不到时**不要**当成"没有证书"。
+	// 证书（实时）：只看集群 API Server 自身那一张。
 	//
-	// 采集逻辑抽到 collectCerts：一是两边（集群证书 / 业务证书）失败语义不同，
-	// 二是这样能单测钉住"两类都查"这条 —— 之前写成"先 Ingress、空才退 API Server"，
-	// 结果 Ingress 一配 TLS，集群证书就成了永久盲区。
-	certs, certsErr, certNotes := collectCerts(ctx, s.deps.Up.Cluster, env)
+	// 采集逻辑抽到 collectCerts：失败语义要显式说明（探不到 ≠ 这集群没证书），
+	// 且这里能单测钉住"不查 Ingress 业务证书"这条 —— 用户明确要求过两次。
+	certs, certsErr := collectCerts(ctx, s.deps.Up.Cluster, env)
 	d.Certs, d.CertsErr = certs, certsErr
-	d.Notes = append(d.Notes, certNotes...)
 
 	// 部署活动（平台记录）
 	since := d.Now.Add(-time.Duration(hours) * time.Hour)
@@ -326,47 +323,31 @@ func (s *CDService) probeServices(ctx context.Context, env *model.Environment, s
 	return out
 }
 
-// collectCerts 采集巡检要看的证书。**两类都查**，且失败语义分开处理。
+// collectCerts 采集巡检要看的证书 —— **只查集群 API Server 自身那一张**。
 //
-//	① 集群 API Server 自身的证书（必查、主项）
-//	   用户 2026-11-06 明确："我要的巡检是集群的证书，又不是业务的域名证书。"
-//	   这张过期 = 整个集群连不上，比任何业务域名证书都严重；对应操作是
-//	   `curl -k -v https://<server>:6443`（server 取自 kubeconfig）。
+// 用户 2026-11-06 两次明确："我要的巡检是集群的证书，又不是业务的域名证书。"
+// 所以 Ingress 引用的业务域名证书**不检查**（`Cluster.IngressTLS` 目前无人调用）。
 //
-//	② Ingress 引用的业务域名证书（附加项）
-//	   过期只影响某个域名的 HTTPS，换 Secret 即可。
+// 集群证书过期 = 平台、kubectl 与所有控制器都连不上 API Server，是整集群级别的
+// 故障；对应操作就是 `curl -k -v https://<server>:6443`（server 取自 kubeconfig）。
 //
-// ⚠️ 2026-11-06 之前的实现是"先查 Ingress，结果为空才退到 API Server"，
-// 于是 **Ingress 一旦配了 TLS，API Server 证书就永远查不到**：
-// aliyun-prd 的报告只显示了已过期 2497 天的业务证书 `aicard`，
-// 而真正要紧的 47.110.211.151:6443（2053-12 到期）一次都没查过。
+// ⚠️ 演进史（别再退回这两种写法）：
+//  1. 最初是"先查 Ingress，结果为空才退到 API Server" —— Ingress 一配 TLS，
+//     集群证书就成了永久盲区（aliyun-prd 只报了业务证书 `aicard`，
+//     真正要紧的 47.110.211.151:6443 一次都没查过）。
+//  2. 随后改成"两类都查、分开标注" —— 仍然会报出用户明确说过不要的业务证书，
+//     还会因它扣分（-30），把注意力引到他不关心的地方。
 //
-// 返回：按剩余天数升序的证书、集群证书的错误（只有这类才算全局失败）、
-// 需要写进报告口径说明的附加提示。
-func collectCerts(ctx context.Context, cl integration.Cluster, env *model.Environment) ([]integration.TLSCertInfo, string, []string) {
-	var certs []integration.TLSCertInfo
-	var notes []string
-	var certsErr string
-
-	if ap, err := cl.APIServerCert(ctx, clusterRefOf(env)); err != nil {
-		certsErr = "集群 API Server 证书没探到：" + err.Error()
-	} else if ap == nil {
-		certsErr = "集群 API Server 没有返回证书"
-	} else {
-		certs = append(certs, *ap)
+// 返回：证书（最多一张）、错误文案（探不到时必须显式说明，不能当成"这集群没证书"）。
+func collectCerts(ctx context.Context, cl integration.Cluster, env *model.Environment) ([]integration.TLSCertInfo, string) {
+	ap, err := cl.APIServerCert(ctx, clusterRefOf(env))
+	if err != nil {
+		return nil, "集群 API Server 证书没探到：" + err.Error()
 	}
-
-	if ing, err := cl.IngressTLS(ctx, workloadRefOf(env, "")); err != nil {
-		// 业务证书读不到不影响集群那一项，只记一句说明。把整个证书节判成
-		// "没读到"会让人以为连集群证书也没查。
-		notes = append(notes, "业务域名（Ingress）证书没读到："+err.Error())
-	} else {
-		certs = append(certs, ing...)
+	if ap == nil {
+		return nil, "集群 API Server 没有返回证书"
 	}
-
-	// 按剩余天数升序：评分取第一张（最差），表格也从最紧急的排起。
-	sort.SliceStable(certs, func(i, j int) bool { return certs[i].DaysLeft < certs[j].DaysLeft })
-	return certs, certsErr, notes
+	return []integration.TLSCertInfo{*ap}, ""
 }
 
 // --------------------------------------------------------------------------- 评分
@@ -554,7 +535,7 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 				Level: "critical", Kind: "cert_expired",
 				Title:   fmt.Sprintf("%s证书已过期 %d 天", scope, -worst.DaysLeft),
 				Detail:  certDetail(worst),
-				Action:  certAction(worst, true),
+				Action:  certAction(true),
 				Penalty: 30,
 			})
 		case worst.DaysLeft <= 7:
@@ -562,7 +543,7 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 				Level: "critical", Kind: "cert_expiring",
 				Title:   fmt.Sprintf("%s证书 %d 天后到期", scope, worst.DaysLeft),
 				Detail:  certDetail(worst),
-				Action:  certAction(worst, false),
+				Action:  certAction(false),
 				Penalty: 15,
 			})
 		case worst.DaysLeft <= 30:
@@ -570,7 +551,7 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 				Level: "warning", Kind: "cert_expiring",
 				Title:   fmt.Sprintf("%s证书 %d 天后到期", scope, worst.DaysLeft),
 				Detail:  certDetail(worst),
-				Action:  certAction(worst, false),
+				Action:  certAction(false),
 				Penalty: 8,
 			})
 		}
@@ -581,9 +562,9 @@ func scoreInspection(d inspectData) (int, string, []InspectFinding) {
 			}
 			findings = append(findings, InspectFinding{
 				Level: "warning", Kind: "cert_unreadable",
-				Title:  "有证书读不出来：" + c.Secret,
-				Detail: fmt.Sprintf("Ingress %s 引用了它，但读取/解析失败：%s", strings.Join(c.Ingresses, "、"), c.Err),
-				Action: "确认 Secret 是否存在、tls.crt 是否为合法 PEM。这类问题不会立刻爆，但续期时一定卡住。",
+				Title:  "集群证书读不出来",
+				Detail: fmt.Sprintf("从 kubeconfig 的 server 地址取到了证书，但解析失败：%s", c.Err),
+				Action: "确认 API Server 的 TLS 证书是否为合法 PEM。这类问题不会立刻爆，但续期时一定卡住。",
 			})
 		}
 	}
@@ -619,54 +600,34 @@ func scoreLevel(score int) string {
 	return "critical"
 }
 
-// certScope 证书来源的称谓前缀。
+// certScope 证书来源的称谓。
 //
-// 为什么必须在标题里带来源：集群证书和业务域名证书长得一模一样（都是
-// "证书 X 天后到期"），但处置动作完全不同 —— 一个要动 kube-apiserver /
-// kubeadm，另一个只要换 Ingress 引用的 Secret。不带来源等于让人猜。
-func certScope(c integration.TLSCertInfo) string {
-	switch c.Kind {
-	case "apiserver":
-		return "集群 API Server 的"
-	case "ingress":
-		return "业务域名（Ingress）的"
-	}
-	return ""
-}
+// 巡检**只检查集群 API Server 这一张**（用户 2026-11-06 明确：不检查 Ingress
+// 业务域名证书），所以固定返回"集群 API Server 的"。留这个函数是为了把口径
+// 收在一处：标题、建议、置顶提醒都用它，以后要改只改这里。
+func certScope(integration.TLSCertInfo) string { return "集群 API Server 的" }
 
-// certAction 续期动作。两类证书的处置方式不同，不能共用一句话。
+// certAction 证书续期建议。只针对集群证书 —— 它不由 Ingress 管，
+// 说成"更新 Secret"会把人引到完全错误的方向。
 //
-// 注意：这里的文案会进 HTML（后端纯文本，不解析 Markdown），不要写 **加粗**。
-func certAction(c integration.TLSCertInfo, expired bool) string {
-	if c.Kind == "apiserver" {
-		base := "这是集群自身的证书，过期后平台、kubectl 与所有控制器都连不上 API Server。" +
-			"它不由 Ingress 的 Secret 管理，改业务证书没用；" +
-			"续期方式取决于集群搭建方式（kubeadm 集群用 kubeadm certs renew 后重启 kube-apiserver）。"
-		if expired {
-			return "已经过期：" + base + "必须先恢复 API Server 证书，其它排查都建立在这之上。"
-		}
-		return base
-	}
+// 注意：文案会进 HTML（后端纯文本，不解析 Markdown），不要写 **加粗**。
+func certAction(expired bool) string {
+	base := "这是集群自身的证书，过期后平台、kubectl 与所有控制器都连不上 API Server。" +
+		"它不由 Ingress 的 Secret 管理，改业务域名证书没用；" +
+		"续期方式取决于集群搭建方式（kubeadm 集群用 kubeadm certs renew 后重启 kube-apiserver）。"
 	if expired {
-		return "立刻续期并更新这个 Secret；已过期的 HTTPS 入口在浏览器侧会直接报错。"
+		return "已经过期：" + base + "必须先恢复 API Server 证书，其它排查都建立在这之上。"
 	}
-	return "安排续期并更新对应 Secret 即可，不需要改 Ingress；若用 cert-manager，确认自动续期没被关掉。"
+	return base
 }
 
+// certDetail 证书的明细描述。只面向集群证书 —— 巡检不再看业务域名证书。
 func certDetail(c integration.TLSCertInfo) string {
-	hosts := "未标注域名"
+	hosts := "未取到地址"
 	if len(c.Hosts) > 0 {
 		hosts = strings.Join(c.Hosts, "、")
 	}
-	if c.Kind == "apiserver" {
-		// API Server 证书过期 = 整个集群连不上，比业务证书更要紧，说清楚
-		s := fmt.Sprintf("集群 API Server（%s）的证书，到期 %s", hosts, c.NotAfter.Format("2006-01-02"))
-		if c.Issuer != "" {
-			s += "，签发者 " + c.Issuer
-		}
-		return s
-	}
-	s := fmt.Sprintf("Secret %s（%s），到期 %s", c.Secret, hosts, c.NotAfter.Format("2006-01-02"))
+	s := fmt.Sprintf("集群 API Server（%s）的证书，到期 %s", hosts, c.NotAfter.Format("2006-01-02"))
 	if c.Issuer != "" {
 		s += "，签发者 " + c.Issuer
 	}

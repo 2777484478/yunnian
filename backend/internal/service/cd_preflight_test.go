@@ -45,6 +45,10 @@ type stubCluster struct {
 	// ingressCerts / ingressErr 供巡检测试注入「Ingress 业务域名证书」。
 	ingressCerts []integration.TLSCertInfo
 	ingressErr   error
+	// ingressCalls 记录 IngressTLS 被调用的次数。
+	// 用户 2026-11-06 要求巡检**不检查** Ingress 证书，测试靠它断言调用次数为 0
+	// （只看返回值测不出来：IngressTLS 返回空列表时结果一样）。
+	ingressCalls int
 }
 
 func (c *stubCluster) Describe(context.Context, integration.WorkloadRef) (*integration.WorkloadState, error) {
@@ -80,6 +84,7 @@ func (c *stubCluster) Restart(context.Context, integration.WorkloadRef) error { 
 func (c *stubCluster) Pods(context.Context, integration.WorkloadRef) ([]integration.PodInfo, error) {
 	return nil, nil
 }
+
 // APIServerCert 测试桩：默认没探到。巡检用例需要时另造数据。
 func (c *stubCluster) APIServerCert(context.Context, integration.ClusterRef) (*integration.TLSCertInfo, error) {
 	return c.apiCert, c.apiCertErr
@@ -87,6 +92,7 @@ func (c *stubCluster) APIServerCert(context.Context, integration.ClusterRef) (*i
 
 // IngressTLS 测试桩：默认没有证书。巡检用例需要时在用例里另造数据。
 func (c *stubCluster) IngressTLS(context.Context, integration.WorkloadRef) ([]integration.TLSCertInfo, error) {
+	c.ingressCalls++
 	return c.ingressCerts, c.ingressErr
 }
 

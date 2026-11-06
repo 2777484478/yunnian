@@ -63,7 +63,7 @@ func renderInspectionHTML(
 	if d.CertsErr != "" {
 		certKPI = "—"
 	}
-	b.WriteString(kpi(certKPI, "TLS 证书", pick(st.CertExpiring > 0, "warn", "")))
+	b.WriteString(kpi(certKPI, "集群证书", pick(st.CertExpiring > 0, "warn", "")))
 	b.WriteString(kpi(fmt.Sprintf("%d", st.Deploys), fmt.Sprintf("近 %d 天部署", d.Window/24), ""))
 	b.WriteString(`</div>`)
 
@@ -164,42 +164,33 @@ func renderInspectionHTML(
 		b.WriteString(fmt.Sprintf(`<div class="hint t-warn">另有 %d 个服务没能从集群探到状态（权限 / 网络 / 超时），未计入上表 —— 不等于正常。</div>`, d.ProbeFailed))
 	}
 
-	// ---------------- 证书
+	// ---------------- 集群证书
 	//
-	// 两类一起列：「集群 API Server」（主项，用户 2026-11-06 明确要看这个）
-	// 与「Ingress 业务域名」（附加）。之前是二选一 —— Ingress 配了 TLS 就
-	// 再也不查集群证书，aliyun-prd 因此漏掉了自家 API Server 那张。
-	b.WriteString(`<h2 class="sec">证书</h2>`)
+	// **只查集群 API Server 自身那一张**（用户 2026-11-06 两次明确：不检查 Ingress
+	// 业务域名证书）。所以表里没有「来源 / Secret」列 —— 只有一种来源，列出来是噪音。
+	b.WriteString(`<h2 class="sec">集群证书</h2>`)
 	if d.CertsErr != "" {
-		// CertsErr 现在只表达"集群证书没探到"，文案里已带主语，这里不再重复。
-		b.WriteString(`<div class="alert alert--muted"><b>证书体检不完整</b>` + esc(d.CertsErr) + `</div>`)
+		b.WriteString(`<div class="alert alert--muted"><b>没读到集群证书</b>` + esc(d.CertsErr) +
+			`<div class="mt6">这不代表证书没问题 —— 是这次没能从 kubeconfig 的 server 地址取到证书。</div></div>`)
 	}
-	if len(d.Certs) == 0 {
-		if d.CertsErr == "" {
-			b.WriteString(`<div class="alert alert--muted">没有可检查的证书。</div>`)
-		}
-	} else {
-		b.WriteString(`<table><thead><tr><th>来源</th><th>域名 / 地址</th><th>Secret</th><th>到期时间</th><th>剩余</th></tr></thead><tbody>`)
+	if len(d.Certs) > 0 {
+		b.WriteString(`<table><thead><tr><th>API Server 地址</th><th>签发者</th><th>到期时间</th><th>剩余</th></tr></thead><tbody>`)
 		for _, ct := range d.Certs {
-			// ⚠️ 逐个 esc 再拼 <br>：先 join 再 esc 会把换行标签转义成 &lt;br&gt;，
-			// 多域名时会原样显示出来（原实现的隐患，一并修掉）。
-			hosts := `<span class="muted">—</span>`
+			// 逐个 esc 再拼 <br>：先 join 再 esc 会把换行标签转义成 &lt;br&gt; 原样显示。
+			addr := `<span class="muted">—</span>`
 			if len(ct.Hosts) > 0 {
 				parts := make([]string, 0, len(ct.Hosts))
 				for _, h := range ct.Hosts {
 					parts = append(parts, esc(h))
 				}
-				hosts = strings.Join(parts, `<br>`)
+				addr = strings.Join(parts, `<br>`)
 			}
-			src := `Ingress`
-			secret := `<code>` + esc(ct.Secret) + `</code>`
-			if ct.Kind == "apiserver" {
-				src = `<b>集群 API Server</b>`
-				secret = `<span class="muted">—</span>`
+			issuer := `<span class="muted">—</span>`
+			if v := strings.TrimSpace(ct.Issuer); v != "" {
+				issuer = esc(v)
 			}
 			if ct.Err != "" {
-				b.WriteString(`<tr><td>` + src + `</td><td>` + hosts + `</td><td>` + secret +
-					`</td><td colspan="2"><span class="t-warn">读不出来：` + esc(ct.Err) + `</span></td></tr>`)
+				b.WriteString(`<tr><td>` + addr + `</td><td colspan="3"><span class="t-warn">读不出来：` + esc(ct.Err) + `</span></td></tr>`)
 				continue
 			}
 			left := fmt.Sprintf("%d 天", ct.DaysLeft)
@@ -212,19 +203,21 @@ func renderInspectionHTML(
 			case ct.DaysLeft <= 30:
 				cls = "dot--warn"
 			}
-			b.WriteString(`<tr><td>` + src + `</td><td>` + hosts + `</td><td>` + secret +
+			b.WriteString(`<tr><td>` + addr + `</td><td>` + issuer +
 				`</td><td>` + ct.NotAfter.Format("2006-01-02") +
 				`</td><td><span class="dot ` + cls + `"></span>` + left + `</td></tr>`)
 		}
 		b.WriteString(`</tbody></table>`)
+	} else if d.CertsErr == "" {
+		b.WriteString(`<div class="alert alert--muted">没有可检查的集群证书。</div>`)
 	}
 
 	// ---------------- 页脚：口径
 	b.WriteString(`<div class="foot">`)
 	b.WriteString(`<div><b>数据口径</b></div>`)
 	b.WriteString(`<div>· 集群资源：巡检当时从集群实时读取（<code>` + esc(d.Env.Cluster) + `</code>）</div>`)
-	b.WriteString(`<div>· 证书：<b>集群 API Server</b> 取自 kubeconfig 的 server 地址（等价于 curl -k -v），` +
-		`<b>Ingress</b> 取自 Ingress 引用的 TLS Secret；两者都是巡检当时现场握手读取</div>`)
+	b.WriteString(`<div>· 集群证书：取 kubeconfig 里 server 的地址做 TLS 握手（等价于 <code>curl -k -v https://&lt;server&gt;:6443</code>），` +
+		`巡检当时现场读取。<b>不检查 Ingress 的业务域名证书</b></div>`)
 	b.WriteString(`<div>· 服务状态与部署记录：平台数据库。服务的「就绪数」由平台定期同步，可能略滞后于集群</div>`)
 	if d.NodesErr != "" || d.CertsErr != "" {
 		b.WriteString(`<div class="t-warn">· 本次有项目没读到（见上方灰色说明），报告不完整</div>`)
@@ -355,28 +348,17 @@ func certAlertLine(d inspectData) string {
 	if w.Err != "" || w.DaysLeft > 30 {
 		return ""
 	}
-	// 集群证书与业务域名证书分开说：前者没有 Secret，而且后果是**整个集群不可访问**，
-	// 说成"HTTPS 入口坏了"会让人以为是某个域名的事。
-	if w.Kind == "apiserver" {
-		host := "未取到地址"
-		if len(w.Hosts) > 0 {
-			host = strings.Join(w.Hosts, "、")
-		}
-		if w.DaysLeft < 0 {
-			return fmt.Sprintf("集群 API Server（%s）的证书已过期 %d 天 —— 平台与 kubectl 都已经连不上集群。", host, -w.DaysLeft)
-		}
-		return fmt.Sprintf("集群 API Server（%s）的证书还有 %d 天到期（%s），过期后整个集群将无法访问。",
-			host, w.DaysLeft, w.NotAfter.Format("2006-01-02"))
-	}
-	hosts := "未标注域名"
+	// 只报集群证书：过期后果是整个集群不可访问，说法必须与业务域名证书区分开
+	// （不能写成"HTTPS 入口坏了"，那会让人以为只是某个域名的事）。
+	host := "未取到地址"
 	if len(w.Hosts) > 0 {
-		hosts = strings.Join(w.Hosts, "、")
+		host = strings.Join(w.Hosts, "、")
 	}
 	if w.DaysLeft < 0 {
-		return fmt.Sprintf("%s 的证书已过期 %d 天（Secret %s），HTTPS 入口现在就是坏的。", hosts, -w.DaysLeft, w.Secret)
+		return fmt.Sprintf("集群 API Server（%s）的证书已过期 %d 天 —— 平台与 kubectl 都已经连不上集群。", host, -w.DaysLeft)
 	}
-	return fmt.Sprintf("%s 的证书还有 %d 天到期（Secret %s，%s），请尽快续期。",
-		hosts, w.DaysLeft, w.Secret, w.NotAfter.Format("2006-01-02"))
+	return fmt.Sprintf("集群 API Server（%s）的证书还有 %d 天到期（%s），过期后整个集群将无法访问。",
+		host, w.DaysLeft, w.NotAfter.Format("2006-01-02"))
 }
 
 func inspectionCSS() string {

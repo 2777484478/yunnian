@@ -18,7 +18,7 @@ func (a *AIService) toolInspectEnvironment() aiTool {
 	return aiTool{
 		Name: "inspect_environment",
 		Description: "对某个环境做**完整健康巡检**并生成一份报告（会存档、可下载）：" +
-			"集群资源水位、服务就绪情况、TLS 证书到期时间、近期部署失败率，并给出 0-100 健康分与逐项结论。" +
+			"集群资源水位、服务就绪情况、集群 API Server 证书到期时间（不看业务域名证书）、近期部署失败率，并给出 0-100 健康分与逐项结论。" +
 			"用户说「帮我巡检一下 X 环境」「生成 X 的体检报告」「X 环境最近健康吗」时用它。" +
 			"⚠️ 它一次就能拿到全部体检信息，**不要**再用 list_env_services / get_cluster_resources 逐个凑。" +
 			"返回里 reportId 是存档编号。" +

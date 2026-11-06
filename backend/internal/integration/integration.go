@@ -366,15 +366,14 @@ type Cluster interface {
 	Nodes(ctx context.Context, ref ClusterRef) (*ClusterState, error)
 	// IngressTLS 列出该命名空间 Ingress 引用的 TLS 证书与到期时间（只读）。
 	//
-	// 巡检要用它回答"证书什么时候到期"。为什么读集群而不是探域名：
-	// 集群常在内网、域名只在集群内解析，平台未必能连上；而 Ingress→Secret
-	// 拿到的正是集群实际在用的那张证书，且不需要额外网络。
+	// ⚠️ **当前无调用方**（2026-11-06）：用户明确要求巡检只看集群证书，
+	// 不看业务域名证书，`collectCerts` 因此不再调用它。实现保留着 ——
+	// 想恢复"业务域名证书也体检"时直接接回去即可，不必重写一遍 Ingress→Secret 解析。
 	IngressTLS(ctx context.Context, ref WorkloadRef) ([]TLSCertInfo, error)
 	// APIServerCert 探测集群 API Server 自身的 TLS 证书（等价于 `curl https://<server> -k -v`）。
 	//
-	// 为什么需要它：环境里常常没有 Ingress TLS（服务走 NodePort 直连），
-	// 那时 IngressTLS 返回空列表，巡检就看不到任何证书 —— 而 API Server 证书
-	// 同样是会过期、过期就整个集群连不上的东西。
+	// 巡检的**唯一**证书来源：证书过期 = 平台、kubectl 与所有控制器都连不上集群，
+	// 是整集群级故障，比任何业务域名证书都严重。server 地址取自 kubeconfig。
 	APIServerCert(ctx context.Context, ref ClusterRef) (*TLSCertInfo, error)
 	// Ping 连通性测试。测的是**这个引用指向的集群**，所以需要 ref：
 	// 无参版本在"环境自带凭据"的场景下无法表达"测哪一个"。

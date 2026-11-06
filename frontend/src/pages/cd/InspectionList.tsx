@@ -211,7 +211,7 @@ const InspectionList: React.FC = () => {
       <PageHeader
         breadcrumb={[{ title: 'CD 环境部署' }, { title: '巡检报告' }]}
         title="巡检报告"
-        description="对某个环境做一次健康体检：集群资源、服务就绪、TLS 证书到期、近期部署，给出健康分与逐项建议。报告会存档，可下载 HTML 离线查看"
+        description="对某个环境做一次健康体检：集群资源、服务就绪、集群证书到期、近期部署，给出健康分与逐项建议。报告会存档，可下载 HTML 离线查看"
         extra={
           <Space size={8}>
             <Select
