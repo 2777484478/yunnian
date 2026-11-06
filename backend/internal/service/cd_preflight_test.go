@@ -39,6 +39,12 @@ type stubCluster struct {
 	// describeState 指定 Describe 返回什么。nil 时沿用旧行为（空状态，Exists=false）——
 	// 加这个字段是为了不动已有测试的语义。
 	describeState *integration.WorkloadState
+	// apiCert / apiCertErr 供巡检测试注入「集群 API Server 证书」。
+	apiCert    *integration.TLSCertInfo
+	apiCertErr error
+	// ingressCerts / ingressErr 供巡检测试注入「Ingress 业务域名证书」。
+	ingressCerts []integration.TLSCertInfo
+	ingressErr   error
 }
 
 func (c *stubCluster) Describe(context.Context, integration.WorkloadRef) (*integration.WorkloadState, error) {
@@ -76,12 +82,12 @@ func (c *stubCluster) Pods(context.Context, integration.WorkloadRef) ([]integrat
 }
 // APIServerCert 测试桩：默认没探到。巡检用例需要时另造数据。
 func (c *stubCluster) APIServerCert(context.Context, integration.ClusterRef) (*integration.TLSCertInfo, error) {
-	return nil, nil
+	return c.apiCert, c.apiCertErr
 }
 
 // IngressTLS 测试桩：默认没有证书。巡检用例需要时在用例里另造数据。
 func (c *stubCluster) IngressTLS(context.Context, integration.WorkloadRef) ([]integration.TLSCertInfo, error) {
-	return nil, nil
+	return c.ingressCerts, c.ingressErr
 }
 
 func (c *stubCluster) PodLogs(context.Context, integration.WorkloadRef, string, string, int) (io.ReadCloser, error) {
