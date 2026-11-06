@@ -225,9 +225,27 @@ func (k *K8sCluster) PodLogs(ctx context.Context, ref WorkloadRef, pod, containe
 	if strings.TrimSpace(pod) == "" {
 		return nil, errors.New("Pod 名不能为空")
 	}
-	cs, _, err := k.clientset(ctx, ref.ClusterRef)
+	// ⚠️ 流式请求必须用 **Timeout=0** 的客户端。
+	//
+	// `rest.Config.Timeout` 是"整个请求"的超时，对 log follow 这类长连接
+	// 表现为"到点强制断开"：实测平台配 15s 时，日志流**准时在第 15.0 秒**
+	// 收到 end（reason=finished），界面表现是"看着挺实时，十几秒后突然已结束"。
+	// 之前没暴露是因为流本来就瞬间 EOF（没开 Follow），活不到超时。
+	//
+	// 复制一份再改，不动原对象：同一个 rest.Config 可能正被别的调用持有，
+	// 原地把 Timeout 改 0 会让那些本该有超时的请求变成无限等待。
+	rc, err := k.restConfigFor(ctx, ref.ClusterRef)
 	if err != nil {
 		return nil, err
+	}
+	if rc.Timeout != 0 {
+		streamRC := rest.CopyConfig(rc)
+		streamRC.Timeout = 0
+		rc = streamRC
+	}
+	cs, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		return nil, fmt.Errorf("创建 K8s 客户端失败：%w", err)
 	}
 	opts := &corev1.PodLogOptions{}
 	if tailLines > 0 {
@@ -243,14 +261,14 @@ func (k *K8sCluster) PodLogs(ctx context.Context, ref WorkloadRef, pod, containe
 	// 没有它时页面表现为"日志看着像是实时的，其实一直停在打开那一刻"。
 	// 与 TailLines 同时给是合法的：K8s 先回放 tail 行，再跟随新内容。
 	opts.Follow = follow
-	rc, err := cs.CoreV1().Pods(ref.Namespace).GetLogs(pod, opts).Stream(ctx)
+	stream, err := cs.CoreV1().Pods(ref.Namespace).GetLogs(pod, opts).Stream(ctx)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("Pod %s 不存在（可能已被重建，请刷新后重选）", pod)
 		}
 		return nil, fmt.Errorf("读取 Pod %s 日志失败：%w", pod, err)
 	}
-	return rc, nil
+	return stream, nil
 }
 
 // Nodes 查询集群节点与容量。
