@@ -358,8 +358,18 @@ const EnvironmentDetail: React.FC = () => {
 
   // /environments/{key}/services 本身就带着该环境的全部服务，不需要再逐个拉 Pod。
   // Pod 明细在抽屉里按需取（/services/{id}/pods），避免列表页 N×M 次请求。
-  const servicesApi = useApi(() => environmentApi.services(key), [key], { enabled: !!key });
-  const services = useMemo(() => servicesApi.data ?? [], [servicesApi.data]);
+  // 首屏只取库里数据（live=0，毫秒级），表格立刻画出来；
+  // 实时状态由第二次请求（带 live=1）补齐 —— GCP 集群读一次要 5s+，
+  // 串在同一个请求里会让整页一直转圈，还容易撞后端超时被整批标成"查询失败"。
+  const servicesApi = useApi(() => environmentApi.services(key, { live: false }), [key], { enabled: !!key });
+  const liveApi = useApi(() => environmentApi.services(key), [key], { enabled: !!key });
+  const services = useMemo(() => {
+    const base = servicesApi.data ?? [];
+    const liveRows = liveApi.data;
+    if (!liveRows?.length) return base;
+    const liveMap = new Map(liveRows.map((s) => [s.id, s.live]));
+    return base.map((s) => (liveMap.has(s.id) ? { ...s, live: liveMap.get(s.id) } : s));
+  }, [servicesApi.data, liveApi.data]);
 
   const deploysApi = useApi(() => deployApi.list({ envKey: key, pageSize: 50 }), [key], { enabled: !!key });
   const envDeploys = useMemo(() => deploysApi.data?.list ?? [], [deploysApi.data]);
@@ -455,6 +465,7 @@ const EnvironmentDetail: React.FC = () => {
   const refreshAll = () => {
     envApi.refresh();
     servicesApi.refresh();
+    liveApi.refresh();
     deploysApi.refresh();
     rollbacksApi.refresh();
     resApi.refresh();
@@ -485,11 +496,15 @@ const EnvironmentDetail: React.FC = () => {
     onTick: () => {
       envApi.refreshSilent();
       servicesApi.refreshSilent();
+      liveApi.refreshSilent();
       deploysApi.refreshSilent();
       rollbacksApi.refreshSilent();
       resApi.refreshSilent();
     },
     // 任一请求还在飞就跳过这一拍，避免慢后端下滚出一串在飞请求
+    // ⚠️ 不含 liveApi：GCP 环境读一次实时状态要 5s+，比 5s 轮询间隔还长，
+    // 把它算进来会让每一拍都跳过 —— 状态列就再也不更新了。它自己由 useApi 的
+    // pending 保护，重叠也不会堆积。
     isBusy: () =>
       envApi.pendingRef.current ||
       servicesApi.pendingRef.current ||

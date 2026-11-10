@@ -95,6 +95,12 @@ type EnvServiceQuery struct {
 	Status  string
 	Type    string
 	Keyword string
+	// SkipLive 跳过"读集群实时状态"，只返回库里的数据（毫秒级）。
+	//
+	// 列表页先用它秒开，再单独拉一次 live 补齐（前端 `services(key, {live:true})`）。
+	// 原因：GCP 集群（境外）读 25 个服务的 Deployment/Pod/指标要 5s+，压在同一个
+	// 请求里，列表就一直转圈、还容易撞上 liveStates 的超时被整批标成"查询失败"。
+	SkipLive bool
 }
 
 // DeploymentQuery 部署列表查询。
@@ -847,7 +853,13 @@ func (s *CDService) EnvServices(ctx context.Context, key string, q EnvServiceQue
 	}
 	// 每个圆圈的状态必须来自集群，不能来自库里那份"纳管时按默认值写死"的记录。
 	// Pod 明细与版本历史仍然不查：那会把一次列表请求变成 3N 次下游调用。
-	liveMap := s.liveStates(ctx, e, rows)
+	//
+	// SkipLive 时整段跳过：调用方（列表页首屏）要的是"先把表格画出来"，
+	// 实时状态由第二次请求（live=1）补。见 EnvServiceQuery.SkipLive。
+	var liveMap map[uint64]*ServiceLiveDTO
+	if !q.SkipLive {
+		liveMap = s.liveStates(ctx, e, rows)
+	}
 
 	out := make([]EnvServiceDTO, 0, len(rows))
 	for i := range rows {
@@ -886,7 +898,13 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 	if len(svcs) == 0 {
 		return out
 	}
-	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	// ⚠️ 总超时 8 秒（原 4 秒）。GCP 集群（境外）读 25 个服务的 Deployment /
+	// Pod / 指标要 5s+，4 秒会让**整批**失败并显示"查询环境失败：context
+	// deadline exceeded"（2026-11-10 用户报的就是这个）。
+	//
+	// 8 秒不等于让用户等 8 秒：列表页首屏走 SkipLive（毫秒级），这一步只在
+	// 第二次请求里补状态。如果调回 4 秒，GCP 那两个环境的状态列会继续全灭。
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 
 	// 用量**先批量取一次**：整个命名空间的 Deployment / Pod / 指标各查一遍，

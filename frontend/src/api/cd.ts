@@ -193,8 +193,17 @@ export const environmentApi = {
   saveVars: (key: string, vars: EnvVar[]) => http.put<EnvVar[]>(`/environments/${key}/vars`, { vars }),
 
   /** 该环境下的服务实例（返回 {list} 信封，不是标准分页） */
-  services: async (key: string): Promise<EnvService[]> =>
-    unwrapList<EnvService>(await http.get(`/environments/${key}/services`)),
+  /**
+   * 环境内服务列表。
+   *
+   * `live: false` 只回库里数据（毫秒级）；默认 `true` 附带集群实时状态。
+   * 环境详情页分两次调：先 false 把表格画出来，再 true 补状态列 ——
+   * GCP 集群读一次要 5s+，压在同一个请求里列表会一直转圈。
+   */
+  services: async (key: string, opts?: { live?: boolean }): Promise<EnvService[]> =>
+    unwrapList<EnvService>(
+      await http.get(`/environments/${key}/services${opts?.live === false ? '?live=0' : ''}`),
+    ),
 
   /** 环境的集群资源占用（CPU/内存/节点） */
   resources: (key: string) => http.get<EnvResources>(`/environments/${key}/resources`),
