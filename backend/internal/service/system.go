@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -1781,12 +1782,50 @@ func (s *SystemService) ListPermissions(ctx context.Context) ([]PermissionDTO, e
 		return nil, errs.Internalf(err, "查询权限点失败")
 	}
 	out := make([]PermissionDTO, 0, len(rows))
+	have := make(map[string]bool, len(rows))
 	for i := range rows {
+		have[rows[i].Code] = true
 		out = append(out, PermissionDTO{
 			Code: rows[i].Code, Name: rows[i].Name, Module: rows[i].Module,
 			Description: rows[i].Description,
 		})
 	}
+
+	// 环境级查看权限 `env:view:<envKey>` 是**动态生成**的：只在保存角色权限时
+	// 才落库（见 UpdateRolePermissions）。于是权限目录里只会出现"历史上被勾过的环境"，
+	// 新环境、从没配过的环境**勾不到** —— 用户 2026-11-10 报的"我只能看到 2 个环境"
+	// 就是这个原因（环境有 5 个，权限表里只有 2 条）。
+	//
+	// 这里按当前环境全量补齐：表里已有的沿用（管理员可能改过名字），
+	// 没有的现造一条虚拟条目。不落库 —— 落库仍由保存时按需完成，
+	// 避免"打开一次权限页就写一堆行"。
+	var envs []model.Environment
+	if err := s.db(ctx).Select("env_key", "name").Order("env_key").Find(&envs).Error; err != nil {
+		return nil, errs.Internalf(err, "查询环境清单失败")
+	}
+	for i := range envs {
+		code := "env:view:" + envs[i].EnvKey
+		if have[code] || envs[i].EnvKey == "" {
+			continue
+		}
+		name := envs[i].Name
+		if name == "" {
+			name = envs[i].EnvKey
+		}
+		out = append(out, PermissionDTO{
+			Code: code, Name: "查看：" + name, Module: "environment",
+			Description: "只读该环境：服务清单、部署记录、集群实时状态",
+		})
+	}
+
+	// 补齐的条目追加在末尾，这里统一按模块+code 再排一次，
+	// 否则同一模块下会出现"先表里有的、再动态加的"那种看似乱序的排列。
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Module != out[j].Module {
+			return out[i].Module < out[j].Module
+		}
+		return out[i].Code < out[j].Code
+	})
 	return out, nil
 }
 
@@ -3213,9 +3252,10 @@ func defaultFloat(v, def float64) float64 {
 // DeleteUser 删除用户。**硬删**（`user` 表没有 deleted_at，一期就是按行删除设计的）。
 //
 // 两条防锁死约束，缺一条就可能把平台弄成没人能管：
-//  ① **不能删自己** —— 手滑一次就把自己踢出去，而且没有任何界面能救回来。
-//  ② **不能删最后一个超级管理员** —— 删完就没有人能再进"用户/角色"页，
-//     连"再把谁设成管理员"这个动作都做不了。
+//
+//	① **不能删自己** —— 手滑一次就把自己踢出去，而且没有任何界面能救回来。
+//	② **不能删最后一个超级管理员** —— 删完就没有人能再进"用户/角色"页，
+//	   连"再把谁设成管理员"这个动作都做不了。
 //
 // 删之前先清 user_role：表上没有外键，不清就会留下指向空用户的授权行。
 func (s *SystemService) DeleteUser(ctx context.Context, id uint64, c Caller) error {

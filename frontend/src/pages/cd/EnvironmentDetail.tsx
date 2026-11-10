@@ -68,7 +68,7 @@ import { ApiError, deployApi, environmentApi, rollbackApi, serviceApi } from '@/
 import type { DeployCreated } from '@/api';
 import { envResStatus, envUsage } from '@/hooks/useEnvResources';
 import type { ClusterNodeStat, EnvProjectCandidate } from '@/api/cd';
-import { canDeployOn, canRollbackOn, hasPerm } from '@/auth';
+import { canDeployOn, canRestartService, canRollbackOn, hasPerm } from '@/auth';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { useApi } from '@/hooks/useApi';
 import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
@@ -332,6 +332,9 @@ const EnvironmentDetail: React.FC = () => {
   // services 下的变更接口（redeploy / scale / restart / params / delete）路由层只要求登录，
   // 真正的权限在 handler 里 guardServiceEnv(c,"deploy",id) → 需要 deploy:{env}，否则 40300。
   const canDeploy = canDeployOn(key);
+  // 重启是独立的权限点 deploy:restart，不再沿用 deploy:{env}：
+  // 「只能发测试区」和「能不能重启」是两件事，后端也分开校验。
+  const canRestart = canRestartService();
   // 回滚是两把锁：路由要求 rollback:execute，handler 再要求 deploy:{env}（见 canRollbackOn）。
   const canRollback = canRollbackOn(key);
   // 「问 AI 助手」进的是 /ai 页面，路由守卫要求 ai:query；演示账号 ops 没有这个权限点，
@@ -1129,13 +1132,13 @@ const EnvironmentDetail: React.FC = () => {
         <Space size={2}>
           {/* 原写法是 <Tooltip><Button disabled/></Tooltip>：disabled 的 button 不派发
               鼠标事件，提示永远弹不出来。改用 DisabledTip 承接 hover。 */}
-          <DisabledTip title={canDeploy ? undefined : `当前账号没有 deploy:${key} 权限`}>
+          <DisabledTip title={canRestart ? undefined : '当前账号没有 deploy:restart 权限（重启会滚动重建 Pod）'}>
             <Button
               type="link"
               size="small"
               style={{ paddingInline: 4 }}
               icon={<SwapOutlined />}
-              disabled={!canDeploy}
+              disabled={!canRestart}
               onClick={() => doRestart(r)}
             >
               重启

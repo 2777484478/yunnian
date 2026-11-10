@@ -109,7 +109,9 @@ spec:
  */
 const ProjectManifests: React.FC<{ projectKey: string }> = ({ projectKey }) => {
   const { message } = AntApp.useApp();
-  const canWrite = hasPerm('project:write') || hasPerm('project:write:own');
+  // 写操作跟后端 `RequirePerm("k8s:manage")` 对齐（2026-11-10）。
+  // 原先按 project:write 判断：有项目写权限就能导入 YAML，而 YAML 能直接改部署形态。
+  const canWrite = hasPerm('k8s:manage');
 
   const [envFilter, setEnvFilter] = useState<string>('');
   const envsApi = useApi(() => environmentApi.list({ pageSize: 100 }), []);

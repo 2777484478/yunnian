@@ -150,12 +150,12 @@ GET /projects?page=1&pageSize=10&keyword=user&type=frontend&enabled=1&sortBy=upd
 | GET | `/projects/{key}/builds` | `build:read` | 项目构建历史 |
 | GET | `/projects/{key}/images` | `image:read` | 项目镜像版本 |
 | GET | `/projects/{key}/deployments` | `deploy:read` | 项目在各环境的部署情况 |
-| GET | `/projects/{key}/manifests` | `project:read` | **K8s 资源定义**列表（`?envKey=&kind=` 均可选） |
-| GET | `/projects/{key}/manifests/{id}` | `project:read` | 资源定义详情（含 YAML 原文） |
-| POST | `/projects/{key}/manifests` | `project:write` / `project:write:own` | 新建一份资源定义 |
-| POST | `/projects/{key}/manifests/import` | `project:write` / `project:write:own` | **批量导入**：收整个文件原文 |
-| PUT | `/projects/{key}/manifests/{id}` | `project:write` / `project:write:own` | 编辑（**无条件覆盖**，见下） |
-| DELETE | `/projects/{key}/manifests/{id}` | `project:write` / `project:write:own` | 删除平台记录（**集群里的资源不动**） |
+| GET | `/projects/{key}/manifests` | `k8s:view` | **K8s 资源定义**列表（`?envKey=&kind=` 均可选） |
+| GET | `/projects/{key}/manifests/{id}` | `k8s:view` | 资源定义详情（含 YAML 原文） |
+| POST | `/projects/{key}/manifests` | `k8s:manage` | 新建一份资源定义 |
+| POST | `/projects/{key}/manifests/import` | `k8s:manage` | **批量导入**：收整个文件原文 |
+| PUT | `/projects/{key}/manifests/{id}` | `k8s:manage` | 编辑（**无条件覆盖**，见下） |
+| DELETE | `/projects/{key}/manifests/{id}` | `k8s:manage` | 删除平台记录（**集群里的资源不动**） |
 
 > `/projects/default-build-script` 与 `/projects/test-connection` 是**静态段**，注册在 `/:key` 之前。
 > gin 的路由树本来就是静态优先，但这两条靠框架行为很容易被后人改坏，注释里写明了别动。

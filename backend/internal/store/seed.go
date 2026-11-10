@@ -375,11 +375,21 @@ var permSeed = []struct{ Code, Name, Module string }{
 	{"deploy:test", "测试区部署", "deploy"},
 	{"deploy:test,staging", "测试/预发部署", "deploy"},
 	{"deploy:approve", "部署审批", "deploy"},
+	// 重启单独一个点：`POST /services/:id/restart` 只滚动重建 Pod、不换镜像，
+	// 与"部署"是两回事，但破坏性不小（会短暂中断服务），必须有独立开关。
+	// deploy:* 会通配覆盖它（ops 自动拥有），dev 的 deploy:test,staging 不会。
+	{"deploy:restart", "重启服务", "deploy"},
 	{"deploy:*", "部署全部权限", "deploy"},
 	{"rollback:read", "查看回滚", "rollback"},
 	{"rollback:execute", "执行回滚", "rollback"},
 	{"rollback:*", "回滚全部权限", "rollback"},
 	{"log:read", "查看日志", "log"},
+	// ⚠️ K8s 资源**故意不叫 k8s:read**。
+	// readonly 角色持有 `*:read`，而 auth.Match 的后缀通配会把任何以 `:read` 结尾的
+	// 权限点都判为满足 —— 叫 k8s:read 就等于"只读用户一定能看"，而用户明确要求
+	// 开发与普通用户都看不到 K8s 资源。view/manage 不在 `*:read` 的覆盖范围内。
+	{"k8s:view", "查看 K8s 资源", "k8s"},
+	{"k8s:manage", "维护 K8s 资源", "k8s"},
 	{"audit:read", "查看审计", "audit"},
 	{"user:manage", "用户管理", "system"},
 	{"role:manage", "角色管理", "system"},
@@ -403,10 +413,13 @@ var roleSeed = []struct {
 		// ai:query 必须给：ops 能管部署、能看部署记录，而 CI 构建记录页与 CD 部署记录页的
 		// AI 归因都挂在 ai:query 上（router.go 的 /:id/ai-diagnosis 与 /ai 分组）。
 		// 缺了它，运维点自己刚失败的部署单做归因会直接 403，功能对最该用它的人不可见。
-		[]string{"env:*", "deploy:*", "rollback:*", "project:read", "build:*", "image:read", "audit:read", "log:read", "ai:query", "team:read"}},
+		[]string{"env:*", "deploy:*", "rollback:*", "project:read", "build:*", "image:read",
+			// K8s 资源是运维的活（导入 YAML / 改 Deployment 定义），开发与只读用户不该看到。
+			"k8s:view", "k8s:manage",
+			"audit:read", "log:read", "ai:query", "team:read"}},
 	{"dev", "开发", "可维护自己负责的项目、触发构建，测试/预发环境部署", 3,
 		[]string{"project:read", "project:write:own", "build:*", "deploy:test,staging", "image:read", "log:read", "team:read"}},
-	{"qa", "测试", "可触发测试区部署与重启，查看构建/部署日志", 4,
+	{"qa", "测试", "可触发测试区部署，查看构建/部署日志", 4,
 		[]string{"project:read", "build:read", "deploy:test", "log:read", "team:read"}},
 	{"readonly", "只读用户", "仅可查看所有资源，不能执行任何变更操作", 5,
 		[]string{"*:read"}},

@@ -33,6 +33,7 @@ import { BuildStatusTag, DigestText, ImageText, MethodTag, ProjectTypeTag, Servi
 import { buildApi, environmentApi, projectApi } from '@/api';
 import { useApi } from '@/hooks/useApi';
 import { useJobLogs } from '@/hooks/useJobLogs';
+import { canViewK8sResources } from '@/auth';
 import { humanDuration, humanSize } from '@/utils/format';
 import { liveFallbackText, liveReplicaTotal, liveState, liveStatusWord } from '@/utils/live';
 import type { BuildRecord, EnvService, ImageRecord } from '@/types';
@@ -624,7 +625,11 @@ const ProjectDetail: React.FC = () => {
             label: 'K8s 资源',
             children: <ProjectManifests projectKey={project.key} />,
           },
-        ]}
+          // K8s 资源是"这个服务该长什么样"的前置配置，导入 YAML 能直接改部署形态，
+          // 开发与普通用户不该看到（2026-11-10 用户要求）。
+          // 权限点用 k8s:view 而不是 k8s:read —— 只读角色的 `*:read` 会把后者一起覆盖。
+          // 注意：这里隐藏的是入口，真正的闸在路由上（RequirePerm("k8s:view")）。
+        ].filter((t) => t.key !== 'k8s' || canViewK8sResources())}
       />
 
       {/* 构建日志抽屉 */}

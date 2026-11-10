@@ -156,18 +156,22 @@ func (h *handler) registerProjects(g *gin.RouterGroup) {
 
 	// k8s 资源定义（Deployment / Service / ConfigMap …）。
 	//
-	// 权限用 project:read / project:write，**不用 project:delete** ——
-	// 删一份 YAML 定义不等于删项目，拿项目级的删除权限去管它是过重的门槛。
-	// 这一族接口这一期只读写平台库，不碰集群。
-	p.GET("/:key/manifests", middleware.RequirePerm("project:read"), h.listProjectManifests)
-	p.GET("/:key/manifests/:id", middleware.RequirePerm("project:read"), h.getProjectManifest)
-	p.POST("/:key/manifests", middleware.RequirePerm("project:write", "project:write:own"), h.createProjectManifest)
+	// 权限**独立于 project:read/project:write**（2026-11-10 用户要求）：
+	// K8s 资源是"这个服务该长什么样"的前置配置，导入 YAML 能直接改部署形态，
+	// 开发与普通用户不该看到。原来挂 project:read，导致 dev/qa/readonly
+	// 都能点开这个页签。
+	//
+	// ⚠️ 权限点故意叫 k8s:view 而不是 k8s:read —— readonly 持有 `*:read`，
+	// 后缀通配会把任何 `:read` 结尾的点判为满足，等于"只读用户一定能看"。
+	p.GET("/:key/manifests", middleware.RequirePerm("k8s:view"), h.listProjectManifests)
+	p.GET("/:key/manifests/:id", middleware.RequirePerm("k8s:view"), h.getProjectManifest)
+	p.POST("/:key/manifests", middleware.RequirePerm("k8s:manage"), h.createProjectManifest)
 	// 批量导入：一次传整个文件（多文档 / kind: List），服务端拆开逐条落库。
 	// 放在 /:key/manifests 之前不影响路由匹配（Gin 静态段优先于参数段），
 	// 但显式写在前面更不容易被后来人误读成 /manifests/{id}。
-	p.POST("/:key/manifests/import", middleware.RequirePerm("project:write", "project:write:own"), h.importProjectManifests)
-	p.PUT("/:key/manifests/:id", middleware.RequirePerm("project:write", "project:write:own"), h.updateProjectManifest)
-	p.DELETE("/:key/manifests/:id", middleware.RequirePerm("project:write", "project:write:own"), h.deleteProjectManifest)
+	p.POST("/:key/manifests/import", middleware.RequirePerm("k8s:manage"), h.importProjectManifests)
+	p.PUT("/:key/manifests/:id", middleware.RequirePerm("k8s:manage"), h.updateProjectManifest)
+	p.DELETE("/:key/manifests/:id", middleware.RequirePerm("k8s:manage"), h.deleteProjectManifest)
 }
 
 func (h *handler) registerBuilds(g *gin.RouterGroup) {
@@ -250,7 +254,10 @@ func (h *handler) registerServices(g *gin.RouterGroup) {
 	// 所以这里只要求登录，真正的校验在 handler 里做（见 guardServiceEnv）。
 	s.PUT("/:id/params", middleware.RequirePerm(), h.requireServiceVisible(), h.updateServiceParams)
 	s.POST("/:id/scale", middleware.RequirePerm(), h.requireServiceVisible(), h.scaleService)
-	s.POST("/:id/restart", middleware.RequirePerm(), h.requireServiceVisible(), h.restartService)
+	// 重启用**独立**权限点 deploy:restart，不再沿用 deploy:{env}（2026-11-10 用户要求）：
+	// 部署权限表达"能不能往这个环境发版本"，重启是另一件事（不换镜像，但会滚动重建 Pod、
+	// 短暂中断服务），要能单独开关。放在路由层而不是 handler，是因为这个判断与环境无关。
+	s.POST("/:id/restart", middleware.RequirePerm("deploy:restart"), h.requireServiceVisible(), h.restartService)
 	s.POST("/:id/redeploy", middleware.RequirePerm(), h.requireServiceVisible(), h.redeployService)
 	s.DELETE("/:id", middleware.RequirePerm(), h.requireServiceVisible(), h.deleteService)
 }

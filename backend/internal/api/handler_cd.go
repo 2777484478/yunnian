@@ -351,9 +351,8 @@ func (h *handler) restartService(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !h.guardServiceEnv(c, "deploy", id) {
-		return
-	}
+	// 权限由路由层的 deploy:restart 把关，这里不再按环境判 deploy:{env}：
+	// 后者会把"有重启权但没该环境部署权"的人一并拒掉（如只负责重启的运维）。
 	if err := h.svc.CD.RestartService(c.Request.Context(), id, caller(c)); err != nil {
 		httpx.Fail(c, err)
 		return

@@ -147,6 +147,29 @@ export const hasAnyPerm = (...codes: string[]): boolean =>
 export const canDeployOn = (envKey: string): boolean => hasPerm(`deploy:${envKey}`);
 
 /**
+ * 能否重启服务（滚动重建 Pod，不换镜像）。
+ *
+ * 与 `canDeployOn` **不是同一把锁**（2026-11-10 用户要求把重启独立出来）：
+ * 后端 `POST /services/:id/restart` 路由上挂的是 `RequirePerm("deploy:restart")`，
+ * 与环境无关；而部署看的是 `deploy:{env}`。于是"只能发测试区、不能重启"
+ * 这种组合是配得出来的，前端判据必须与后端逐字一致。
+ *
+ * `deploy:*`（ops）会通配覆盖它；`deploy:test,staging`（dev）不会。
+ */
+export const canRestartService = (): boolean => hasPerm('deploy:restart');
+
+/**
+ * 能否查看项目的 K8s 资源定义（Deployment / Service / ConfigMap）。
+ *
+ * ⚠️ 权限点叫 `k8s:view` 而不是 `k8s:read`：只读角色持的是 `*:read`，
+ * 后缀通配会把一切以 `:read` 结尾的点判为满足，那样"普通用户不能看"就落不了地。
+ */
+export const canViewK8sResources = (): boolean => hasPerm('k8s:view');
+
+/** 能否维护 K8s 资源定义（新增 / 导入 YAML / 编辑 / 删除）。 */
+export const canManageK8sResources = (): boolean => hasPerm('k8s:manage');
+
+/**
  * 能否在某环境发起回滚。后端是**两把锁**，缺一不可：
  *   1. 路由 `RequirePerm("rollback:execute")`（internal/api/router.go）；
  *   2. handler 内 `guardServiceEnv(c, "deploy", svcID)` → `deploy:{env}`。
