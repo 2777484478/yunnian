@@ -26,7 +26,6 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import type { MenuProps } from 'antd';
 import {
   AppstoreAddOutlined,
   CloudDownloadOutlined,
@@ -961,10 +960,12 @@ const EnvironmentDetail: React.FC = () => {
   };
 
   // ---------------------------------------------------------------- 服务表列
-  // ⋮ 菜单里的每一项都是"发起变更"，判据与后端 guard 逐条对应：
+  // ⋮ 菜单里的每一项都是"发起变更"，禁用条件必须与后端 guard 逐条对应，
+  // 否则只读角色点得动、发得出、最后 403。对应关系：
   //   redeploy / scale / restart / params / delete → handler 内 guardServiceEnv(c,"deploy",id)
   //   rollback                                     → 路由 rollback:execute + handler deploy:{env}
-  // 无权限的项**不渲染**（见下方 serviceColumns 的 action 列），而不是置灰。
+  const deployGuardTip = canDeploy ? undefined : `需要 deploy:${key} 权限`;
+  const rollbackGuardTip = canRollback ? undefined : `需要 rollback:execute 与 deploy:${key} 权限`;
   const serviceColumns: ColumnsType<EnvService> = [
     {
       title: '服务 / 项目',
@@ -1127,67 +1128,101 @@ const EnvironmentDetail: React.FC = () => {
       // 「部署」入口已撤（2026-11-05 用户：统一从发布拓扑部署），行内第一个动作
       // 改成「重启」—— 它是运维动作（不换镜像，只滚动重建 Pod），与"部署"是两回事。
       width: 170,
-      render: (_, r) => {
-        // 无权限的写操作**直接不渲染**（不是置灰）：用户 2026-11-10 要求开发人员只留
-        // 「日志」，重启 / 重新部署 / 回滚 / 设置参数 / 扩缩容 / 取消纳管 都不能看到。
-        // 判据与后端逐字对应：redeploy/params/scale/offline → deploy:{env}，
-        // rollback → rollback:execute + deploy:{env}，restart → deploy:restart。
-        const moreItems: MenuProps['items'] = [
-          canDeploy
-            ? { key: 'redeploy', icon: <ReloadOutlined />, label: '重新部署（当前版本）' }
-            : null,
-          canRollback
-            ? { key: 'rollback', icon: <RollbackOutlined />, label: '回滚到历史版本' }
-            : null,
-          canDeploy ? { key: 'params', icon: <SettingOutlined />, label: '设置参数' } : null,
-          canDeploy ? { key: 'scale', icon: <ExpandOutlined />, label: '扩缩容' } : null,
-          canDeploy ? { type: 'divider' } : null,
-          canDeploy
-            ? { key: 'offline', icon: <DeleteOutlined />, danger: true, label: '取消纳管' }
-            : null,
-        ].filter(Boolean) as NonNullable<MenuProps['items']>;
-        const hasMore = moreItems.length > 0;
-        return (
-          <Space size={2}>
-            {canRestart && (
-              <Button
-                type="link"
-                size="small"
-                style={{ paddingInline: 4 }}
-                icon={<SwapOutlined />}
-                onClick={() => doRestart(r)}
-              >
-                重启
-              </Button>
-            )}
+      render: (_, r) => (
+        <Space size={2}>
+          {/* 原写法是 <Tooltip><Button disabled/></Tooltip>：disabled 的 button 不派发
+              鼠标事件，提示永远弹不出来。改用 DisabledTip 承接 hover。 */}
+          <DisabledTip title={canRestart ? undefined : '当前账号没有 deploy:restart 权限（重启会滚动重建 Pod）'}>
             <Button
               type="link"
               size="small"
               style={{ paddingInline: 4 }}
-              icon={<FileTextOutlined />}
-              onClick={() => openLogs(r)}
+              icon={<SwapOutlined />}
+              disabled={!canRestart}
+              onClick={() => doRestart(r)}
             >
-              日志
+              重启
             </Button>
-            {hasMore && (
-              <Dropdown
-                menu={{
-                  items: moreItems,
-                  onClick: ({ key: k }) => {
-                    if (k === 'redeploy') doRedeploy(r);
-                    else if (k === 'rollback') openRollback(r);
-                    else if (k === 'params') openParams(r);
-                    else if (k === 'scale') openScale(r);
-                    else if (k === 'offline') doOffline(r);
-                  },
-                }}
-              >
-                <Button type="text" size="small" icon={<MoreOutlined />} />
-              </Dropdown>
-            )}
-          </Space>
-        );
-      },
+          </DisabledTip>
+          <Button type="link" size="small" style={{ paddingInline: 4 }} icon={<FileTextOutlined />} onClick={() => openLogs(r)}>
+            日志
+          </Button>
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: 'redeploy',
+                  icon: <ReloadOutlined />,
+                  // POST /services/:id/redeploy → guardServiceEnv(c,"deploy",id)
+                  disabled: !canDeploy,
+                  label: (
+                    <DisabledTip title={deployGuardTip}>
+                      <span>重新部署（当前版本）</span>
+                    </DisabledTip>
+                  ),
+                },
+                {
+                  key: 'rollback',
+                  icon: <RollbackOutlined />,
+                  // POST /rollbacks → 路由 rollback:execute + handler guardServiceEnv(c,"deploy",id)
+                  disabled: !canRollback,
+                  label: (
+                    <DisabledTip title={rollbackGuardTip}>
+                      <span>回滚到历史版本</span>
+                    </DisabledTip>
+                  ),
+                },
+                {
+                  key: 'params',
+                  icon: <SettingOutlined />,
+                  // PUT /services/:id/params → guardServiceEnv(c,"deploy",id)
+                  disabled: !canDeploy,
+                  label: (
+                    <DisabledTip title={deployGuardTip}>
+                      <span>设置参数</span>
+                    </DisabledTip>
+                  ),
+                },
+                {
+                  key: 'scale',
+                  icon: <ExpandOutlined />,
+                  // POST /services/:id/scale → guardServiceEnv(c,"deploy",id)
+                  disabled: !canDeploy,
+                  label: (
+                    <DisabledTip title={deployGuardTip}>
+                      <span>扩缩容</span>
+                    </DisabledTip>
+                  ),
+                },
+                { type: 'divider' },
+                {
+                  key: 'offline',
+                  icon: <DeleteOutlined />,
+                  danger: true,
+                  // DELETE /services/:id → guardServiceEnv(c,"deploy",id)
+                  disabled: !canDeploy,
+                  label: (
+                    <DisabledTip title={deployGuardTip}>
+                      {/* 不叫"下线"：它**不会**让服务停下来（那要用户显式改副本数）。
+                          名字与动作对不上，用户就不敢点、或者点完以为业务停了。 */}
+                      <span>取消纳管</span>
+                    </DisabledTip>
+                  ),
+                },
+              ],
+              onClick: ({ key: k }) => {
+                if (k === 'redeploy') doRedeploy(r);
+                else if (k === 'rollback') openRollback(r);
+                else if (k === 'params') openParams(r);
+                else if (k === 'scale') openScale(r);
+                else if (k === 'offline') doOffline(r);
+              },
+            }}
+          >
+            <Button type="text" size="small" icon={<MoreOutlined />} />
+          </Dropdown>
+        </Space>
+      ),
     },
   ];
 
