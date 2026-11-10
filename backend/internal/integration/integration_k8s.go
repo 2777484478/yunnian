@@ -729,18 +729,24 @@ func (k *K8sCluster) WorkloadUsages(ctx context.Context, ref ClusterRef, namespa
 	if err != nil {
 		return nil, fmt.Errorf("读取命名空间 %s 的工作负载失败：%w", namespace, err)
 	}
-	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		// ⚠️ Pod 列表读不到时**不整批失败**：Deployment 对象已经在 deps 里，
+	// ⚠️ Pod 与 metrics 各给**独立短超时**：它们只影响"负载/重启"两列，
+	// 不该把"状态"一起拖到总超时。GCP 集群（境外）实测 Pod List 偶发 6s+、
+	// metrics 偶发更久，原来共用主 ctx 时会把整页拖到 15s 超时、状态全灭。
+	podCtx, podCancel := context.WithTimeout(ctx, 4*time.Second)
+	pods, perr := cs.CoreV1().Pods(namespace).List(podCtx, metav1.ListOptions{})
+	podCancel()
+	if perr != nil {
+		// Pod 列表读不到时**不整批失败**：Deployment 对象已经在 deps 里，
 		// 副本数 / 就绪数 / 状态词都还能算出来，状态列照常显示；
 		// 丢的只是"负载（实时）"和"重启次数"。
 		//
 		// 这是刻意的降级：状态看不到是故障，负载看不到只是遗憾。
-		// GCP 集群（境外）实测偶发 `unexpected error when reading response body`，
-		// 原来这一下会把 25 个服务的状态一起打没（2026-11-10）。
+		// GCP 集群实测偶发 `unexpected error when reading response body`（2026-11-10）。
 		pods = &corev1.PodList{}
 	}
-	usage, metricsOK := k.podUsageRaw(ctx, cs, namespace)
+	metCtx, metCancel := context.WithTimeout(ctx, 2*time.Second)
+	usage, metricsOK := k.podUsageRaw(metCtx, cs, namespace)
+	metCancel()
 
 	return aggregateUsage(deps.Items, pods.Items, usage, want, metricsOK), nil
 }
