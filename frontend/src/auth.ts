@@ -171,6 +171,9 @@ export const canSetParams = (): boolean => hasPerm('deploy:params');
 /** 能否取消纳管服务（DELETE /services/:id → deploy:offline） */
 export const canOfflineService = (): boolean => hasPerm('deploy:offline');
 
+/** 能否扩缩容服务（POST /services/:id/scale → deploy:scale） */
+export const canScaleService = (): boolean => hasPerm('deploy:scale');
+
 /**
  * 能否回滚服务（POST /rollbacks → rollback:execute）。
  *

@@ -226,6 +226,11 @@ func run() error {
 	if err := store.SyncPermissionCatalog(ctx, db); err != nil {
 		log.Warn("补齐权限点失败（新增的权限点可能不可见）", "err", err)
 	}
+	// 「环境可见范围」语义从"没配=全部可见"切到"没配=全部不可见"：
+	// 给存量没有 env:view:* 的角色补齐所有环境，避免升级当天全员空白。
+	if err := store.MigrateEnvVisibility(ctx, db); err != nil {
+		log.Warn("迁移环境可见性失败（部分角色可能看不到环境）", "err", err)
+	}
 	// 团队表从存量 `project.team` 反推：新库与老库走同一套逻辑，
 	// 不会出现"界面里有 6 个团队、项目的 team 却是第 7 个"这种悬空。
 	if err := store.EnsureTeams(ctx, db); err != nil {

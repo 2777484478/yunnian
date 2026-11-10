@@ -403,18 +403,17 @@ func splitCSV(v string) []string {
 //
 // 第二个返回值 restricted 表示"是否受限制"：
 //
-//	restricted=false → 全部可见（**没有配过可见性的人走这条**）
+//	restricted=false → 全部可见（持 `*` / `env:*` 的人）
 //	restricted=true  → 只看 allowed 里的；allowed 为空 = 一个都看不到
 //
-// ⚠️ 为什么"没配过 = 全部可见"，而不是"没配过 = 看不到"：
-// 这条规则是**后加的**，存量角色（ops / dev / qa / readonly）身上都没有
-// `env:view:*`。若按"无权限即不可见"处理，升级当天所有人打开平台会是一片空白 ——
-// 那不是"更安全"，是把平台弄瞎了。要收紧就显式配，配了才生效。
+// ⚠️ 2026-11-10 语义反转：原来是"没配过 = 全部可见"，现改为"没配过 = 全部不可见"。
+// 原因：权限页现在有「环境可见范围」显式勾选，用户要"没勾就是看不到"。
+// 为避免升级当天存量角色集体失明，启动时 MigrateEnvVisibility 会给存量角色补齐 env:view:*。
 //
 // 权限点形态：
 //   - `*` 或 `env:*`        → 全部可见
 //   - `env:view:test` 等    → 只这些（可多个）
-//   - 一个都没有             → 全部可见（见上）
+//   - 一个都没有             → 全部不可见（见上）
 func (c Caller) VisibleEnvKeys() (allowed []string, restricted bool) {
 	if c.User == nil {
 		return nil, false
@@ -429,7 +428,56 @@ func (c Caller) VisibleEnvKeys() (allowed []string, restricted bool) {
 		}
 	}
 	if len(keys) == 0 {
+		return []string{}, true
+	}
+	return keys, true
+}
+
+// deployFuncSuffixes 是 deploy: 前缀下**功能点**（非环境）的后缀集合。
+// 环境级 deploy 权限是 `deploy:<envKey>`（如 deploy:test-152），而功能点是
+// deploy:read / deploy:approve / deploy:restart / deploy:redeploy / deploy:params /
+// deploy:offline / deploy:scale。DeployableEnvKeys 用它把两者分开。
+var deployFuncSuffixes = map[string]bool{
+	"read": true, "approve": true, "restart": true, "redeploy": true,
+	"params": true, "offline": true, "scale": true,
+}
+
+// DeployableEnvKeys 返回当前用户**可部署**的环境 key（发布拓扑里展示哪些圈）。
+//
+// 规则与 VisibleEnvKeys 一致，只是权限点前缀换成 deploy:：
+//   - `*` 或 `deploy:*`      → 全部可部署
+//   - `deploy:test-152` 等   → 只这些（可多个；兼容枚举 deploy:test,staging）
+//   - 一个都没有             → 空（拓扑不展示圈）
+//
+// 用户 2026-11-10 拍板：发布拓扑里的「圈」= 可部署环境，勾了才展示、不勾不展示。
+func (c Caller) DeployableEnvKeys() (allowed []string, restricted bool) {
+	if c.User == nil {
 		return nil, false
+	}
+	if c.User.HasAnyPerm("*", "deploy:*") {
+		return nil, false
+	}
+	var keys []string
+	for _, p := range c.User.Permissions {
+		rest, ok := strings.CutPrefix(p, "deploy:")
+		if !ok || rest == "" || rest == "*" {
+			continue
+		}
+		if strings.Contains(rest, ",") {
+			for _, item := range strings.Split(rest, ",") {
+				if item = strings.TrimSpace(item); item != "" && !deployFuncSuffixes[item] {
+					keys = append(keys, item)
+				}
+			}
+			continue
+		}
+		if !deployFuncSuffixes[rest] {
+			keys = append(keys, rest)
+		}
+	}
+	keys = dedupeStrings(keys)
+	if len(keys) == 0 {
+		return []string{}, true
 	}
 	return keys, true
 }

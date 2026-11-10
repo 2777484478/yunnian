@@ -151,6 +151,8 @@ export interface EnvQuery {
   keyword?: string;
   page?: number;
   pageSize?: number;
+  /** 环境过滤口径：'deploy' = 按可部署环境（发布拓扑用），缺省按环境可见范围 */
+  visibility?: 'deploy' | string;
 }
 
 export const environmentApi = {

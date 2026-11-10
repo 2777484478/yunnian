@@ -68,7 +68,7 @@ import { ApiError, deployApi, environmentApi, rollbackApi, serviceApi } from '@/
 import type { DeployCreated } from '@/api';
 import { envResStatus, envUsage } from '@/hooks/useEnvResources';
 import type { ClusterNodeStat, EnvProjectCandidate } from '@/api/cd';
-import { canDeployOn, canRestartService, canRedeployService, canSetParams, canOfflineService, canRollback as canRollbackGlobal, hasPerm } from '@/auth';
+import { canRestartService, canRedeployService, canSetParams, canScaleService, canOfflineService, canRollback as canRollbackGlobal, hasPerm } from '@/auth';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { useApi } from '@/hooks/useApi';
 import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
@@ -328,16 +328,17 @@ const EnvironmentDetail: React.FC = () => {
     message.error(e instanceof ApiError ? e.message : fallback);
 
   const canWrite = hasPerm('env:write');
-  // 判据与后端路由逐字对应（2026-11-10 拆成独立功能点）：
-  //   redeploy → deploy:redeploy；restart → deploy:restart；params → deploy:params；
-  //   offline → deploy:offline；rollback → rollback:execute。
-  // 只有「扩缩容」（scale）还留在 deploy:{env}（未拆进功能勾选）。
-  const canDeploy = canDeployOn(key); // 仅「扩缩容」用
+  // 判据与后端路由逐字对应（2026-11-10 拆成独立功能点，7 项）：
+  //   restart → deploy:restart；日志 → log:read；redeploy → deploy:redeploy；
+  //   rollback → rollback:execute；params → deploy:params；scale → deploy:scale；
+  //   offline → deploy:offline。
   const canRestart = canRestartService();
+  const canLog = hasPerm('log:read');
   const canRedeploy = canRedeployService();
-  const canParams = canSetParams();
-  const canOffline = canOfflineService();
   const canRollback = canRollbackGlobal();
+  const canParams = canSetParams();
+  const canScale = canScaleService();
+  const canOffline = canOfflineService();
   // 「问 AI 助手」进的是 /ai 页面，路由守卫要求 ai:query；演示账号 ops 没有这个权限点，
   // 不门控就会落到 403 空壳页。
   const canAskAI = hasPerm('ai:query');
@@ -962,11 +963,11 @@ const EnvironmentDetail: React.FC = () => {
 
   // ---------------------------------------------------------------- 服务表列
   // ⋮ 菜单里的每一项都是"发起变更"，判据与后端路由逐条对应（2026-11-10 拆成独立功能点）：
-  //   redeploy → deploy:redeploy；params → deploy:params；offline → deploy:offline；
-  //   rollback → rollback:execute；scale → deploy:{env}。
-  const deployGuardTip = canDeploy ? undefined : `需要 deploy:${key} 权限`;
+  //   redeploy → deploy:redeploy；params → deploy:params；scale → deploy:scale；
+  //   rollback → rollback:execute；offline → deploy:offline。
   const redeployGuardTip = canRedeploy ? undefined : '需要 deploy:redeploy 权限';
   const paramsGuardTip = canParams ? undefined : '需要 deploy:params 权限';
+  const scaleGuardTip = canScale ? undefined : '需要 deploy:scale 权限';
   const offlineGuardTip = canOffline ? undefined : '需要 deploy:offline 权限';
   const rollbackGuardTip = canRollback ? undefined : '需要 rollback:execute 权限';
   const serviceColumns: ColumnsType<EnvService> = [
@@ -1147,9 +1148,18 @@ const EnvironmentDetail: React.FC = () => {
               重启
             </Button>
           </DisabledTip>
-          <Button type="link" size="small" style={{ paddingInline: 4 }} icon={<FileTextOutlined />} onClick={() => openLogs(r)}>
-            日志
-          </Button>
+          <DisabledTip title={canLog ? undefined : '当前账号没有 log:read 权限'}>
+            <Button
+              type="link"
+              size="small"
+              style={{ paddingInline: 4 }}
+              icon={<FileTextOutlined />}
+              disabled={!canLog}
+              onClick={() => openLogs(r)}
+            >
+              日志
+            </Button>
+          </DisabledTip>
           <Dropdown
             menu={{
               items: [
@@ -1189,10 +1199,10 @@ const EnvironmentDetail: React.FC = () => {
                 {
                   key: 'scale',
                   icon: <ExpandOutlined />,
-                  // POST /services/:id/scale → deploy:{env}（扩缩容未拆进功能勾选）
-                  disabled: !canDeploy,
+                  // POST /services/:id/scale → deploy:scale
+                  disabled: !canScale,
                   label: (
-                    <DisabledTip title={deployGuardTip}>
+                    <DisabledTip title={scaleGuardTip}>
                       <span>扩缩容</span>
                     </DisabledTip>
                   ),

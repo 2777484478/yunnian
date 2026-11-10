@@ -1679,13 +1679,19 @@ func (s *SystemService) UpdateRolePermissions(ctx context.Context, code string, 
 		return nil, errs.Invalid("将角色权限清空会影响该角色下所有用户，请显式确认（allowEmpty=true）")
 	}
 
-	// ⚠️ 动态权限点：`env:view:<envKey>` 是按环境生成的，不预先在 permSeed 里登记。
-	// 保存前先把缺的补进 permission 表 —— 否则会被下面"权限点必须存在"的校验直接拒掉，
-	// 表现是"在角色页选了环境 → 保存报错"，而用户完全看不出为什么。
-	// 名字带环境名，好在权限清单里读得懂（如「查看：阿里云预生产环境」）。
+	// ⚠️ 动态权限点：`env:view:<envKey>` 与 `deploy:<envKey>` 是按环境生成的，不预先在
+	// permSeed 里登记。保存前先把缺的补进 permission 表 —— 否则会被下面"权限点必须存在"
+	// 的校验直接拒掉。名字带环境名，好在权限清单里读得懂。
+	// deploy 前缀里要排除功能点（read/approve/restart/redeploy/params/offline/scale）与
+	// 枚举（deploy:test,staging），那些在 permSeed 里已有、不该按环境补。
 	for _, code := range dedupeStrings(in.Perms) {
-		rest, ok := strings.CutPrefix(code, "env:view:")
-		if !ok || rest == "" {
+		var envKey, module, namePrefix string
+		if rest, ok := strings.CutPrefix(code, "env:view:"); ok && rest != "" {
+			envKey, module, namePrefix = rest, "environment", "查看："
+		} else if rest, ok := strings.CutPrefix(code, "deploy:"); ok && rest != "" &&
+			!deployFuncSuffixes[rest] && !strings.Contains(rest, ",") {
+			envKey, module, namePrefix = rest, "deploy", "部署："
+		} else {
 			continue
 		}
 		var cnt int64
@@ -1695,13 +1701,13 @@ func (s *SystemService) UpdateRolePermissions(ctx context.Context, code string, 
 		if cnt > 0 {
 			continue
 		}
-		name := rest
+		name := envKey
 		var env model.Environment
-		if err := s.db(ctx).Where("env_key = ?", rest).First(&env).Error; err == nil && env.Name != "" {
+		if err := s.db(ctx).Where("env_key = ?", envKey).First(&env).Error; err == nil && env.Name != "" {
 			name = env.Name
 		}
 		if err := s.db(ctx).Create(&model.Permission{
-			Code: code, Name: "查看：" + name, Module: "environment",
+			Code: code, Name: namePrefix + name, Module: module,
 		}).Error; err != nil {
 			// 并发下另一个请求刚插进去，跳过即可
 			continue

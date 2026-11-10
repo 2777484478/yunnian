@@ -41,6 +41,9 @@ type EnvironmentQuery struct {
 	PageSize int
 	SortBy   string
 	Order    string
+	// Visibility 环境过滤口径：默认空 = 按「环境可见范围」(env:view)；"deploy" = 按「可部署环境」
+	// (deploy:<env>，发布拓扑用)。用户 2026-11-10 拍板两者分开管理。
+	Visibility string
 }
 
 // EnvironmentInput 环境新建/编辑入参。
@@ -227,9 +230,16 @@ func (s *CDService) ListEnvironments(ctx context.Context, q EnvironmentQuery, c 
 	column, desc := pq.Normalize(envSortColumns, "created_at")
 
 	db := s.db(ctx).Model(&model.Environment{})
-	// 环境可见性：配了 `env:view:<key>` 的人只看得见那几台。
-	// 规则见 VisibleEnvKeys —— **没配过的人保持全部可见**（向后兼容，否则所有存量角色会突然一片空白）。
-	if allowed, restricted := c.VisibleEnvKeys(); restricted {
+	// 环境过滤口径：deploy = 按「可部署环境」过滤（发布拓扑）；默认按「环境可见范围」过滤。
+	if q.Visibility == "deploy" {
+		if allowed, restricted := c.DeployableEnvKeys(); restricted {
+			if len(allowed) == 0 {
+				db = db.Where("1 = 0")
+			} else {
+				db = db.Where("env_key IN ?", allowed)
+			}
+		}
+	} else if allowed, restricted := c.VisibleEnvKeys(); restricted {
 		if len(allowed) == 0 {
 			db = db.Where("1 = 0")
 		} else {

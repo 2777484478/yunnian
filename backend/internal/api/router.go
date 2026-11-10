@@ -254,7 +254,7 @@ func (h *handler) registerServices(g *gin.RouterGroup) {
 	// 参数 / 重新部署 / 取消纳管 与「重启」一样改成独立点，不再沿用 deploy:{env}——
 	// deploy:{env} 只留给「发新版」（POST /deployments）与「扩缩容」（scale 未拆进功能勾选）。
 	s.PUT("/:id/params", middleware.RequirePerm("deploy:params"), h.requireServiceVisible(), h.updateServiceParams)
-	s.POST("/:id/scale", middleware.RequirePerm(), h.requireServiceVisible(), h.scaleService)
+	s.POST("/:id/scale", middleware.RequirePerm("deploy:scale"), h.requireServiceVisible(), h.scaleService)
 	// 重启用**独立**权限点 deploy:restart，不再沿用 deploy:{env}（2026-11-10 用户要求）：
 	// 部署权限表达"能不能往这个环境发版本"，重启是另一件事（不换镜像，但会滚动重建 Pod、
 	// 短暂中断服务），要能单独开关。放在路由层而不是 handler，是因为这个判断与环境无关。

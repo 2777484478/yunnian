@@ -385,6 +385,7 @@ var permSeed = []struct{ Code, Name, Module string }{
 	// "服务操作"是两类，不是拓扑和环境两套不同的点）。
 	{"deploy:redeploy", "重新部署", "deploy"},
 	{"deploy:params", "设置参数", "deploy"},
+	{"deploy:scale", "扩缩容", "deploy"},
 	{"deploy:offline", "取消纳管", "deploy"},
 	{"deploy:*", "部署全部权限", "deploy"},
 	{"rollback:read", "查看回滚", "rollback"},

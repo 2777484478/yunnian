@@ -19,7 +19,7 @@ func TestAssertToolEnvVisible(t *testing.T) {
 	}{
 		{"超管（*）不受限", []string{"*"}, "prod", true},
 		{"env:* 不受限", []string{"env:*"}, "prod", true},
-		{"没配可见性 → 全部可见（兼容存量角色）", []string{"ai:query", "deploy:read"}, "prod", true},
+		{"没配可见性 → 全部不可见（2026-11-10 语义反转）", []string{"ai:query", "deploy:read"}, "prod", false},
 		{"配了 test-152，查 test-152 放行", []string{"ai:query", "env:view:test-152"}, "test-152", true},
 		{"配了 test-152，查 prod 拒绝", []string{"ai:query", "env:view:test-152"}, "prod", false},
 		{"配了两个，第二个放行", []string{"env:view:test-152", "env:view:staging"}, "staging", true},
@@ -40,12 +40,51 @@ func TestAssertToolEnvVisible(t *testing.T) {
 	}
 }
 
-// TestVisibleEnvKeys_NoConfigMeansAll 钉住那条保命条款：
-// **一个 env:view 都没配 = 全部可见**。改成"没配就看不到"会让升级当天全员空白。
-func TestVisibleEnvKeys_NoConfigMeansAll(t *testing.T) {
+// TestVisibleEnvKeys_NoConfigMeansNone 钉住新语义：
+// **一个 env:view 都没配 = 全部不可见**（2026-11-10 语义反转，升级靠 MigrateEnvVisibility 兜底）。
+func TestVisibleEnvKeys_NoConfigMeansNone(t *testing.T) {
 	c := Caller{User: &auth.CurrentUser{Permissions: []string{"deploy:read", "ai:query"}}}
 	allowed, restricted := c.VisibleEnvKeys()
-	if restricted {
-		t.Fatalf("没配 env:view 时不应限制，实际 restricted=true allowed=%v", allowed)
+	if !restricted || len(allowed) != 0 {
+		t.Fatalf("没配 env:view 时应 restricted=true 且为空，实际 restricted=%v allowed=%v", restricted, allowed)
+	}
+}
+
+// TestDeployableEnvKeys 发布拓扑的「可部署环境」判断：deploy:<env> 勾了才展示圈。
+func TestDeployableEnvKeys(t *testing.T) {
+	cases := []struct {
+		name      string
+		perms     []string
+		wantAll   bool
+		want      []string
+	}{
+		{"超管 deploy:* 全部可部署", []string{"deploy:*"}, true, nil},
+		{"枚举 deploy:test,staging 拆成两个", []string{"deploy:test,staging"}, false, []string{"test", "staging"}},
+		{"单个 deploy:test-152", []string{"deploy:test-152"}, false, []string{"test-152"}},
+		{"功能点不算环境（deploy:read/restart）", []string{"deploy:read", "deploy:restart"}, false, nil},
+		{"没配 → 空（拓扑不展示圈）", []string{"env:read", "log:read"}, false, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Caller{User: &auth.CurrentUser{Permissions: tc.perms}}
+			allowed, restricted := c.DeployableEnvKeys()
+			if tc.wantAll {
+				if restricted {
+					t.Fatalf("期望全部可部署（restricted=false），实际 restricted=true allowed=%v", allowed)
+				}
+				return
+			}
+			if !restricted {
+				t.Fatalf("期望受限，实际 unrestricted")
+			}
+			if len(allowed) != len(tc.want) {
+				t.Fatalf("期望 %v，实际 %v", tc.want, allowed)
+			}
+			for i := range tc.want {
+				if allowed[i] != tc.want[i] {
+					t.Fatalf("期望 %v，实际 %v", tc.want, allowed)
+				}
+			}
+		})
 	}
 }

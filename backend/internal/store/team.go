@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -90,6 +92,85 @@ func findAdded(added []model.Permission, code string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// MigrateEnvVisibility 把「环境可见范围」语义从"没配过=全部可见"切到"没配过=全部不可见"。
+//
+// 切换后，身上没有任何 `env:view:*`（也没有 `*` / `env:*`）的角色会突然什么都看不到。
+// 这个迁移给这些角色补齐**所有**未删除环境的 `env:view:<key>`（等价于"全部可见"），
+// 保证升级当天不空白。幂等：已有 env:view:* 的角色不动，缺的权限点按需建、已有关联跳过。
+func MigrateEnvVisibility(ctx context.Context, db *gorm.DB) error {
+	var envs []model.Environment
+	if err := db.WithContext(ctx).Select("env_key", "name").Where("deleted_at IS NULL AND env_key <> ''").Find(&envs).Error; err != nil {
+		return fmt.Errorf("读取环境清单失败: %w", err)
+	}
+	if len(envs) == 0 {
+		return nil
+	}
+
+	var roles []model.Role
+	if err := db.WithContext(ctx).Find(&roles).Error; err != nil {
+		return fmt.Errorf("读取角色失败: %w", err)
+	}
+
+	for _, role := range roles {
+		var codes []string
+		if err := db.WithContext(ctx).Table("permission").
+			Joins("JOIN role_permission rp ON rp.permission_id = permission.id").
+			Where("rp.role_id = ?", role.ID).
+			Pluck("permission.code", &codes).Error; err != nil {
+			return fmt.Errorf("读取角色 %s 权限失败: %w", role.Code, err)
+		}
+		skip := false
+		for _, code := range codes {
+			if code == "*" || code == "env:*" || strings.HasPrefix(code, "env:view:") {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		if err := grantAllEnvViews(ctx, db, role.ID, envs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// grantAllEnvViews 给角色补齐所有环境的 env:view:<key>（权限点不存在则先建）。
+func grantAllEnvViews(ctx context.Context, db *gorm.DB, roleID uint64, envs []model.Environment) error {
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, env := range envs {
+			code := "env:view:" + env.EnvKey
+			name := env.Name
+			if name == "" {
+				name = env.EnvKey
+			}
+			var perm model.Permission
+			err := tx.Where("code = ?", code).First(&perm).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				perm = model.Permission{Code: code, Name: "查看：" + name, Module: "environment"}
+				if err := tx.Create(&perm).Error; err != nil {
+					return fmt.Errorf("建权限点 %s 失败: %w", code, err)
+				}
+			} else if err != nil {
+				return fmt.Errorf("查权限点 %s 失败: %w", code, err)
+			}
+			var n int64
+			if err := tx.Model(&model.RolePermission{}).
+				Where("role_id = ? AND permission_id = ?", roleID, perm.ID).Count(&n).Error; err != nil {
+				return err
+			}
+			if n > 0 {
+				continue
+			}
+			if err := tx.Create(&model.RolePermission{RoleID: roleID, PermissionID: perm.ID}).Error; err != nil {
+				return fmt.Errorf("给角色授予 %s 失败: %w", code, err)
+			}
+		}
+		return nil
+	})
 }
 
 // EnsureTeams 确保 team 表里有**当前项目实际用到**的团队。

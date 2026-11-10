@@ -15,13 +15,14 @@ import (
 func (h *handler) listEnvironments(c *gin.Context) {
 	q := pageQuery(c)
 	pq, list, total, err := h.svc.CD.ListEnvironments(c.Request.Context(), service.EnvironmentQuery{
-		Keyword:  q.Keyword,
-		Status:   c.Query("status"),
-		Enabled:  optBool(c, "enabled"),
-		Page:     q.Page,
-		PageSize: q.PageSize,
-		SortBy:   q.SortBy,
-		Order:    q.Order,
+		Keyword:    q.Keyword,
+		Status:     c.Query("status"),
+		Enabled:    optBool(c, "enabled"),
+		Visibility: c.Query("visibility"),
+		Page:       q.Page,
+		PageSize:   q.PageSize,
+		SortBy:     q.SortBy,
+		Order:      q.Order,
 	}, caller(c))
 	if err != nil {
 		httpx.Fail(c, err)
@@ -315,9 +316,7 @@ func (h *handler) scaleService(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !h.guardServiceEnv(c, "deploy", id) {
-		return
-	}
+	// 权限由路由层的 deploy:scale 把关（2026-11-10 拆成独立功能点）。
 	var in struct {
 		Replicas int    `json:"replicas" binding:"required,min=0,max=200"`
 		Reason   string `json:"reason" binding:"omitempty,max=255"`

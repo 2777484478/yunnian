@@ -39,20 +39,27 @@ const MODULE_LABEL: Record<string, string> = {
 };
 
 /**
- * 「环境操作功能」里的五项（用户 2026-11-10 拍板：环境可见范围下面再分功能勾选）。
+ * 「环境操作功能」里的七项（用户 2026-11-10 拍板：环境详情服务列表里的操作逐个可勾）。
  *
  * 这些是环境详情「服务列表」的操作，按功能拆成独立权限点；它们**从常规分组里摘出来**，
  * 单独在这一个分区里勾选（对应后端 router.go 里 /services 的变更类路由）。
- * 顺序按用户口述：重启 / 取消纳管 / 参数 / 回滚 / 重新部署。
+ * 顺序对齐服务列表：重启 / 日志 / 重新部署 / 回滚 / 设置参数 / 扩缩容 / 取消纳管。
  */
 const SERVICE_FUNCS: { code: string; name: string }[] = [
   { code: 'deploy:restart', name: '重启' },
-  { code: 'deploy:offline', name: '取消纳管' },
-  { code: 'deploy:params', name: '参数' },
-  { code: 'rollback:execute', name: '回滚' },
+  { code: 'log:read', name: '日志' },
   { code: 'deploy:redeploy', name: '重新部署' },
+  { code: 'rollback:execute', name: '回滚' },
+  { code: 'deploy:params', name: '设置参数' },
+  { code: 'deploy:scale', name: '扩缩容' },
+  { code: 'deploy:offline', name: '取消纳管' },
 ];
 const SERVICE_FUNC_CODES = new Set(SERVICE_FUNCS.map((f) => f.code));
+
+// deploy: 前缀下「非环境」的后缀：通配 * / 功能点 read、approve、以及 7 项操作功能里的
+// deploy 系点（restart/redeploy/params/scale/offline）。除此以外（test、test-152、
+// pre-aliyun…）都算「环境类 deploy」，由「可部署环境」多选表达。
+const DEPLOY_NON_ENV_SUFFIXES = new Set(['*', 'read', 'approve', 'restart', 'redeploy', 'params', 'scale', 'offline']);
 
 /**
  * 角色权限管理。
@@ -105,14 +112,41 @@ const SystemRoles: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
+  /**
+   * 可部署环境：与「可见范围」同款多选，存 `deploy:<envKey>`（发布拓扑里展示哪些圈）。
+   * 兼容老写法 deploy:test,staging → 拆成 [test, staging] 勾上。
+   */
+  const [deployDraft, setDeployDraft] = useState<string[]>([]);
+
+  useEffect(() => {
+    const r = roles.find((x) => x.key === active);
+    if (!r || r.perms.includes('*') || r.perms.includes('deploy:*')) {
+      setDeployDraft([]);
+      return;
+    }
+    const keys: string[] = [];
+    r.perms.forEach((p) => {
+      if (!p.startsWith('deploy:')) return;
+      p.slice('deploy:'.length).split(',').forEach((k) => {
+        const t = k.trim();
+        if (t && !DEPLOY_NON_ENV_SUFFIXES.has(t)) keys.push(t);
+      });
+    });
+    setDeployDraft([...new Set(keys)]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
   /** 合并成最终要提交的权限点数组 */
   const mergedPerms = useMemo(() => {
-    // 「环境可见范围」由 visibleDraft 统一生成 env:view:<key>，先从 draft 里摘掉避免两份写法。
+    // 环境类的 deploy:<env> 由 deployDraft 统一生成，先从 draft 里摘掉，避免两份写法。
+    const isEnvDeploy = (p: string) =>
+      p.startsWith('deploy:') && !DEPLOY_NON_ENV_SUFFIXES.has(p.slice('deploy:'.length));
     return [
-      ...draft.filter((p) => !p.startsWith('env:view:')),
+      ...draft.filter((p) => !p.startsWith('env:view:') && !isEnvDeploy(p)),
       ...visibleDraft.map((k) => `env:view:${k}`),
+      ...deployDraft.map((k) => `deploy:${k}`),
     ];
-  }, [draft, visibleDraft]);
+  }, [draft, visibleDraft, deployDraft]);
 
   const load = async () => {
     setLoading(true);
@@ -140,9 +174,22 @@ const SystemRoles: React.FC = () => {
   const isSuper = !!role?.perms.includes('*');
   const dirty = useMemo(() => {
     if (!role || isSuper) return false;
-    // 「环境操作功能」与「环境可见范围」都以 draft/visibleDraft 的原始值参与比对，
-    // 没有"一个勾选项拆成多个 code"的映射了，直接排序后比字符串即可。
-    const norm = (ps: string[]) => [...ps].sort().join(',');
+    // 归一化环境类 deploy：老写法 deploy:test,staging 在「可部署环境」里被拆成
+    // deploy:test + deploy:staging，合并回去字符串不同但语义相同，比较前两边都拆平。
+    const norm = (ps: string[]) => {
+      const out = new Set<string>();
+      ps.forEach((p) => {
+        if (p.startsWith('deploy:') && !DEPLOY_NON_ENV_SUFFIXES.has(p.slice('deploy:'.length))) {
+          p.slice('deploy:'.length).split(',').forEach((k) => {
+            const t = k.trim();
+            if (t) out.add('deploy:' + t);
+          });
+        } else {
+          out.add(p);
+        }
+      });
+      return [...out].sort().join(',');
+    };
     return norm(mergedPerms) !== norm(role.perms);
   }, [mergedPerms, role, isSuper]);
 
@@ -150,10 +197,10 @@ const SystemRoles: React.FC = () => {
     const q = kw.trim().toLowerCase();
     const map = new Map<string, PermissionPoint[]>();
     points
-      // 「环境操作功能」的五项由上面的功能勾选表达，不在常规分组里再出现一次。
+      // 「环境操作功能」的七项由上面的功能勾选表达，不在常规分组里再出现一次。
       .filter((p) => !SERVICE_FUNC_CODES.has(p.code))
-      // 环境类的 deploy:<envKey>（deploy:test / deploy:test,staging 等老写法）由发版
-      // 环境闸（deploy:* 通配）或历史数据承载，也不再逐项列出，避免"部署里面看不懂"。
+      // 环境类的 deploy:<envKey>（deploy:test / deploy:test,staging 等老写法）由
+      // 「可部署环境」多选表达，也不再逐项列出。
       .filter(
         (p) =>
           !(p.code.startsWith('deploy:') && p.code !== 'deploy:read' && p.code !== 'deploy:approve' && !p.code.startsWith('deploy:*')),
@@ -334,7 +381,7 @@ const SystemRoles: React.FC = () => {
                       <span style={{ width: 3, height: 12, borderRadius: 2, background: '#1677ff', opacity: 0.7 }} />
                       <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>环境可见范围</span>
                       <Text type="secondary" style={{ fontSize: 11.5 }}>
-                        没配过 = 全部可见；配了之后看不到未选中的环境（列表里就没有）
+                        没配过 = 全部不可见；勾了哪些，环境列表 / 详情里就只看得到这些
                       </Text>
                     </div>
                     <Select
@@ -353,9 +400,30 @@ const SystemRoles: React.FC = () => {
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 8px' }}>
                       <span style={{ width: 3, height: 12, borderRadius: 2, background: '#d46b08', opacity: 0.7 }} />
+                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>可部署环境</span>
+                      <Text type="secondary" style={{ fontSize: 11.5 }}>
+                        勾了才能在发布拓扑里展示哪几个圈；没勾的环境不展示、也找不到发布入口
+                      </Text>
+                    </div>
+                    <Select
+                      mode="multiple"
+                      allowClear
+                      showSearch
+                      optionFilterProp="label"
+                      style={{ width: '100%' }}
+                      placeholder={isSuper || draft.includes('deploy:*') ? '当前角色可部署全部环境' : '选允许该角色部署（拓扑展示）的环境'}
+                      disabled={!canWrite || isSuper || draft.includes('deploy:*')}
+                      value={deployDraft}
+                      onChange={(v) => setDeployDraft(v as string[])}
+                      options={allEnvs.map((e) => ({ label: `${e.name}（${e.key}）`, value: e.key }))}
+                      loading={envApi.loading}
+                    />
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 8px' }}>
+                      <span style={{ width: 3, height: 12, borderRadius: 2, background: '#389e0d', opacity: 0.7 }} />
                       <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>环境操作功能</span>
                       <Text type="secondary" style={{ fontSize: 11.5 }}>
-                        勾选后，该角色可对上面可见的环境执行对应操作
+                        勾选后，该角色可对可见环境执行对应操作
                       </Text>
                     </div>
                     <Checkbox.Group

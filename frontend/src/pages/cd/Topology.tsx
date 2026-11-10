@@ -57,7 +57,7 @@ import {
 } from '@/config/topology';
 import { ApiError, clusterApi, deployApi, environmentApi, imageApi, projectApi, rollbackApi, serviceApi } from '@/api';
 import type { DeployCreated } from '@/api';
-import { canDeployOn, canRollbackOn, canRedeployService, canOfflineService, hasPerm } from '@/auth';
+import { canDeployOn, canRollbackOn, canRedeployService, canScaleService, canOfflineService, hasPerm } from '@/auth';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
 import ImageSourcePicker from '@/components/ImageSourcePicker';
 import type { ImageChoice } from '@/components/ImageSourcePicker';
@@ -462,7 +462,9 @@ const Topology: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, urlProject, projectKey]);
 
-  const envsApi = useApi(() => environmentApi.list({ pageSize: 100 }), []);
+  // 发布拓扑按「可部署环境」取圈：后端 visibility=deploy 按 deploy:<env> 过滤。
+  // 这样勾了哪些可部署环境、拓扑就展示哪些圈；没勾的环境不展示、也找不到发布入口。
+  const envsApi = useApi(() => environmentApi.list({ pageSize: 100, visibility: 'deploy' }), []);
   const envList = useMemo(() => sortByStage(envsApi.data?.list ?? []), [envsApi.data]);
 
   // 已接入的集群。**集群信息不再由前端编造** —— 原先拓扑上的云厂商/区域/可用区
@@ -926,6 +928,7 @@ const Topology: React.FC = () => {
     const canDeploy = canDeployOn(env.key);
     const canRollback = canRollbackOn(env.key);
     const canRedeploy = canRedeployService();
+    const canScale = canScaleService();
     const canOffline = canOfflineService();
     /**
      * 该项目在**本环境**是否已纳管（= service_instances 里有行）。
@@ -937,7 +940,7 @@ const Topology: React.FC = () => {
     const linked = !!svcMap[env.key]?.[projectKey];
 
     // 没有权限的项一并置灰：与后端路由判据保持一致（2026-11-10 拆成独立功能点）。
-    //   部署新版 / 设定副本数 → deploy:{env}（"发版"环境闸，未拆进功能勾选）
+    //   部署新版 → deploy:{env}（"发版"环境闸）；设定副本数 → deploy:scale；
     //   重新部署 → deploy:redeploy；回滚 → rollback:execute；取消纳管 → deploy:offline
     //
     // 状态未知（集群读不到）时，"要落集群"的入口也一并置灰：
@@ -950,7 +953,8 @@ const Topology: React.FC = () => {
       if (clusterOpsBlocked && t !== 'logs' && t !== 'params') return disabledItem;
       if (t === 'deploy' && servicesKnown && !linked) return disabledItem;
       if (undeployed && t !== 'deploy') return disabledItem;
-      if ((t === 'deploy' || t === 'scale') && !canDeploy) return disabledItem;
+      if (t === 'deploy' && !canDeploy) return disabledItem;
+      if (t === 'scale' && !canScale) return disabledItem;
       if (t === 'redeploy' && !canRedeploy) return disabledItem;
       if (t === 'offline' && !canOffline) return disabledItem;
       if (t === 'rollback' && !canRollback) return disabledItem;
