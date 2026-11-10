@@ -26,6 +26,7 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import type { MenuProps } from 'antd';
 import {
   AppstoreAddOutlined,
   CloudDownloadOutlined,
@@ -962,14 +963,11 @@ const EnvironmentDetail: React.FC = () => {
   };
 
   // ---------------------------------------------------------------- 服务表列
-  // ⋮ 菜单里的每一项都是"发起变更"，判据与后端路由逐条对应（2026-11-10 拆成独立功能点）：
-  //   redeploy → deploy:redeploy；params → deploy:params；scale → deploy:scale；
-  //   rollback → rollback:execute；offline → deploy:offline。
-  const redeployGuardTip = canRedeploy ? undefined : '需要 deploy:redeploy 权限';
-  const paramsGuardTip = canParams ? undefined : '需要 deploy:params 权限';
-  const scaleGuardTip = canScale ? undefined : '需要 deploy:scale 权限';
-  const offlineGuardTip = canOffline ? undefined : '需要 deploy:offline 权限';
-  const rollbackGuardTip = canRollback ? undefined : '需要 rollback:execute 权限';
+  // 操作列每个按钮对应一个独立功能点，判据与后端路由逐条对应（2026-11-10）：
+  //   restart → deploy:restart；日志 → log:read；redeploy → deploy:redeploy；
+  //   rollback → rollback:execute；params → deploy:params；scale → deploy:scale；
+  //   offline → deploy:offline。
+  // 无权限的项**直接不渲染**（不是置灰）——用户 2026-11-10 拍板：只勾「日志」就只看到日志。
   const serviceColumns: ColumnsType<EnvService> = [
     {
       title: '服务 / 项目',
@@ -1132,110 +1130,80 @@ const EnvironmentDetail: React.FC = () => {
       // 「部署」入口已撤（2026-11-05 用户：统一从发布拓扑部署），行内第一个动作
       // 改成「重启」—— 它是运维动作（不换镜像，只滚动重建 Pod），与"部署"是两回事。
       width: 170,
-      render: (_, r) => (
-        <Space size={2}>
-          {/* 原写法是 <Tooltip><Button disabled/></Tooltip>：disabled 的 button 不派发
-              鼠标事件，提示永远弹不出来。改用 DisabledTip 承接 hover。 */}
-          <DisabledTip title={canRestart ? undefined : '当前账号没有 deploy:restart 权限（重启会滚动重建 Pod）'}>
-            <Button
-              type="link"
-              size="small"
-              style={{ paddingInline: 4 }}
-              icon={<SwapOutlined />}
-              disabled={!canRestart}
-              onClick={() => doRestart(r)}
-            >
-              重启
-            </Button>
-          </DisabledTip>
-          <DisabledTip title={canLog ? undefined : '当前账号没有 log:read 权限'}>
-            <Button
-              type="link"
-              size="small"
-              style={{ paddingInline: 4 }}
-              icon={<FileTextOutlined />}
-              disabled={!canLog}
-              onClick={() => openLogs(r)}
-            >
-              日志
-            </Button>
-          </DisabledTip>
-          <Dropdown
-            menu={{
-              items: [
-                {
-                  key: 'redeploy',
-                  icon: <ReloadOutlined />,
-                  // POST /services/:id/redeploy → deploy:redeploy
-                  disabled: !canRedeploy,
-                  label: (
-                    <DisabledTip title={redeployGuardTip}>
-                      <span>重新部署（当前版本）</span>
-                    </DisabledTip>
-                  ),
-                },
-                {
-                  key: 'rollback',
-                  icon: <RollbackOutlined />,
-                  // POST /rollbacks → rollback:execute
-                  disabled: !canRollback,
-                  label: (
-                    <DisabledTip title={rollbackGuardTip}>
-                      <span>回滚到历史版本</span>
-                    </DisabledTip>
-                  ),
-                },
-                {
-                  key: 'params',
-                  icon: <SettingOutlined />,
-                  // PUT /services/:id/params → deploy:params
-                  disabled: !canParams,
-                  label: (
-                    <DisabledTip title={paramsGuardTip}>
-                      <span>设置参数</span>
-                    </DisabledTip>
-                  ),
-                },
-                {
-                  key: 'scale',
-                  icon: <ExpandOutlined />,
-                  // POST /services/:id/scale → deploy:scale
-                  disabled: !canScale,
-                  label: (
-                    <DisabledTip title={scaleGuardTip}>
-                      <span>扩缩容</span>
-                    </DisabledTip>
-                  ),
-                },
-                { type: 'divider' },
-                {
+      render: (_, r) => {
+        // 无权限的项直接不渲染（不是置灰）。⋮ 菜单逐条按权限收口，
+        // 一项都没有时连 ⋮ 也不显示（用户 2026-11-10：只勾「日志」就只看到日志）。
+        const moreItems = (
+          [
+            canRedeploy
+              ? { key: 'redeploy', icon: <ReloadOutlined />, label: <span>重新部署（当前版本）</span> }
+              : null,
+            canRollback
+              ? { key: 'rollback', icon: <RollbackOutlined />, label: <span>回滚到历史版本</span> }
+              : null,
+            canParams
+              ? { key: 'params', icon: <SettingOutlined />, label: <span>设置参数</span> }
+              : null,
+            canScale
+              ? { key: 'scale', icon: <ExpandOutlined />, label: <span>扩缩容</span> }
+              : null,
+            canOffline ? { type: 'divider' as const } : null,
+            canOffline
+              ? {
                   key: 'offline',
                   icon: <DeleteOutlined />,
                   danger: true,
-                  // DELETE /services/:id → deploy:offline
-                  disabled: !canOffline,
-                  label: (
-                    <DisabledTip title={offlineGuardTip}>
-                      {/* 不叫"下线"：它**不会**让服务停下来（那要用户显式改副本数）。
-                          名字与动作对不上，用户就不敢点、或者点完以为业务停了。 */}
-                      <span>取消纳管</span>
-                    </DisabledTip>
-                  ),
-                },
-              ],
-              onClick: ({ key: k }) => {
-                if (k === 'redeploy') doRedeploy(r);
-                else if (k === 'rollback') openRollback(r);
-                else if (k === 'params') openParams(r);
-                else if (k === 'scale') openScale(r);
-                else if (k === 'offline') doOffline(r);
-              },
-            }}
-          >
-            <Button type="text" size="small" icon={<MoreOutlined />} />
-          </Dropdown>
-        </Space>
-      ),
+                  // 不叫"下线"：它不会让服务停下来（那要用户显式改副本数）。
+                  label: <span>取消纳管</span>,
+                }
+              : null,
+          ] as NonNullable<MenuProps['items']>
+        ).filter(Boolean);
+        const hasMore = !!moreItems.length;
+
+        return (
+          <Space size={2}>
+            {canRestart ? (
+              <Button
+                type="link"
+                size="small"
+                style={{ paddingInline: 4 }}
+                icon={<SwapOutlined />}
+                onClick={() => doRestart(r)}
+              >
+                重启
+              </Button>
+            ) : null}
+            {canLog ? (
+              <Button
+                type="link"
+                size="small"
+                style={{ paddingInline: 4 }}
+                icon={<FileTextOutlined />}
+                onClick={() => openLogs(r)}
+              >
+                日志
+              </Button>
+            ) : null}
+            {hasMore ? (
+              <Dropdown
+                menu={{
+                  items: moreItems,
+                  onClick: ({ key: k }) => {
+                    if (k === 'redeploy') doRedeploy(r);
+                    else if (k === 'rollback') openRollback(r);
+                    else if (k === 'params') openParams(r);
+                    else if (k === 'scale') openScale(r);
+                    else if (k === 'offline') doOffline(r);
+                  },
+                }}
+              >
+                <Button type="text" size="small" icon={<MoreOutlined />} />
+              </Dropdown>
+            ) : null}
+          </Space>
+        );
+      },
     },
   ];
 
