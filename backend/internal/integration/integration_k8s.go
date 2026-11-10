@@ -731,7 +731,14 @@ func (k *K8sCluster) WorkloadUsages(ctx context.Context, ref ClusterRef, namespa
 	}
 	pods, err := cs.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("读取命名空间 %s 的 Pod 失败：%w", namespace, err)
+		// ⚠️ Pod 列表读不到时**不整批失败**：Deployment 对象已经在 deps 里，
+		// 副本数 / 就绪数 / 状态词都还能算出来，状态列照常显示；
+		// 丢的只是"负载（实时）"和"重启次数"。
+		//
+		// 这是刻意的降级：状态看不到是故障，负载看不到只是遗憾。
+		// GCP 集群（境外）实测偶发 `unexpected error when reading response body`，
+		// 原来这一下会把 25 个服务的状态一起打没（2026-11-10）。
+		pods = &corev1.PodList{}
 	}
 	usage, metricsOK := k.podUsageRaw(ctx, cs, namespace)
 
