@@ -130,6 +130,68 @@ export const sortByStage = <T extends StageEnvLike>(list: readonly T[]): T[] =>
     .map((x) => x.item);
 
 /**
+ * 按发布阶段（stageOrder）分组：**一个阶段 = 一列**，列内上下堆叠（横向并列）。
+ *
+ * 与拓扑页共用同一份实现（`Topology.tsx` 曾自己写了一份 `groupByStageOrder`，
+ * 已收口到这里，避免"对比环境"与"拓扑列"两处对"同一阶段"的理解漂移）。
+ *
+ * 列内按**创建时间升序**（先建的在上），时间相同用 key 兜底 ——
+ * 这就是屏幕上"第几行"的权威顺序，"横向对比"要靠它对齐行号。
+ */
+export function groupByStage<T extends StageEnvLike & { createdAt?: string }>(
+  list: readonly T[],
+): T[][] {
+  const sorted = sortByStage(list);
+  const groups: T[][] = [];
+  let lastOrder: number | null = null;
+  for (const env of sorted) {
+    const order = stageOf(env).order;
+    if (lastOrder !== null && order === lastOrder && groups.length > 0) {
+      groups[groups.length - 1].push(env);
+    } else {
+      groups.push([env]);
+    }
+    lastOrder = order;
+  }
+  return groups.map((g) =>
+    [...g].sort((a, b) => {
+      const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
+      const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
+      if (ta !== tb) return ta - tb;
+      return a.key.localeCompare(b.key);
+    }),
+  );
+}
+
+/**
+ * 目标环境的「对比环境」：链路里**前一阶段**、横向同一行那个。
+ *
+ * 规则（用户 2026-11-10 拍板）：
+ *   - 先看前一阶段（stageOrder 更小的**最近一列**）；
+ *   - 前一阶段可能并列多个环境（如阿里云预生产 + gcp 预生产）——此时按
+ *     **横向位置**对齐：本阶段第 i 个，对比前一阶段第 i 个；
+ *   - 前一阶段比本阶段少时，超出的行落到前一阶段的最后一个。
+ *
+ * 例：`152(1) → [阿里云预生产, gcp 预生产](2) → [阿里云生产, gcp 生产](3)`：
+ *   阿里云生产 → 阿里云预生产；gcp 生产 → gcp 预生产；两个预生产 → 152。
+ *
+ * 目标环境是链路第一列、或不在 list 里时返回 `undefined`（调用方不展示对比列）。
+ */
+export function prevStageEnvOf<T extends StageEnvLike & { createdAt?: string }>(
+  list: readonly T[],
+  env: T,
+): T | undefined {
+  const groups = groupByStage(list);
+  const gi = groups.findIndex((g) => g.some((e) => e.key === env.key));
+  if (gi <= 0) return undefined;
+  const self = groups[gi];
+  const prev = groups[gi - 1];
+  const pi = self.findIndex((e) => e.key === env.key);
+  const idx = Math.min(pi < 0 ? 0 : pi, prev.length - 1);
+  return prev[idx];
+}
+
+/**
  * 链路门禁文案 —— 由环境真实的 needApproval 推导，不再是写死的"自动晋级"。
  *
  * 后端只有"这个环境的部署要不要审批"这一个真实约束（`environment.need_approval`

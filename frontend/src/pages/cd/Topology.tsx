@@ -49,6 +49,7 @@ import {
   clusterBadgeOf,
   clusterKeyOf,
   gateOf,
+  groupByStage,
   isOwnCluster,
   sortByStage,
   stageOf,
@@ -1114,32 +1115,11 @@ const Topology: React.FC = () => {
    *
    * 前提：envs 已按 stage 排序（`sortByStage`），同序号的必然相邻 —— 所以这里
    * 只比较"相邻两项"即可，不需要 Map 聚合（Map 还会打乱同序号内部的相对顺序）。
+   *
+   * 收口到 `config/topology.ts` 的 `groupByStage`：批量发布的"对比环境"要用同一份
+   * 行序对齐，两处不能各自理解"同一阶段"。
    */
-  const groupByStageOrder = (envs: Environment[]): Environment[][] => {
-    const groups: Environment[][] = [];
-    let lastOrder: number | null = null;
-    for (const env of envs) {
-      const order = stageOf(env).order;
-      if (lastOrder !== null && order === lastOrder && groups.length > 0) {
-        groups[groups.length - 1].push(env);
-      } else {
-        groups.push([env]);
-      }
-      lastOrder = order;
-    }
-    // 列内**按创建时间升序**：先建的在上、后加的排在下面。
-    // 不依赖后端返回顺序 —— 否则编辑环境或刷新后上下位置会跳，
-    // 看起来像"环境被换了位置"。
-    return groups.map((g) =>
-      [...g].sort((a, b) => {
-        const ta = a.createdAt ? Date.parse(a.createdAt) : 0;
-        const tb = b.createdAt ? Date.parse(b.createdAt) : 0;
-        if (ta !== tb) return ta - tb;
-        // 创建时间相同（同一秒批量建的）时用 key 兜底，保证顺序稳定可复现
-        return a.key.localeCompare(b.key);
-      }),
-    );
-  };
+  const groupByStageOrder = (envs: Environment[]): Environment[][] => groupByStage(envs);
 
   const renderChain = (envs: Environment[]) => {
     const groups = groupByStageOrder(envs);

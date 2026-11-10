@@ -35,7 +35,7 @@ import type { BatchResult } from './BatchRunner';
 import { DeployStatusTag, ProjectTypeTag, ServiceStatusTag } from './StatusTag';
 import { DisabledTip } from '@/components/DisabledTip';
 import { PickedStrip } from '@/components/PickedStrip';
-import { sortByStage, stageOf } from '@/config/topology';
+import { prevStageEnvOf, stageOf } from '@/config/topology';
 import { ApiError, deployApi, environmentApi, imageApi, registryApi, systemApi } from '@/api';
 import type { RegistryTags } from '@/api/registry';
 import { canDeployOn, hasPerm } from '@/auth';
@@ -576,11 +576,13 @@ const submitAtRef = useRef(Date.now());
    * `keys` 在依赖里：用户回头多勾一个服务，它也能补读那一个。
    */
   /**
-   * 链路里**紧邻的前一个环境**。
+   * 链路里**前一阶段**的对比环境。
    *
-   * 按 `sortByStage`（优先用环境自带的链路序号，没有才回退到按 key 的默认阶段表）
-   * 排一遍，取目标环境的前一个。这样"链路第几位"就是用户自己配的那个值，
-   * 不被前端的映射表覆盖 —— 与拓扑页用的是同一个排序函数，两处不会给出不同的链路。
+   * 用 `prevStageEnvOf`（与拓扑页同一份 `groupByStage` 行序）：
+   * 前一阶段可能并列多个环境（阿里云预生产 + gcp 预生产在同一序号），
+   * 此时按**横向位置**对齐 —— 本阶段第 i 个对比前一阶段第 i 个，
+   * 而不是把整条链拍平后取"上一个"（那会把同一阶段的并列环境错当成前后关系，
+   * 见 2026-11-10 的对比列串台问题）。
    *
    * ⚠️ 只取**紧邻**的一个，且 `MAX_COMPARE_ENVS` 限制了展示的环境数（含目标本身）。
    * 再往前取（开发 → 预发 → 生产）虽然也能取，但每多一个环境就多一列版本号，
@@ -588,11 +590,7 @@ const submitAtRef = useRef(Date.now());
    */
   const prevEnv = useMemo(() => {
     if (!env) return undefined;
-    const chain = sortByStage(envs);
-    const i = chain.findIndex((e) => e.key === env.key);
-    // 目标环境在链路里找不到（理论上不会，envs 就是这一份）时不猜，直接不展示对比列。
-    if (i <= 0) return undefined;
-    return chain[i - 1];
+    return prevStageEnvOf(envs, env);
   }, [envs, env]);
 
   /**
