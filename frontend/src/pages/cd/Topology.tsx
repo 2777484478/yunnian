@@ -55,9 +55,8 @@ import {
   stageOf,
   versionViewOf,
 } from '@/config/topology';
-import { ApiError, clusterApi, deployApi, environmentApi, imageApi, projectApi, rollbackApi, serviceApi } from '@/api';
+import { ApiError, clusterApi, deployApi, environmentApi, imageApi, projectApi, rollbackApi, serviceApi, topologyApi } from '@/api';
 import type { DeployCreated } from '@/api';
-import { canDeployOn, canRollbackOn, canRedeployService, canScaleService, canOfflineService, hasPerm } from '@/auth';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
 import ImageSourcePicker from '@/components/ImageSourcePicker';
 import type { ImageChoice } from '@/components/ImageSourcePicker';
@@ -785,7 +784,7 @@ const Topology: React.FC = () => {
     if (!actionEnv || !actionSvcId) return;
     let created: DeployCreated;
     try {
-      created = await serviceApi.redeploy(actionSvcId);
+      created = await topologyApi.redeploy(actionSvcId);
     } catch (e) {
       fail(e, '发起重新部署失败');
       return;
@@ -805,9 +804,9 @@ const Topology: React.FC = () => {
   const submitRollback = async () => {
     const v = await rollbackForm.validateFields();
     if (!actionEnv || !actionSvcId) return;
-    let rb: Awaited<ReturnType<typeof rollbackApi.create>>;
+    let rb: Awaited<ReturnType<typeof topologyApi.createRollback>>;
     try {
-      rb = await rollbackApi.create({
+      rb = await topologyApi.createRollback({
         serviceId: actionSvcId,
         toImage: v.image,
         reason: v.reason,
@@ -833,7 +832,7 @@ const Topology: React.FC = () => {
     const v = await scaleForm.validateFields();
     if (!actionEnv || !actionSvcId) return;
     try {
-      await serviceApi.scale(actionSvcId, Number(v.replicas), v.reason || undefined);
+      await topologyApi.scale(actionSvcId, Number(v.replicas), v.reason || undefined);
     } catch (e) {
       fail(e, '调整副本数失败');
       return; // 菜单与弹窗都留着，改一下就能重试
@@ -846,7 +845,7 @@ const Topology: React.FC = () => {
   const submitOffline = async () => {
     if (!actionEnv || !actionSvcId) return;
     try {
-      await serviceApi.remove(actionSvcId);
+      await topologyApi.remove(actionSvcId);
     } catch (e) {
       fail(e, '取消纳管失败');
       return;
@@ -925,11 +924,6 @@ const Topology: React.FC = () => {
     const undeployed = st === 'undeployed';
     const disabledItem = 'yn-topo-menu__item yn-topo-menu__item--disabled';
     const item = 'yn-topo-menu__item';
-    const canDeploy = canDeployOn(env.key);
-    const canRollback = canRollbackOn(env.key);
-    const canRedeploy = canRedeployService();
-    const canScale = canScaleService();
-    const canOffline = canOfflineService();
     /**
      * 该项目在**本环境**是否已纳管（= service_instances 里有行）。
      *
@@ -939,25 +933,18 @@ const Topology: React.FC = () => {
      */
     const linked = !!svcMap[env.key]?.[projectKey];
 
-    // 没有权限的项一并置灰：与后端路由判据保持一致（2026-11-10 拆成独立功能点）。
-    //   部署新版 → deploy:{env}（"发版"环境闸）；设定副本数 → deploy:scale；
-    //   重新部署 → deploy:redeploy；回滚 → rollback:execute；取消纳管 → deploy:offline
+    // ⚠️ 拓扑这里**不判任何功能权限**（用户 2026-11-10 拍板）：
+    // 这个环境的圈能画出来，就说明它在「发布拓扑可见范围」（deploy:{env}）里，
+    // 圈里的一切操作就都该可用 —— 权限只决定"哪些环境有圈"，不决定"圈里哪几项能点"。
+    // 这里只判**状态**：集群读不到 / 项目未纳管 / 该环境未部署。
     //
-    // 状态未知（集群读不到）时，"要落集群"的入口也一并置灰：
-    // 部署 / 重新部署 / 回滚 / 设定副本数 / 下线 / 看 Pod 日志 全部要连同一个
-    // kubeconfig、走同一条网络，读不到就写不成 —— 允许点击只是把失败推迟到提交之后，
-    // 而那时用户已经填完表单、以为事情在进行。**只有读平台库的两项保留可用**
-    // （Log 历程、预览参数），它们不依赖集群。
+    // 后端对应的是 /topology/... 那组接口（只认 deploy:{env}），与环境详情
+    // /services/:id/xxx（认功能点）是两条路径，互不影响。
     const clusterOpsBlocked = st === 'unknown';
     const gate = (t: ActionType) => {
       if (clusterOpsBlocked && t !== 'logs' && t !== 'params') return disabledItem;
       if (t === 'deploy' && servicesKnown && !linked) return disabledItem;
       if (undeployed && t !== 'deploy') return disabledItem;
-      if (t === 'deploy' && !canDeploy) return disabledItem;
-      if (t === 'scale' && !canScale) return disabledItem;
-      if (t === 'redeploy' && !canRedeploy) return disabledItem;
-      if (t === 'offline' && !canOffline) return disabledItem;
-      if (t === 'rollback' && !canRollback) return disabledItem;
       return item;
     };
 
@@ -1036,7 +1023,7 @@ const Topology: React.FC = () => {
           </span>
           部署新版
           <span className="yn-topo-menu__kbd">
-            {kbd(servicesKnown && !linked ? '未纳管' : canDeploy ? '主操作' : '无权限')}
+            {kbd(servicesKnown && !linked ? '未纳管' : '主操作')}
           </span>
         </div>
         <div className={gate('redeploy')} onClick={gate('redeploy') === item ? () => openAction('redeploy', env.key) : undefined}>

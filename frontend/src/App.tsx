@@ -1,9 +1,9 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense, lazy, useEffect } from 'react';
 import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { Button, Result, Spin } from 'antd';
 import AppLayout from '@/layouts/AppLayout';
 import ErrorBoundary from '@/components/ErrorBoundary';
-import { hasAnyPerm, isLoggedIn } from '@/auth';
+import { hasAnyPerm, isLoggedIn, refreshMe } from '@/auth';
 
 // 路由懒加载（原型阶段直接打包成一个文件，懒加载仅做结构示范）
 const Login = lazy(() => import('@/pages/Login'));
@@ -85,6 +85,20 @@ const RequirePerm: React.FC<{ codes: string[]; children: React.ReactElement }> =
  */
 const RoutedApp: React.FC = () => {
   const location = useLocation();
+
+  // 启动 / 刷新页面时拉一次最新权限。
+  //
+  // 权限是**登录那一刻的快照**：后端从 JWT claims 取、前端存 localStorage。
+  // 管理员改完角色权限后，当前会话不会自动更新 —— 之前必须"退出再登录"才生效，
+  // 实测里很容易被误判成"改了没生效"。这里补一次 /auth/me：刷新页面即生效；
+  // 令牌已失效时 refreshMe 会清会话，下面顺手把用户送回登录页。
+  useEffect(() => {
+    if (!isLoggedIn()) return;
+    void refreshMe().then((u) => {
+      if (!u) window.location.hash = '#/login';
+    });
+  }, []);
+
   return (
     <ErrorBoundary resetKey={location.pathname} fullscreen>
       <Suspense fallback={<Loading />}>

@@ -379,9 +379,9 @@ const SystemRoles: React.FC = () => {
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                       <span style={{ width: 3, height: 12, borderRadius: 2, background: '#1677ff', opacity: 0.7 }} />
-                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>环境可见范围</span>
+                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>集群环境可见范围</span>
                       <Text type="secondary" style={{ fontSize: 11.5 }}>
-                        没配过 = 全部不可见；勾了哪些，环境列表 / 详情里就只看得到这些
+                        没配过 = 全部不可见；勾了哪些，环境管理列表 / 详情里就只看得到这些
                       </Text>
                     </div>
                     <Select
@@ -400,9 +400,9 @@ const SystemRoles: React.FC = () => {
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 8px' }}>
                       <span style={{ width: 3, height: 12, borderRadius: 2, background: '#d46b08', opacity: 0.7 }} />
-                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>可部署环境</span>
+                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>发布拓扑可见范围</span>
                       <Text type="secondary" style={{ fontSize: 11.5 }}>
-                        勾了才能在发布拓扑里展示哪几个圈；没勾的环境不展示、也找不到发布入口
+                        勾了哪些，发布拓扑里就展示哪几个圈；没勾的环境不展示、也找不到发布入口
                       </Text>
                     </div>
                     <Select
@@ -411,7 +411,7 @@ const SystemRoles: React.FC = () => {
                       showSearch
                       optionFilterProp="label"
                       style={{ width: '100%' }}
-                      placeholder={isSuper || draft.includes('deploy:*') ? '当前角色可部署全部环境' : '选允许该角色部署（拓扑展示）的环境'}
+                      placeholder={isSuper || draft.includes('deploy:*') ? '当前角色在发布拓扑里可见全部环境' : '选要在发布拓扑里展示的环境'}
                       disabled={!canWrite || isSuper || draft.includes('deploy:*')}
                       value={deployDraft}
                       onChange={(v) => setDeployDraft(v as string[])}

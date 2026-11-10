@@ -268,6 +268,31 @@ export const serviceApi = {
     streamUrl(`/services/${id}/pods/${podName}/logs/stream`, params({ tailLines })),
 };
 
+/**
+ * 发布拓扑**专用**写接口。
+ *
+ * 拓扑只认 `deploy:{环境}`（该环境在「发布拓扑可见范围」里 = 能对它做全部操作），
+ * **不认** deploy:redeploy / deploy:offline / deploy:scale 这些功能点 —— 那是
+ * 「环境详情」的判据。两个入口走两条路径，谁也绕不过谁（用户 2026-11-10 拍板）。
+ *
+ * ⚠️ 别把这里的调用改回 serviceApi.xxx：那会让"环境详情没勾的操作"因为调用方
+ * 恰好有部署权而被放行，等于环境详情的勾选形同虚设。
+ */
+export const topologyApi = {
+  /** 用当前镜像重新滚动一次（后端返回新建的部署单） */
+  redeploy: (id: string) => http.post<DeployCreated>(`/topology/services/${id}/redeploy`),
+
+  /** 设定副本数（字段名与 serviceApi.scale 一致：replicas + reason） */
+  scale: (id: string, replicas: number, reason?: string) =>
+    http.post<EnvService>(`/topology/services/${id}/scale`, { replicas, reason }),
+
+  /** 取消纳管 */
+  remove: (id: string) => http.del<null>(`/topology/services/${id}`),
+
+  /** 回滚到历史版本 */
+  createRollback: (body: CreateRollbackInput) => http.post<RollbackCreated>('/topology/rollbacks', body),
+};
+
 export interface DeployQuery {
   envKey?: string;
   projectKey?: string;

@@ -386,6 +386,101 @@ func (h *handler) deleteService(c *gin.Context) {
 	httpx.OK(c, gin.H{"deleted": true})
 }
 
+// --------------------------------------------------------------------------- 发布拓扑专用
+//
+// 下面 4 个入口**只认 `deploy:{env}`**（guardServiceEnv），不认 deploy:redeploy /
+// deploy:offline / deploy:scale 等功能点 —— 与 /services/:id/xxx 那套（环境详情，
+// 认功能点）互不影响。业务逻辑完全复用 service 层，这里只是换一种权限口径的薄壳。
+
+// topologyRedeployService POST /topology/services/{id}/redeploy
+func (h *handler) topologyRedeployService(c *gin.Context) {
+	id, ok := pathUint(c, "id")
+	if !ok {
+		return
+	}
+	if !h.guardServiceEnv(c, "deploy", id) {
+		return
+	}
+	d, err := h.svc.CD.RedeployService(c.Request.Context(), id, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	createDeployPayload(c, "已提交重新部署", d)
+}
+
+// topologyScaleService POST /topology/services/{id}/scale
+func (h *handler) topologyScaleService(c *gin.Context) {
+	id, ok := pathUint(c, "id")
+	if !ok {
+		return
+	}
+	if !h.guardServiceEnv(c, "deploy", id) {
+		return
+	}
+	var in struct {
+		Replicas int    `json:"replicas" binding:"required,min=0,max=200"`
+		Reason   string `json:"reason" binding:"omitempty,max=255"`
+	}
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	before, _ := h.svc.CD.GetService(c.Request.Context(), id)
+	svc, err := h.svc.CD.ScaleService(c.Request.Context(), id, in.Replicas, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	prev := 0
+	if before != nil {
+		prev = before.Replicas
+	}
+	httpx.OK(c, gin.H{
+		"replicas":         svc.Replicas,
+		"previousReplicas": prev,
+		"status":           svc.Status,
+		"service":          svc,
+	})
+}
+
+// topologyDeleteService DELETE /topology/services/{id}（取消纳管）
+func (h *handler) topologyDeleteService(c *gin.Context) {
+	id, ok := pathUint(c, "id")
+	if !ok {
+		return
+	}
+	if !h.guardServiceEnv(c, "deploy", id) {
+		return
+	}
+	if err := h.svc.CD.DeleteService(c.Request.Context(), id, caller(c)); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"deleted": true})
+}
+
+// topologyCreateRollback POST /topology/rollbacks
+func (h *handler) topologyCreateRollback(c *gin.Context) {
+	var in service.CreateRollbackInput
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	svcID, err := httpx.ParseIDString(in.ServiceID)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	if !h.guardServiceEnv(c, "deploy", svcID) {
+		return
+	}
+	rb, err := h.svc.CD.CreateRollback(c.Request.Context(), in, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	created(c, "回滚任务已提交", rollbackCreatedPayload(rb))
+}
+
 // --------------------------------------------------------------------------- 部署
 
 // createDeployment POST /deployments

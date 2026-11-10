@@ -76,6 +76,7 @@ func NewRouter(d Deps) *gin.Engine {
 	h.registerServices(g)
 	h.registerDeployments(g)
 	h.registerRollbacks(g)
+	h.registerTopology(g)
 	h.registerClusters(g)
 	h.registerAudit(g)
 	h.registerSchedules(g)
@@ -288,6 +289,27 @@ func (h *handler) registerRollbacks(g *gin.RouterGroup) {
 	r.GET("", middleware.RequirePerm("rollback:read"), h.listRollbacks)
 	r.GET("/:id", middleware.RequirePerm("rollback:read"), h.getRollback)
 	r.GET("/:id/logs/stream", middleware.RequirePerm("log:read"), h.rollbackLogStream)
+}
+
+// registerTopology 发布拓扑的**专用**写入口。
+//
+// 用户 2026-11-10 拍板：拓扑**不分功能权限** —— 只要该环境在「发布拓扑可见范围」
+// （`deploy:<环境>`）里，就能对它执行全部操作（重新部署 / 回滚 / 设定副本数 / 取消纳管）。
+// "拓扑显示哪些圈" = "能操作哪些环境"，两件事是同一个开关。
+//
+// 为什么不复用 /services/:id/xxx（环境详情那套）：
+// 那套认的是功能点（deploy:redeploy / deploy:offline / …），而拓扑认 deploy:{env}。
+// 同一个 URL 无法同时表达两种授权意图 —— 强行合并就只能取"或"，那环境详情里
+// 没勾的操作会因为调用方恰好有部署权而被放行，等于勾选形同虚设。
+// 拆成两条路径，两边谁也绕不过谁，才是真正的"各管各的"。
+//
+// 路由层只要求登录，环境级权限在 handler 里 guardServiceEnv(c, "deploy", id) 判。
+func (h *handler) registerTopology(g *gin.RouterGroup) {
+	t := g.Group("/topology")
+	t.POST("/services/:id/redeploy", middleware.RequirePerm(), h.requireServiceVisible(), h.topologyRedeployService)
+	t.POST("/services/:id/scale", middleware.RequirePerm(), h.requireServiceVisible(), h.topologyScaleService)
+	t.DELETE("/services/:id", middleware.RequirePerm(), h.requireServiceVisible(), h.topologyDeleteService)
+	t.POST("/rollbacks", middleware.RequirePerm(), h.topologyCreateRollback)
 }
 
 func (h *handler) registerAudit(g *gin.RouterGroup) {

@@ -40,7 +40,7 @@ export type {
   GitConnectionResult,
 } from './ci';
 
-export { environmentApi, serviceApi, deployApi, rollbackApi } from './cd';
+export { environmentApi, serviceApi, topologyApi, deployApi, rollbackApi } from './cd';
 export type {
   EnvQuery,
   DeployQuery,
