@@ -464,6 +464,10 @@ const Topology: React.FC = () => {
 
   const envsApi = useApi(() => environmentApi.list({ pageSize: 100 }), []);
   const envList = useMemo(() => sortByStage(envsApi.data?.list ?? []), [envsApi.data]);
+  // 有没有**任意一个环境**的部署权限（含 deploy:* 通配）。批量发布入口按它隐藏：
+  // 开发人员只留日志，没有 deploy:{env} 就不该看到「批量发布」按钮（点了也只是走到
+  // 提交那步吃 403）。canDeployOn 里 hasPerm 已把 deploy:* 通配展开，这里无需单独判。
+  const canDeployAnywhere = useMemo(() => envList.some((e) => canDeployOn(e.key)), [envList]);
 
   // 已接入的集群。**集群信息不再由前端编造** —— 原先拓扑上的云厂商/区域/可用区
   // 是 config/topology.ts 里写死的三条，而 kubeconfig 根本给不出这些字段。
@@ -934,21 +938,20 @@ const Topology: React.FC = () => {
      */
     const linked = !!svcMap[env.key]?.[projectKey];
 
-    // 没有权限的项一并置灰：与后端 requireEnvPerm 的判定保持一致，
-    // 让用户在看到菜单时就明白"这个环境的这个动作我做不了"。
-    //
     // 状态未知（集群读不到）时，"要落集群"的入口也一并置灰：
     // 部署 / 重新部署 / 回滚 / 设定副本数 / 下线 / 看 Pod 日志 全部要连同一个
     // kubeconfig、走同一条网络，读不到就写不成 —— 允许点击只是把失败推迟到提交之后，
     // 而那时用户已经填完表单、以为事情在进行。**只有读平台库的两项保留可用**
     // （Log 历程、预览参数），它们不依赖集群。
+    //
+    // ⚠️ 权限导致的不是置灰而是**不渲染**：用户 2026-11-10 要求开发人员只留日志，
+    // 部署 / 重新部署 / 回滚 / 设定副本数 / 取消纳管 在无权限时直接看不到，
+    // 见下方 `{canDeploy && …}` / `{canRollback && …}` 的条件渲染。
     const clusterOpsBlocked = st === 'unknown';
     const gate = (t: ActionType) => {
       if (clusterOpsBlocked && t !== 'logs' && t !== 'params') return disabledItem;
       if (t === 'deploy' && servicesKnown && !linked) return disabledItem;
       if (undeployed && t !== 'deploy') return disabledItem;
-      if ((t === 'deploy' || t === 'redeploy' || t === 'scale' || t === 'offline') && !canDeploy) return disabledItem;
-      if (t === 'rollback' && !canRollback) return disabledItem;
       return item;
     };
 
@@ -1018,32 +1021,38 @@ const Topology: React.FC = () => {
           ) : null}
         </div>
 
-        <div
-          className={gate('deploy') === item ? `${item} ${item}--primary` : disabledItem}
-          onClick={gate('deploy') === item ? () => openAction('deploy', env.key) : undefined}
-        >
-          <span className="yn-topo-menu__icon">
-            <RocketOutlined />
-          </span>
-          部署新版
-          <span className="yn-topo-menu__kbd">
-            {kbd(servicesKnown && !linked ? '未纳管' : canDeploy ? '主操作' : '无权限')}
-          </span>
-        </div>
-        <div className={gate('redeploy')} onClick={gate('redeploy') === item ? () => openAction('redeploy', env.key) : undefined}>
-          <span className="yn-topo-menu__icon">
-            <ReloadOutlined />
-          </span>
-          重新部署
-          <span className="yn-topo-menu__kbd">{kbd('当前版本')}</span>
-        </div>
-        <div className={gate('rollback')} onClick={gate('rollback') === item ? () => openAction('rollback', env.key) : undefined}>
-          <span className="yn-topo-menu__icon">
-            <RollbackOutlined />
-          </span>
-          回滚到历史版本
-        </div>
-        <div className="yn-topo-menu__sep" />
+        {canDeploy && (
+          <div
+            className={gate('deploy') === item ? `${item} ${item}--primary` : disabledItem}
+            onClick={gate('deploy') === item ? () => openAction('deploy', env.key) : undefined}
+          >
+            <span className="yn-topo-menu__icon">
+              <RocketOutlined />
+            </span>
+            部署新版
+            <span className="yn-topo-menu__kbd">
+              {kbd(servicesKnown && !linked ? '未纳管' : '主操作')}
+            </span>
+          </div>
+        )}
+        {canDeploy && (
+          <div className={gate('redeploy')} onClick={gate('redeploy') === item ? () => openAction('redeploy', env.key) : undefined}>
+            <span className="yn-topo-menu__icon">
+              <ReloadOutlined />
+            </span>
+            重新部署
+            <span className="yn-topo-menu__kbd">{kbd('当前版本')}</span>
+          </div>
+        )}
+        {canRollback && (
+          <div className={gate('rollback')} onClick={gate('rollback') === item ? () => openAction('rollback', env.key) : undefined}>
+            <span className="yn-topo-menu__icon">
+              <RollbackOutlined />
+            </span>
+            回滚到历史版本
+          </div>
+        )}
+        {(canDeploy || canRollback) && <div className="yn-topo-menu__sep" />}
         <div className={gate('logs')} onClick={gate('logs') === item ? () => openAction('logs', env.key) : undefined}>
           <span className="yn-topo-menu__icon">
             <HistoryOutlined />
@@ -1057,28 +1066,32 @@ const Topology: React.FC = () => {
           查看 Pod 日志
         </div>
         <div className="yn-topo-menu__sep" />
-        <div className={gate('scale')} onClick={gate('scale') === item ? () => openAction('scale', env.key) : undefined}>
-          <span className="yn-topo-menu__icon">
-            <SlidersOutlined />
-          </span>
-          设定副本数
-        </div>
+        {canDeploy && (
+          <div className={gate('scale')} onClick={gate('scale') === item ? () => openAction('scale', env.key) : undefined}>
+            <span className="yn-topo-menu__icon">
+              <SlidersOutlined />
+            </span>
+            设定副本数
+          </div>
+        )}
         <div className={gate('params')} onClick={gate('params') === item ? () => openAction('params', env.key) : undefined}>
           <span className="yn-topo-menu__icon">
             <SettingOutlined />
           </span>
           预览参数
         </div>
-        <div className="yn-topo-menu__sep" />
-        <div
-          className={gate('offline') === item ? `${item} ${item}--danger` : disabledItem}
-          onClick={gate('offline') === item ? () => openAction('offline', env.key) : undefined}
-        >
-          <span className="yn-topo-menu__icon">
-            <CloudServerOutlined />
-          </span>
-          取消纳管
-        </div>
+        {canDeploy && <div className="yn-topo-menu__sep" />}
+        {canDeploy && (
+          <div
+            className={gate('offline') === item ? `${item} ${item}--danger` : disabledItem}
+            onClick={gate('offline') === item ? () => openAction('offline', env.key) : undefined}
+          >
+            <span className="yn-topo-menu__icon">
+              <CloudServerOutlined />
+            </span>
+            取消纳管
+          </div>
+        )}
       </div>
     );
 
@@ -1232,16 +1245,18 @@ const Topology: React.FC = () => {
             />
           </div>
 
-          <Tooltip title="一次勾选多个微服务，读取最新构建版本后排队发布">
-            <Button
-              type="primary"
-              icon={<RocketOutlined />}
-              className="yn-topo__batch-btn"
-              onClick={() => setBatchOpen(true)}
-            >
-              批量发布
-            </Button>
-          </Tooltip>
+          {canDeployAnywhere && (
+            <Tooltip title="一次勾选多个微服务，读取最新构建版本后排队发布">
+              <Button
+                type="primary"
+                icon={<RocketOutlined />}
+                className="yn-topo__batch-btn"
+                onClick={() => setBatchOpen(true)}
+              >
+                批量发布
+              </Button>
+            </Tooltip>
+          )}
 
           {flow ? (
             <Button icon={<FileTextOutlined />} onClick={() => setFlowOpen(true)}>

@@ -417,8 +417,14 @@ var roleSeed = []struct {
 			// K8s 资源是运维的活（导入 YAML / 改 Deployment 定义），开发与只读用户不该看到。
 			"k8s:view", "k8s:manage",
 			"audit:read", "log:read", "ai:query", "team:read"}},
-	{"dev", "开发", "可维护自己负责的项目、触发构建，测试/预发环境部署", 3,
-		[]string{"project:read", "project:write:own", "build:*", "deploy:test,staging", "image:read", "log:read", "team:read"}},
+	// dev 是"开发者"：能看所有环境、看服务与部署记录、看日志、触发构建、维护自己负责的
+	// 项目，但**没有任何变更类 CD 权限**（不部署 / 不重启 / 不回滚 / 不改参数 / 不扩缩容 /
+	// 不取消纳管）—— 这些都由 deploy:test,staging 之类环境级权限把守，dev 一概不给。
+	// 用户 2026-11-10 明确：开发人员只留「日志」，重启 / 取消纳管 / 参数 / 回滚 / 重新部署
+	// 都不能有、不能看到。所以这里只留 deploy:read（看服务与部署记录，日志按钮挂在服务列表
+	// 上，缺了它连列表都看不到），不给任何 deploy:{env} 形态的权限点。
+	{"dev", "开发", "可维护自己负责的项目、触发构建，查看所有环境与日志（无部署/重启/回滚等变更权限）", 3,
+		[]string{"project:read", "project:write:own", "build:*", "image:read", "env:read", "deploy:read", "log:read", "team:read"}},
 	{"qa", "测试", "可触发测试区部署，查看构建/部署日志", 4,
 		[]string{"project:read", "build:read", "deploy:test", "log:read", "team:read"}},
 	{"readonly", "只读用户", "仅可查看所有资源，不能执行任何变更操作", 5,
