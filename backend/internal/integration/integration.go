@@ -176,6 +176,13 @@ type WorkloadUsage struct {
 	// 与 ClusterState.MetricsAvailable 同一口径。
 	Available bool `json:"available"`
 
+	// State 该工作负载在集群里的完整状态（镜像 / 副本 / 就绪 / 状态词 / 资源规格）。
+	//
+	// 由 WorkloadUsages 的 List 结果**顺带算出**（见 aggregateUsage），
+	// 调用方不必再为每个服务单独 Get 一次 Deployment ——
+	// GCP 那种高延迟集群上，25 次 Get 要 5~15s，而 List 本来就只查一次。
+	State *WorkloadState `json:"state,omitempty"`
+
 	// Restarts 该工作负载名下**所有 Pod 的容器重启次数之和**。
 	//
 	// 取自 `Pod.Status.ContainerStatuses[].RestartCount`，**与 metrics 无关** ——

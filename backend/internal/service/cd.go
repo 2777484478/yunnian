@@ -924,28 +924,33 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 		s.log("cd").Warn("读取服务实时用量失败，负载列将显示为 —", "env", env.EnvKey, "err", uerr)
 	}
 
-	var (
-		mu  sync.Mutex
-		wg  sync.WaitGroup
-		// 并发上限 12（原 6）：GCP 集群单次往返就要 1s+，25 个服务在 6 并发下
-		// 要 5 批 ≈ 5s+，叠上 WorkloadUsages 就逼近 8s。12 并发压到 2~3 批。
-		// 仍留余量，不至于把 apiserver 打出限流。
-		sem = make(chan struct{}, 12)
-	)
-	for i := range svcs {
-		wg.Add(1)
-		go func(svc model.ServiceInstance) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			state, err := s.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, svc.WorkloadName))
-			dto := liveOf(state, usages[svc.WorkloadName], err)
-			mu.Lock()
-			out[svc.ID] = dto
-			mu.Unlock()
-		}(svcs[i])
+	// List 本身就失败了（集群不可达 / 凭据无权）：逐个 Describe 只会重复同样的
+	// 失败，直接整批带上原因，别让一批 goroutine 各等一遍超时。
+	if uerr != nil {
+		for i := range svcs {
+			out[svcs[i].ID] = liveOf(nil, integration.WorkloadUsage{}, uerr)
+		}
+		return out
 	}
-	wg.Wait()
+
+	// 状态已经由 WorkloadUsages 的 List 一并算出（WorkloadUsage.State，见
+	// integration 的 aggregateUsage），这里只做内存查表 —— **不再逐个 Describe**。
+	//
+	// 原来 25 个服务 = 25 次 Get，GCP 集群（境外，单次往返 1s+）上要 5~15s，
+	// 正是"查询环境失败：context deadline exceeded"的真正来源。
+	// 现在整页只剩 3 次 List（Deployment / Pod / metrics），实测 1~2s 出全部状态。
+	for i := range svcs {
+		svc := svcs[i]
+		u := usages[svc.WorkloadName]
+		state := u.State
+		if state == nil {
+			state = &integration.WorkloadState{
+				Exists:  false,
+				Message: fmt.Sprintf("命名空间 %s 下没有名为 %s 的 Deployment", env.Namespace, svc.WorkloadName),
+			}
+		}
+		out[svc.ID] = liveOf(state, u, nil)
+	}
 	return out
 }
 

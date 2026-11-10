@@ -760,6 +760,9 @@ func aggregateUsage(
 			continue
 		}
 		u := WorkloadUsage{Available: metricsOK}
+		// 状态顺带从这条 Deployment 算出来：List 已经把对象取回来了，
+		// 再让调用方逐个 Get 一遍是纯浪费（GCP 上就是 25 次往返）。
+		u.State = deploymentState(d)
 		// selector 为空的畸形对象：Pods 保持 0，界面显示"无 Pod"。
 		// **不退回"按名字前缀匹配"去凑一个数** —— 那正是上面说的"看不出错的错"。
 		if d.Spec.Selector != nil {
