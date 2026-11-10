@@ -39,6 +39,22 @@ const MODULE_LABEL: Record<string, string> = {
 };
 
 /**
+ * 「环境操作功能」里的五项（用户 2026-11-10 拍板：环境可见范围下面再分功能勾选）。
+ *
+ * 这些是环境详情「服务列表」的操作，按功能拆成独立权限点；它们**从常规分组里摘出来**，
+ * 单独在这一个分区里勾选（对应后端 router.go 里 /services 的变更类路由）。
+ * 顺序按用户口述：重启 / 取消纳管 / 参数 / 回滚 / 重新部署。
+ */
+const SERVICE_FUNCS: { code: string; name: string }[] = [
+  { code: 'deploy:restart', name: '重启' },
+  { code: 'deploy:offline', name: '取消纳管' },
+  { code: 'deploy:params', name: '参数' },
+  { code: 'rollback:execute', name: '回滚' },
+  { code: 'deploy:redeploy', name: '重新部署' },
+];
+const SERVICE_FUNC_CODES = new Set(SERVICE_FUNCS.map((f) => f.code));
+
+/**
  * 角色权限管理。
  *
  * 补的是这么个洞：`SystemUsers` 只能给人**分配角色**，但**没有任何界面能配
@@ -89,45 +105,14 @@ const SystemRoles: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
-  /**
-   * 可部署环境：与"可见范围"同款多选，存 `deploy:<envKey>`。
-   *
-   * 后端部署时判的就是 `HasAnyPerm("deploy:"+env.EnvKey, "deploy:*", "*")`
-   * （`cd.go` 的发单校验），而 `deploy:test,staging` 这种枚举语法 `auth.Match` 也支持 ——
-   * 所以这里生成的 code 与种子里的老写法**语义完全一致**，只是换成按环境勾选更直观。
-   */
-  const [deployDraft, setDeployDraft] = useState<string[]>([]);
-
-  useEffect(() => {
-    const r = roles.find((x) => x.key === active);
-    if (!r || r.perms.includes('*') || r.perms.includes('deploy:*')) {
-      setDeployDraft([]);
-      return;
-    }
-    // 兼容老写法：deploy:test,staging → 拆成 [test, staging] 勾上
-    const keys: string[] = [];
-    r.perms.forEach((p) => {
-      if (!p.startsWith('deploy:') || p === 'deploy:read' || p === 'deploy:approve') return;
-      p.slice('deploy:'.length).split(',').forEach((k) => {
-        const t = k.trim();
-        if (t && !t.includes('*')) keys.push(t);
-      });
-    });
-    setDeployDraft([...new Set(keys)]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active]);
-
   /** 合并成最终要提交的权限点数组 */
   const mergedPerms = useMemo(() => {
-    // 环境类的 deploy:* 由 deployDraft 统一生成，先从 draft 里摘掉，避免出现两份写法
-    const isEnvDeploy = (p: string) =>
-      p.startsWith('deploy:') && p !== 'deploy:read' && p !== 'deploy:approve' && !p.startsWith('deploy:*');
+    // 「环境可见范围」由 visibleDraft 统一生成 env:view:<key>，先从 draft 里摘掉避免两份写法。
     return [
-      ...draft.filter((p) => !p.startsWith('env:view:') && !isEnvDeploy(p)),
+      ...draft.filter((p) => !p.startsWith('env:view:')),
       ...visibleDraft.map((k) => `env:view:${k}`),
-      ...deployDraft.map((k) => `deploy:${k}`),
     ];
-  }, [draft, visibleDraft, deployDraft]);
+  }, [draft, visibleDraft]);
 
   const load = async () => {
     setLoading(true);
@@ -155,25 +140,9 @@ const SystemRoles: React.FC = () => {
   const isSuper = !!role?.perms.includes('*');
   const dirty = useMemo(() => {
     if (!role || isSuper) return false;
-    /**
-     * ⚠️ 比较前要**归一化环境类 deploy**：老的 `deploy:test,staging` 在界面上被拆成
-     * 两个勾选项，合并回去是 `deploy:test` + `deploy:staging` —— 语义相同、字符串不同。
-     * 不归一化的话，一打开角色就显示「未保存」，而用户什么都没动。
-     */
-    const norm = (ps: string[]) => {
-      const out = new Set<string>();
-      ps.forEach((p) => {
-        if (p.startsWith('deploy:') && p !== 'deploy:read' && p !== 'deploy:approve' && !p.startsWith('deploy:*')) {
-          p.slice('deploy:'.length).split(',').forEach((k) => {
-            const t = k.trim();
-            if (t) out.add('deploy:' + t);
-          });
-        } else {
-          out.add(p);
-        }
-      });
-      return [...out].sort().join(',');
-    };
+    // 「环境操作功能」与「环境可见范围」都以 draft/visibleDraft 的原始值参与比对，
+    // 没有"一个勾选项拆成多个 code"的映射了，直接排序后比字符串即可。
+    const norm = (ps: string[]) => [...ps].sort().join(',');
     return norm(mergedPerms) !== norm(role.perms);
   }, [mergedPerms, role, isSuper]);
 
@@ -181,8 +150,10 @@ const SystemRoles: React.FC = () => {
     const q = kw.trim().toLowerCase();
     const map = new Map<string, PermissionPoint[]>();
     points
-      // 环境类的 deploy:<envKey> 由上面的「可部署环境」多选表达 ——
-      // 在清单里再出现一次，就会出现"勾了多选又勾这个码"的两份写法。
+      // 「环境操作功能」的五项由上面的功能勾选表达，不在常规分组里再出现一次。
+      .filter((p) => !SERVICE_FUNC_CODES.has(p.code))
+      // 环境类的 deploy:<envKey>（deploy:test / deploy:test,staging 等老写法）由发版
+      // 环境闸（deploy:* 通配）或历史数据承载，也不再逐项列出，避免"部署里面看不懂"。
       .filter(
         (p) =>
           !(p.code.startsWith('deploy:') && p.code !== 'deploy:read' && p.code !== 'deploy:approve' && !p.code.startsWith('deploy:*')),
@@ -382,24 +353,28 @@ const SystemRoles: React.FC = () => {
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 8px' }}>
                       <span style={{ width: 3, height: 12, borderRadius: 2, background: '#d46b08', opacity: 0.7 }} />
-                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>可部署环境</span>
+                      <span style={{ fontSize: 12.5, fontWeight: 500, color: '#1f2a44' }}>环境操作功能</span>
                       <Text type="secondary" style={{ fontSize: 11.5 }}>
-                        勾了才能在这个环境发版；没勾的环境发单会被后端拒绝
+                        勾选后，该角色可对上面可见的环境执行对应操作
                       </Text>
                     </div>
-                    <Select
-                      mode="multiple"
-                      allowClear
-                      showSearch
-                      optionFilterProp="label"
-                      style={{ width: '100%' }}
-                      placeholder={isSuper || draft.includes('deploy:*') ? '当前角色可部署全部环境' : '选允许该角色部署的环境'}
-                      disabled={!canWrite || isSuper || draft.includes('deploy:*')}
-                      value={deployDraft}
-                      onChange={(v) => setDeployDraft(v as string[])}
-                      options={allEnvs.map((e) => ({ label: `${e.name}（${e.key}）`, value: e.key }))}
-                      loading={envApi.loading}
-                    />
+                    <Checkbox.Group
+                      value={draft.filter((c) => SERVICE_FUNC_CODES.has(c))}
+                      onChange={(v) => {
+                        setDraft([...draft.filter((c) => !SERVICE_FUNC_CODES.has(c)), ...(v as string[])]);
+                      }}
+                      disabled={!canWrite}
+                      style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 24px' }}
+                    >
+                      {SERVICE_FUNCS.map((f) => (
+                        <Checkbox key={f.code} value={f.code}>
+                          <span style={{ fontSize: 12.5 }}>{f.name}</span>
+                          <span className="yn-mono" style={{ fontSize: 11, color: '#b0b6c2', marginLeft: 6 }}>
+                            {f.code}
+                          </span>
+                        </Checkbox>
+                      ))}
+                    </Checkbox.Group>
                   </div>
 
                   {grouped.length === 0 ? (

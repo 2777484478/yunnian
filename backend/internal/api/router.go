@@ -250,16 +250,17 @@ func (h *handler) registerServices(g *gin.RouterGroup) {
 	s.GET("/:id/params/history", middleware.RequirePerm("deploy:read"), h.requireServiceVisible(), h.serviceParamHistory)
 	s.GET("/:id/pods/:podName/logs/stream", middleware.RequirePerm("log:read"), h.requireServiceVisible(), h.podLogStream)
 
-	// 变更类：权限点按环境动态判定（deploy:test / deploy:prod），
-	// 所以这里只要求登录，真正的校验在 handler 里做（见 guardServiceEnv）。
-	s.PUT("/:id/params", middleware.RequirePerm(), h.requireServiceVisible(), h.updateServiceParams)
+	// 变更类：按**功能**拆成独立权限点（用户 2026-11-10：环境可见范围下面再分功能勾选）。
+	// 参数 / 重新部署 / 取消纳管 与「重启」一样改成独立点，不再沿用 deploy:{env}——
+	// deploy:{env} 只留给「发新版」（POST /deployments）与「扩缩容」（scale 未拆进功能勾选）。
+	s.PUT("/:id/params", middleware.RequirePerm("deploy:params"), h.requireServiceVisible(), h.updateServiceParams)
 	s.POST("/:id/scale", middleware.RequirePerm(), h.requireServiceVisible(), h.scaleService)
 	// 重启用**独立**权限点 deploy:restart，不再沿用 deploy:{env}（2026-11-10 用户要求）：
 	// 部署权限表达"能不能往这个环境发版本"，重启是另一件事（不换镜像，但会滚动重建 Pod、
 	// 短暂中断服务），要能单独开关。放在路由层而不是 handler，是因为这个判断与环境无关。
 	s.POST("/:id/restart", middleware.RequirePerm("deploy:restart"), h.requireServiceVisible(), h.restartService)
-	s.POST("/:id/redeploy", middleware.RequirePerm(), h.requireServiceVisible(), h.redeployService)
-	s.DELETE("/:id", middleware.RequirePerm(), h.requireServiceVisible(), h.deleteService)
+	s.POST("/:id/redeploy", middleware.RequirePerm("deploy:redeploy"), h.requireServiceVisible(), h.redeployService)
+	s.DELETE("/:id", middleware.RequirePerm("deploy:offline"), h.requireServiceVisible(), h.deleteService)
 }
 
 func (h *handler) registerDeployments(g *gin.RouterGroup) {

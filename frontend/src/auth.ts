@@ -159,6 +159,28 @@ export const canDeployOn = (envKey: string): boolean => hasPerm(`deploy:${envKey
 export const canRestartService = (): boolean => hasPerm('deploy:restart');
 
 /**
+ * 环境详情「服务列表」的操作，按功能拆成独立权限点（用户 2026-11-10 拍板：
+ * 环境可见范围下面再分功能勾选）。它们与发布拓扑里的同名操作共用同一批点，
+ * 判据与后端路由逐字对应（router.go 的 /services 变更类）。
+ */
+export const canRedeployService = (): boolean => hasPerm('deploy:redeploy');
+
+/** 能否设置服务参数（PUT /services/:id/params → deploy:params） */
+export const canSetParams = (): boolean => hasPerm('deploy:params');
+
+/** 能否取消纳管服务（DELETE /services/:id → deploy:offline） */
+export const canOfflineService = (): boolean => hasPerm('deploy:offline');
+
+/**
+ * 能否回滚服务（POST /rollbacks → rollback:execute）。
+ *
+ * 2026-11-10 起回滚不再叠加 deploy:{env}（后端 createRollback 里的 guardServiceEnv
+ * 已去掉），否则「回滚」这个功能勾选还得多配一道部署权，两件事又缠在一起。
+ * 所以这里只判 rollback:execute 一个点。
+ */
+export const canRollback = (): boolean => hasPerm('rollback:execute');
+
+/**
  * 能否查看项目的 K8s 资源定义（Deployment / Service / ConfigMap）。
  *
  * ⚠️ 权限点叫 `k8s:view` 而不是 `k8s:read`：只读角色持的是 `*:read`，
@@ -170,16 +192,13 @@ export const canViewK8sResources = (): boolean => hasPerm('k8s:view');
 export const canManageK8sResources = (): boolean => hasPerm('k8s:manage');
 
 /**
- * 能否在某环境发起回滚。后端是**两把锁**，缺一不可：
- *   1. 路由 `RequirePerm("rollback:execute")`（internal/api/router.go）；
- *   2. handler 内 `guardServiceEnv(c, "deploy", svcID)` → `deploy:{env}`。
+ * 能否在某环境发起回滚 —— 与 canRollback() 同义。
  *
- * ⚠️ 权限点表里**没有 `rollback:{env}` 这种形态**（只有 rollback:read /
- * rollback:execute / rollback:*）。此前这里按 `rollback:{env}` 判断，等于让
- * 显式持有 `rollback:execute` 的人被前端多禁一道——判据必须与后端逐字对应。
+ * 2026-11-10 起回滚只剩 rollback:execute 一把锁（后端 createRollback 已去掉
+ * deploy:{env} 那道），所以这里直接转发 canRollback()，保留带 envKey 的签名
+ * 是为了少改调用点。不要再按 envKey 加额外判断。
  */
-export const canRollbackOn = (envKey: string): boolean =>
-  hasPerm('rollback:execute') && canDeployOn(envKey);
+export const canRollbackOn = (_envKey: string): boolean => canRollback();
 
 // --------------------------------------------------------------------------- 会话失效广播
 //

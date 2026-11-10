@@ -286,9 +286,7 @@ func (h *handler) updateServiceParams(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !h.guardServiceEnv(c, "deploy", id) {
-		return
-	}
+	// 权限由路由层的 deploy:params 把关（2026-11-10 拆成独立功能点），不再按环境判 deploy:{env}。
 	var in service.ServiceParamsInput
 	if !httpx.Bind(c, &in) {
 		return
@@ -366,9 +364,7 @@ func (h *handler) redeployService(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if !h.guardServiceEnv(c, "deploy", id) {
-		return
-	}
+	// 权限由路由层的 deploy:redeploy 把关（2026-11-10 拆成独立功能点）。
 	d, err := h.svc.CD.RedeployService(c.Request.Context(), id, caller(c))
 	if err != nil {
 		httpx.Fail(c, err)
@@ -377,15 +373,13 @@ func (h *handler) redeployService(c *gin.Context) {
 	createDeployPayload(c, "已提交重新部署", d)
 }
 
-// deleteService DELETE /services/{id}（下线）
+// deleteService DELETE /services/{id}（取消纳管）
 func (h *handler) deleteService(c *gin.Context) {
 	id, ok := pathUint(c, "id")
 	if !ok {
 		return
 	}
-	if !h.guardServiceEnv(c, "deploy", id) {
-		return
-	}
+	// 权限由路由层的 deploy:offline 把关（2026-11-10 拆成独立功能点）。
 	if err := h.svc.CD.DeleteService(c.Request.Context(), id, caller(c)); err != nil {
 		httpx.Fail(c, err)
 		return
@@ -594,16 +588,13 @@ func (h *handler) createRollback(c *gin.Context) {
 	if !httpx.Bind(c, &in) {
 		return
 	}
-	svcID, err := httpx.ParseIDString(in.ServiceID)
-	if err != nil {
+	// ServiceID 仍要校验是可解析的 ID（无效 ID 早失败，比进服务层再报错更直接）。
+	if _, err := httpx.ParseIDString(in.ServiceID); err != nil {
 		httpx.Fail(c, err)
 		return
 	}
-	if !h.guardServiceEnv(c, "deploy", svcID) {
-		return
-	}
-	// 回滚要同时具备 rollback:execute（路由层已判）与该环境的部署权限（上面已判，
-	// 因为回滚最终就是一次部署），两道闸对应两种不同的授权意图，不能省。
+	// 回滚的权限由路由层 rollback:execute 单独把关（2026-11-10 拆成独立功能点），
+	// 不再叠加 deploy:{env} —— 否则「回滚」这个勾选就还得再配一道部署权，两件事又缠在一起。
 	rb, err := h.svc.CD.CreateRollback(c.Request.Context(), in, caller(c))
 	if err != nil {
 		httpx.Fail(c, err)

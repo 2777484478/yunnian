@@ -379,6 +379,13 @@ var permSeed = []struct{ Code, Name, Module string }{
 	// 与"部署"是两回事，但破坏性不小（会短暂中断服务），必须有独立开关。
 	// deploy:* 会通配覆盖它（ops 自动拥有），dev 的 deploy:test,staging 不会。
 	{"deploy:restart", "重启服务", "deploy"},
+	// 环境详情「服务列表」的操作按**功能**拆成独立权限点（用户 2026-11-10 拍板：
+	// 环境可见范围下面再分功能勾选）。它们不再沿用 deploy:{env}（那个是"发新版"的环境闸），
+	// 与发布拓扑里的同名操作**共用**同一批点（同一动作、同一权限，各管各的是指"发版"与
+	// "服务操作"是两类，不是拓扑和环境两套不同的点）。
+	{"deploy:redeploy", "重新部署", "deploy"},
+	{"deploy:params", "设置参数", "deploy"},
+	{"deploy:offline", "取消纳管", "deploy"},
 	{"deploy:*", "部署全部权限", "deploy"},
 	{"rollback:read", "查看回滚", "rollback"},
 	{"rollback:execute", "执行回滚", "rollback"},

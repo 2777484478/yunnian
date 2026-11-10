@@ -68,7 +68,7 @@ import { ApiError, deployApi, environmentApi, rollbackApi, serviceApi } from '@/
 import type { DeployCreated } from '@/api';
 import { envResStatus, envUsage } from '@/hooks/useEnvResources';
 import type { ClusterNodeStat, EnvProjectCandidate } from '@/api/cd';
-import { canDeployOn, canRestartService, canRollbackOn, hasPerm } from '@/auth';
+import { canDeployOn, canRestartService, canRedeployService, canSetParams, canOfflineService, canRollback as canRollbackGlobal, hasPerm } from '@/auth';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
 import { useApi } from '@/hooks/useApi';
 import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
@@ -328,15 +328,16 @@ const EnvironmentDetail: React.FC = () => {
     message.error(e instanceof ApiError ? e.message : fallback);
 
   const canWrite = hasPerm('env:write');
-  // 判据与后端 guard 逐字对应：
-  // services 下的变更接口（redeploy / scale / restart / params / delete）路由层只要求登录，
-  // 真正的权限在 handler 里 guardServiceEnv(c,"deploy",id) → 需要 deploy:{env}，否则 40300。
-  const canDeploy = canDeployOn(key);
-  // 重启是独立的权限点 deploy:restart，不再沿用 deploy:{env}：
-  // 「只能发测试区」和「能不能重启」是两件事，后端也分开校验。
+  // 判据与后端路由逐字对应（2026-11-10 拆成独立功能点）：
+  //   redeploy → deploy:redeploy；restart → deploy:restart；params → deploy:params；
+  //   offline → deploy:offline；rollback → rollback:execute。
+  // 只有「扩缩容」（scale）还留在 deploy:{env}（未拆进功能勾选）。
+  const canDeploy = canDeployOn(key); // 仅「扩缩容」用
   const canRestart = canRestartService();
-  // 回滚是两把锁：路由要求 rollback:execute，handler 再要求 deploy:{env}（见 canRollbackOn）。
-  const canRollback = canRollbackOn(key);
+  const canRedeploy = canRedeployService();
+  const canParams = canSetParams();
+  const canOffline = canOfflineService();
+  const canRollback = canRollbackGlobal();
   // 「问 AI 助手」进的是 /ai 页面，路由守卫要求 ai:query；演示账号 ops 没有这个权限点，
   // 不门控就会落到 403 空壳页。
   const canAskAI = hasPerm('ai:query');
@@ -960,12 +961,14 @@ const EnvironmentDetail: React.FC = () => {
   };
 
   // ---------------------------------------------------------------- 服务表列
-  // ⋮ 菜单里的每一项都是"发起变更"，禁用条件必须与后端 guard 逐条对应，
-  // 否则只读角色点得动、发得出、最后 403。对应关系：
-  //   redeploy / scale / restart / params / delete → handler 内 guardServiceEnv(c,"deploy",id)
-  //   rollback                                     → 路由 rollback:execute + handler deploy:{env}
+  // ⋮ 菜单里的每一项都是"发起变更"，判据与后端路由逐条对应（2026-11-10 拆成独立功能点）：
+  //   redeploy → deploy:redeploy；params → deploy:params；offline → deploy:offline；
+  //   rollback → rollback:execute；scale → deploy:{env}。
   const deployGuardTip = canDeploy ? undefined : `需要 deploy:${key} 权限`;
-  const rollbackGuardTip = canRollback ? undefined : `需要 rollback:execute 与 deploy:${key} 权限`;
+  const redeployGuardTip = canRedeploy ? undefined : '需要 deploy:redeploy 权限';
+  const paramsGuardTip = canParams ? undefined : '需要 deploy:params 权限';
+  const offlineGuardTip = canOffline ? undefined : '需要 deploy:offline 权限';
+  const rollbackGuardTip = canRollback ? undefined : '需要 rollback:execute 权限';
   const serviceColumns: ColumnsType<EnvService> = [
     {
       title: '服务 / 项目',
@@ -1153,10 +1156,10 @@ const EnvironmentDetail: React.FC = () => {
                 {
                   key: 'redeploy',
                   icon: <ReloadOutlined />,
-                  // POST /services/:id/redeploy → guardServiceEnv(c,"deploy",id)
-                  disabled: !canDeploy,
+                  // POST /services/:id/redeploy → deploy:redeploy
+                  disabled: !canRedeploy,
                   label: (
-                    <DisabledTip title={deployGuardTip}>
+                    <DisabledTip title={redeployGuardTip}>
                       <span>重新部署（当前版本）</span>
                     </DisabledTip>
                   ),
@@ -1164,7 +1167,7 @@ const EnvironmentDetail: React.FC = () => {
                 {
                   key: 'rollback',
                   icon: <RollbackOutlined />,
-                  // POST /rollbacks → 路由 rollback:execute + handler guardServiceEnv(c,"deploy",id)
+                  // POST /rollbacks → rollback:execute
                   disabled: !canRollback,
                   label: (
                     <DisabledTip title={rollbackGuardTip}>
@@ -1175,10 +1178,10 @@ const EnvironmentDetail: React.FC = () => {
                 {
                   key: 'params',
                   icon: <SettingOutlined />,
-                  // PUT /services/:id/params → guardServiceEnv(c,"deploy",id)
-                  disabled: !canDeploy,
+                  // PUT /services/:id/params → deploy:params
+                  disabled: !canParams,
                   label: (
-                    <DisabledTip title={deployGuardTip}>
+                    <DisabledTip title={paramsGuardTip}>
                       <span>设置参数</span>
                     </DisabledTip>
                   ),
@@ -1186,7 +1189,7 @@ const EnvironmentDetail: React.FC = () => {
                 {
                   key: 'scale',
                   icon: <ExpandOutlined />,
-                  // POST /services/:id/scale → guardServiceEnv(c,"deploy",id)
+                  // POST /services/:id/scale → deploy:{env}（扩缩容未拆进功能勾选）
                   disabled: !canDeploy,
                   label: (
                     <DisabledTip title={deployGuardTip}>
@@ -1199,10 +1202,10 @@ const EnvironmentDetail: React.FC = () => {
                   key: 'offline',
                   icon: <DeleteOutlined />,
                   danger: true,
-                  // DELETE /services/:id → guardServiceEnv(c,"deploy",id)
-                  disabled: !canDeploy,
+                  // DELETE /services/:id → deploy:offline
+                  disabled: !canOffline,
                   label: (
-                    <DisabledTip title={deployGuardTip}>
+                    <DisabledTip title={offlineGuardTip}>
                       {/* 不叫"下线"：它**不会**让服务停下来（那要用户显式改副本数）。
                           名字与动作对不上，用户就不敢点、或者点完以为业务停了。 */}
                       <span>取消纳管</span>

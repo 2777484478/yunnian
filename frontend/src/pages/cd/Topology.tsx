@@ -57,7 +57,7 @@ import {
 } from '@/config/topology';
 import { ApiError, clusterApi, deployApi, environmentApi, imageApi, projectApi, rollbackApi, serviceApi } from '@/api';
 import type { DeployCreated } from '@/api';
-import { canDeployOn, canRollbackOn, hasPerm } from '@/auth';
+import { canDeployOn, canRollbackOn, canRedeployService, canOfflineService, hasPerm } from '@/auth';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
 import ImageSourcePicker from '@/components/ImageSourcePicker';
 import type { ImageChoice } from '@/components/ImageSourcePicker';
@@ -925,6 +925,8 @@ const Topology: React.FC = () => {
     const item = 'yn-topo-menu__item';
     const canDeploy = canDeployOn(env.key);
     const canRollback = canRollbackOn(env.key);
+    const canRedeploy = canRedeployService();
+    const canOffline = canOfflineService();
     /**
      * 该项目在**本环境**是否已纳管（= service_instances 里有行）。
      *
@@ -934,8 +936,9 @@ const Topology: React.FC = () => {
      */
     const linked = !!svcMap[env.key]?.[projectKey];
 
-    // 没有权限的项一并置灰：与后端 requireEnvPerm 的判定保持一致，
-    // 让用户在看到菜单时就明白"这个环境的这个动作我做不了"。
+    // 没有权限的项一并置灰：与后端路由判据保持一致（2026-11-10 拆成独立功能点）。
+    //   部署新版 / 设定副本数 → deploy:{env}（"发版"环境闸，未拆进功能勾选）
+    //   重新部署 → deploy:redeploy；回滚 → rollback:execute；取消纳管 → deploy:offline
     //
     // 状态未知（集群读不到）时，"要落集群"的入口也一并置灰：
     // 部署 / 重新部署 / 回滚 / 设定副本数 / 下线 / 看 Pod 日志 全部要连同一个
@@ -947,7 +950,9 @@ const Topology: React.FC = () => {
       if (clusterOpsBlocked && t !== 'logs' && t !== 'params') return disabledItem;
       if (t === 'deploy' && servicesKnown && !linked) return disabledItem;
       if (undeployed && t !== 'deploy') return disabledItem;
-      if ((t === 'deploy' || t === 'redeploy' || t === 'scale' || t === 'offline') && !canDeploy) return disabledItem;
+      if ((t === 'deploy' || t === 'scale') && !canDeploy) return disabledItem;
+      if (t === 'redeploy' && !canRedeploy) return disabledItem;
+      if (t === 'offline' && !canOffline) return disabledItem;
       if (t === 'rollback' && !canRollback) return disabledItem;
       return item;
     };
