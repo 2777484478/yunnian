@@ -95,12 +95,6 @@ type EnvServiceQuery struct {
 	Status  string
 	Type    string
 	Keyword string
-	// SkipLive 跳过"读集群实时状态"，只返回库里的数据（毫秒级）。
-	//
-	// 列表页先用它秒开，再单独拉一次 live 补齐（前端 `services(key, {live:true})`）。
-	// 原因：GCP 集群（境外）读 25 个服务的 Deployment/Pod/指标要 5s+，压在同一个
-	// 请求里，列表就一直转圈、还容易撞上 liveStates 的超时被整批标成"查询失败"。
-	SkipLive bool
 }
 
 // DeploymentQuery 部署列表查询。
@@ -853,13 +847,7 @@ func (s *CDService) EnvServices(ctx context.Context, key string, q EnvServiceQue
 	}
 	// 每个圆圈的状态必须来自集群，不能来自库里那份"纳管时按默认值写死"的记录。
 	// Pod 明细与版本历史仍然不查：那会把一次列表请求变成 3N 次下游调用。
-	//
-	// SkipLive 时整段跳过：调用方（列表页首屏）要的是"先把表格画出来"，
-	// 实时状态由第二次请求（live=1）补。见 EnvServiceQuery.SkipLive。
-	var liveMap map[uint64]*ServiceLiveDTO
-	if !q.SkipLive {
-		liveMap = s.liveStates(ctx, e, rows)
-	}
+	liveMap := s.liveStates(ctx, e, rows)
 
 	out := make([]EnvServiceDTO, 0, len(rows))
 	for i := range rows {
@@ -898,13 +886,7 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 	if len(svcs) == 0 {
 		return out
 	}
-	// ⚠️ 总超时 15 秒（= integration.kubernetes.timeout）。GCP 集群（境外）读 25 个
-	// 服务的 Deployment / Pod / 指标要 7~8s，原 4 秒会让**整批**失败并显示
-	// "查询环境失败：context deadline exceeded"（2026-11-10 用户报的就是这个）。
-	//
-	// 15 秒不等于让用户等 15 秒：列表页首屏走 SkipLive（毫秒级，实测 0.02s），
-	// 这一步只在第二次请求里补状态列。
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 
 	// 用量**先批量取一次**：整个命名空间的 Deployment / Pod / 指标各查一遍，
@@ -924,33 +906,25 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 		s.log("cd").Warn("读取服务实时用量失败，负载列将显示为 —", "env", env.EnvKey, "err", uerr)
 	}
 
-	// List 本身就失败了（集群不可达 / 凭据无权）：逐个 Describe 只会重复同样的
-	// 失败，直接整批带上原因，别让一批 goroutine 各等一遍超时。
-	if uerr != nil {
-		for i := range svcs {
-			out[svcs[i].ID] = liveOf(nil, integration.WorkloadUsage{}, uerr)
-		}
-		return out
-	}
-
-	// 状态已经由 WorkloadUsages 的 List 一并算出（WorkloadUsage.State，见
-	// integration 的 aggregateUsage），这里只做内存查表 —— **不再逐个 Describe**。
-	//
-	// 原来 25 个服务 = 25 次 Get，GCP 集群（境外，单次往返 1s+）上要 5~15s，
-	// 正是"查询环境失败：context deadline exceeded"的真正来源。
-	// 现在整页只剩 3 次 List（Deployment / Pod / metrics），实测 1~2s 出全部状态。
+	var (
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, 6)
+	)
 	for i := range svcs {
-		svc := svcs[i]
-		u := usages[svc.WorkloadName]
-		state := u.State
-		if state == nil {
-			state = &integration.WorkloadState{
-				Exists:  false,
-				Message: fmt.Sprintf("命名空间 %s 下没有名为 %s 的 Deployment", env.Namespace, svc.WorkloadName),
-			}
-		}
-		out[svc.ID] = liveOf(state, u, nil)
+		wg.Add(1)
+		go func(svc model.ServiceInstance) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			state, err := s.deps.Up.Cluster.Describe(ctx, workloadRefOf(env, svc.WorkloadName))
+			dto := liveOf(state, usages[svc.WorkloadName], err)
+			mu.Lock()
+			out[svc.ID] = dto
+			mu.Unlock()
+		}(svcs[i])
 	}
+	wg.Wait()
 	return out
 }
 

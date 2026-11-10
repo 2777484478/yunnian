@@ -134,13 +134,10 @@ func (h *handler) saveEnvVars(c *gin.Context) {
 
 // envServices GET /environments/{key}/services
 func (h *handler) envServices(c *gin.Context) {
-	// live=0 → 只回库里数据（列表秒开）；默认 live=1 附带集群实时状态。
-	// 前端分两次请求：先 live=0 把表格画出来，再 live=1 补状态列。
 	list, err := h.svc.CD.EnvServices(c.Request.Context(), httpx.PathString(c, "key"), service.EnvServiceQuery{
-		Status:   c.Query("status"),
-		Type:     c.Query("type"),
-		Keyword:  c.Query("keyword"),
-		SkipLive: strings.TrimSpace(c.Query("live")) == "0",
+		Status:  c.Query("status"),
+		Type:    c.Query("type"),
+		Keyword: c.Query("keyword"),
 	})
 	if err != nil {
 		httpx.Fail(c, err)
