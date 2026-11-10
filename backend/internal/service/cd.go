@@ -898,13 +898,13 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 	if len(svcs) == 0 {
 		return out
 	}
-	// ⚠️ 总超时 8 秒（原 4 秒）。GCP 集群（境外）读 25 个服务的 Deployment /
-	// Pod / 指标要 5s+，4 秒会让**整批**失败并显示"查询环境失败：context
-	// deadline exceeded"（2026-11-10 用户报的就是这个）。
+	// ⚠️ 总超时 15 秒（= integration.kubernetes.timeout）。GCP 集群（境外）读 25 个
+	// 服务的 Deployment / Pod / 指标要 7~8s，原 4 秒会让**整批**失败并显示
+	// "查询环境失败：context deadline exceeded"（2026-11-10 用户报的就是这个）。
 	//
-	// 8 秒不等于让用户等 8 秒：列表页首屏走 SkipLive（毫秒级），这一步只在
-	// 第二次请求里补状态。如果调回 4 秒，GCP 那两个环境的状态列会继续全灭。
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	// 15 秒不等于让用户等 15 秒：列表页首屏走 SkipLive（毫秒级，实测 0.02s），
+	// 这一步只在第二次请求里补状态列。
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	// 用量**先批量取一次**：整个命名空间的 Deployment / Pod / 指标各查一遍，
@@ -927,7 +927,10 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 	var (
 		mu  sync.Mutex
 		wg  sync.WaitGroup
-		sem = make(chan struct{}, 6)
+		// 并发上限 12（原 6）：GCP 集群单次往返就要 1s+，25 个服务在 6 并发下
+		// 要 5 批 ≈ 5s+，叠上 WorkloadUsages 就逼近 8s。12 并发压到 2~3 批。
+		// 仍留余量，不至于把 apiserver 打出限流。
+		sem = make(chan struct{}, 12)
 	)
 	for i := range svcs {
 		wg.Add(1)
