@@ -1137,6 +1137,25 @@ body {
   border-bottom: 1px solid #d6e8ff;
 }
 
+/**
+ * Jenkins 上正在执行的项目行。
+ *
+ * 用底色压暗整行，而不是只把「编译」按钮置灰：用户需要一眼看出
+ * "为什么这一行点不动"，而不是逐个去试。文字也一起调灰，
+ * 否则白底上留着纯黑的项目名，看着不像禁用。
+ */
+.yn-row-jenkins-busy > td {
+  background: #fafafa !important;
+}
+.yn-row-jenkins-busy > td a,
+.yn-row-jenkins-busy > td .ant-typography {
+  color: #a6adb9 !important;
+}
+/* 悬停时保持灰底：默认的 hover 高亮会把"正在执行"这个信号盖掉 */
+.yn-row-jenkins-busy:hover > td {
+  background: #f5f5f5 !important;
+}
+
 /* --------------------------------------------------------------------------- 图例 */
 
 .yn-legend {

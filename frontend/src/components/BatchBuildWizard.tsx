@@ -39,6 +39,7 @@ import { PickedStrip } from './PickedStrip';
 import { BuildStatusTag, MethodTag, ProjectTypeTag } from './StatusTag';
 import { ApiError, buildApi, isGitParam, jenkinsApi, projectApi } from '@/api';
 import type { BuildStatus, Project } from '@/types';
+import type { JenkinsJobActivity } from '@/api';
 
 const { Text } = Typography;
 
@@ -228,7 +229,23 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     }
     let cancelled = false;
     setPlanLoading(true);
-    void Promise.all(
+    void (async () => {
+      /**
+       * 运行态只读一次，用来把"已在 Jenkins 上执行"的项目挡在批量之外。
+       *
+       * 读不到**不拦**：真正的权威拒绝点在触发接口（那里会现查），
+       * 这里读不到就把判断交给后端，不要把整个向导降级成错误态。
+       */
+      let running: Record<string, JenkinsJobActivity> = {};
+      try {
+        const act = await jenkinsApi.activity();
+        running = act.jobs ?? {};
+      } catch {
+        /* 忽略：见上 */
+      }
+      if (cancelled) return;
+
+      const rows = await Promise.all(
       jenkinsProjects.map(async (p) => {
         const job = (p.jenkinsJob ?? '').trim();
         if (!job) {
@@ -236,6 +253,15 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
             key: p.key,
             plan: null as JenkinsBatchPlan | null,
             why: '该项目还没绑定 Jenkins Job，平台不知道该触发哪个 Job',
+          };
+        }
+        if (running[job]) {
+          // 正在跑的项目不能进批量：后端会逐个拒绝，用户看到的是一串失败。
+          // 这里**在勾选阶段**就说清楚，符合"勾得动 == 发得出"。
+          return {
+            key: p.key,
+            plan: null as JenkinsBatchPlan | null,
+            why: `Job「${job}」正在 Jenkins 上执行${running[job].buildNo ? ` #${running[job].buildNo}` : ''}，等它结束再加进批量`,
           };
         }
         try {
@@ -276,21 +302,18 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
           };
         }
       }),
-    )
-      .then((rows) => {
-        if (cancelled) return;
-        const plan: Record<string, JenkinsBatchPlan | null> = {};
-        const blocked: Record<string, string> = {};
-        for (const r of rows) {
-          plan[r.key] = r.plan;
-          if (!r.plan) blocked[r.key] = r.why;
-        }
-        setJenkinsPlan(plan);
-        setJenkinsBlocked(blocked);
-      })
-      .finally(() => {
-        if (!cancelled) setPlanLoading(false);
-      });
+      );
+      if (cancelled) return;
+      const plan: Record<string, JenkinsBatchPlan | null> = {};
+      const blocked: Record<string, string> = {};
+      for (const r of rows) {
+        plan[r.key] = r.plan;
+        if (!r.plan) blocked[r.key] = r.why;
+      }
+      setJenkinsPlan(plan);
+      setJenkinsBlocked(blocked);
+      setPlanLoading(false);
+    })();
     return () => {
       cancelled = true;
     };

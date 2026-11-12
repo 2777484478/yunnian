@@ -382,6 +382,9 @@ func (h *handler) registerSystem(g *gin.RouterGroup) {
 	s.PUT("/integrations/harbor", middleware.RequirePerm("user:manage"), h.updateHarborSettings)
 	s.POST("/integrations/harbor/test", middleware.RequirePerm("user:manage"), h.testHarborConnection)
 	s.GET("/integrations/jenkins/jobs", middleware.RequirePerm("build:read"), h.listJenkinsJobs)
+	// 运行态：哪些 Job 此刻正在执行。挂在 build:read 下——
+	// 它只读、不改任何东西，而且是项目列表要渲染的状态。
+	s.GET("/integrations/jenkins/activity", middleware.RequirePerm("build:read"), h.jenkinsActivity)
 	s.GET("/integrations/jenkins/params", middleware.RequirePerm("build:read"), h.jenkinsJobParams)
 	s.GET("/integrations/jenkins/param-values", middleware.RequirePerm("build:read"), h.jenkinsParamValues)
 	s.POST("/integrations/jenkins/trigger", middleware.RequirePerm("build:trigger"), h.triggerJenkinsBuild)

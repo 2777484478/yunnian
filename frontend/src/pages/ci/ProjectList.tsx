@@ -34,12 +34,14 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SyncOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { PageHeader, SectionCard } from '@/components/ui';
 import { KVFields } from '@/components/KVFields';
 import AutoRefreshButton from '@/components/AutoRefreshButton';
+import DisabledTip from '@/components/DisabledTip';
 import BatchBuildWizard from '@/components/BatchBuildWizard';
 import {
   JenkinsGitParamSelect,
@@ -63,7 +65,7 @@ import { useApi } from '@/hooks/useApi';
 import { useAutoRefresh, useAutoRefreshPref } from '@/hooks/useAutoRefresh';
 import { humanDuration } from '@/utils/format';
 import type { Project, BuildStatus, BuildRecord } from '@/types';
-import type { JenkinsJob } from '@/api';
+import type { JenkinsJob, JenkinsJobActivity } from '@/api';
 
 const { Text } = Typography;
 
@@ -427,6 +429,31 @@ const ProjectList: React.FC = () => {
   const refresh = projectsApi.refresh;
 
   /**
+   * Jenkins 运行态：平台已绑定的 Job 里，此刻谁正在执行。
+   *
+   * 为什么需要它：平台只记录**自己发起**的构建，别人直接在 Jenkins 上点的那次
+   * 平台完全看不见 —— 用户会对着一个正在执行的 Job 在平台里再点一次，
+   * 两个构建抢同一个工作区和同一个镜像 tag（2026-11-12 用户报的就是这个）。
+   *
+   * ⚠️ 它只负责**展示**（标记 + 置灰）。真正的拦截在后端触发接口里现查，
+   * 不依赖这份最多滞后 20 秒的缓存 —— 否则"缓存说空闲"就能点进去了。
+   */
+  const activityApi = useApi(() => jenkinsApi.activity(), []);
+  const activity = useMemo(() => activityApi.data?.jobs ?? {}, [activityApi.data]);
+
+  /**
+   * 某个项目绑定的 Jenkins Job 此刻是否正在执行。
+   *
+   * 按 key 现算，**不写回列表行**：列表每 3 秒会静默重拉，把异步拿到的状态
+   * 回写进行对象会和重拉抢时序（先到的旧数据覆盖后到的新数据）。
+   */
+  const jenkinsRunningOf = (p: Project): JenkinsJobActivity | undefined => {
+    if (p.buildMethod !== 'jenkins' || !p.jenkinsJob) return undefined;
+    const a = activity[p.jenkinsJob];
+    return a && a.state === 'running' ? a : undefined;
+  };
+
+  /**
    * 自动刷新。
    *
    * 构建状态是**别处**在改的（Runner / Jenkins / 部署执行器），页面自己不会变——
@@ -442,7 +469,14 @@ const ProjectList: React.FC = () => {
   useAutoRefresh({
     enabled: autoRefreshMs !== null,
     intervalMs: autoRefreshMs ?? 3000,
-    onTick: projectsApi.refreshSilent,
+    onTick: () => {
+      projectsApi.refreshSilent();
+      // 运行态一起刷：别人在 Jenkins 上点的那次不该等到用户手动刷新才看见。
+      // 但**不把它算进 isBusy**：它有 8 秒上限，算进去会让列表的 3 秒刷新
+      // 被一次慢查询拖成 8 秒一次。这里只防它自己叠请求（后端有 20 秒缓存，
+      // 叠起来只会互相打架）。
+      if (!activityApi.pendingRef.current) activityApi.refreshSilent();
+    },
     // 上一拍还没回来就跳过这一拍，避免慢后端下滚出一串在飞请求
     isBusy: () => projectsApi.pendingRef.current,
   });
@@ -450,6 +484,26 @@ const ProjectList: React.FC = () => {
   // 写权限：没有就禁用按钮并说明原因，而不是让用户点下去吃一个 403
   const canWrite = hasPerm('project:write') || hasPerm('project:write:own');
   const canDelete = hasPerm('project:delete');
+
+  /**
+   * 已经开始执行的项目，从选中集合里剔掉。
+   *
+   * `getCheckboxProps` 只决定"能不能点"，**不会**自动取消已勾上的项。
+   * 留着它，批量编译会把它带上，到后端被逐个拒绝 —— 用户看到的是一串失败，
+   * 而不是"我选的那几个里有一个在跑"。
+   */
+  useEffect(() => {
+    if (!selectedRowKeys.length) return;
+    const busy = new Set(projects.filter((p) => jenkinsRunningOf(p)).map((p) => p.key));
+    if (!busy.size) return;
+    setSelectedRowKeys((prev) => {
+      const next = prev.filter((k) => !busy.has(String(k)));
+      return next.length === prev.length ? prev : next;
+    });
+    // jenkinsRunningOf 是每次渲染重建的纯函数，放进来会让这个 effect 每帧都跑；
+    // 它依赖的两个真实输入（activity / projects）已经列在下面了。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activity, projects]);
 
   const dataSource = useMemo(
     () =>
@@ -1323,6 +1377,71 @@ const ProjectList: React.FC = () => {
       sorter: (a, b) => (a.lastBuild?.startedAt ?? '') > (b.lastBuild?.startedAt ?? '') ? 1 : -1,
     },
     {
+      /**
+       * Jenkins 执行态。
+       *
+       * 与「最近构建状态」是**两件事**，不要合并：
+       *   - 最近构建状态 = 平台自己那条构建记录的终态（点进去有日志、有镜像）
+       *   - 这一列       = Jenkins 上**此刻**有没有在跑（可能根本不是平台发起的）
+       *
+       * 合并的后果：Jenkins 上手动跑的那次会显示成"成功"，但点「构建历史」
+       * 找不到这条 —— 用户会认为平台丢数据。所以宁可多一列，也要把
+       * "是谁的构建"和"此刻在跑吗"分开说。
+       */
+      title: 'Jenkins 执行',
+      key: 'jenkinsActivity',
+      width: 156,
+      render: (_, r) => {
+        if (r.buildMethod !== 'jenkins' || !r.jenkinsJob) {
+          return <Text type="secondary">—</Text>;
+        }
+        const a = activity[r.jenkinsJob];
+        if (!a) {
+          // 还没拿到状态（首次加载中）。不写"空闲"：那是猜的。
+          return <Text type="secondary">—</Text>;
+        }
+        if (a.state === 'running') {
+          return (
+            <Tooltip
+              title={
+                <span>
+                  Jenkins Job <span className="yn-mono">{r.jenkinsJob}</span> 正在执行
+                  {a.buildNo ? ` #${a.buildNo}` : ''}
+                  {a.since ? `（${a.since} 开始）` : ''}。
+                  <br />
+                  平台只记录自己发起的构建，这次可能是别人直接在 Jenkins 上点的 ——
+                  等它结束再操作，否则两个构建会抢同一个工作区和镜像 tag。
+                </span>
+              }
+            >
+              <div>
+                <Tag color="processing" icon={<SyncOutlined spin />} style={{ marginInlineEnd: 0 }}>
+                  执行中{a.buildNo ? ` #${a.buildNo}` : ''}
+                </Tag>
+                {typeof a.elapsedSec === 'number' ? (
+                  <div style={{ fontSize: 11.5, color: '#9aa0aa', marginTop: 2 }}>
+                    已运行 {humanDuration(a.elapsedSec)}
+                  </div>
+                ) : null}
+              </div>
+            </Tooltip>
+          );
+        }
+        if (a.state === 'unknown') {
+          // 读不到就说读不到，**不能**显示"空闲"：那会让人以为可以点，
+          // 点下去才发现 Jenkins 那边根本不认这个绑定。
+          return (
+            <Tooltip title={a.message || '读不到 Jenkins 状态'}>
+              <Tag color="warning" style={{ marginInlineEnd: 0 }}>
+                读不到
+              </Tag>
+            </Tooltip>
+          );
+        }
+        return <Text type="secondary">空闲</Text>;
+      },
+    },
+    {
       title: '最近镜像版本',
       dataIndex: 'lastBuild',
       width: 320,
@@ -1390,18 +1509,33 @@ const ProjectList: React.FC = () => {
       key: 'action',
       fixed: 'right',
       width: 236,
-      render: (_, r) => (
+      render: (_, r) => {
+        const running = jenkinsRunningOf(r);
+        return (
         <Space size={2}>
-          <Button
-            type="link"
-            size="small"
-            icon={<ThunderboltOutlined />}
-            disabled={!r.enabled}
-            onClick={() => openBuild(r)}
-            style={{ paddingInline: 4 }}
+          {/* disabled 的 button 不派发鼠标事件，所以提示必须由 DisabledTip 承接 */}
+          <DisabledTip
+            title={
+              running
+                ? `Jenkins Job 正在执行${running.buildNo ? ` #${running.buildNo}` : ''}` +
+                  `${running.elapsedSec != null ? `（已运行 ${humanDuration(running.elapsedSec)}）` : ''}，` +
+                  '等它结束再操作'
+                : !r.enabled
+                  ? '项目已停用'
+                  : undefined
+            }
           >
-            编译
-          </Button>
+            <Button
+              type="link"
+              size="small"
+              icon={<ThunderboltOutlined />}
+              disabled={!r.enabled || !!running}
+              onClick={() => openBuild(r)}
+              style={{ paddingInline: 4 }}
+            >
+              编译
+            </Button>
+          </DisabledTip>
           <Button
             type="link"
             size="small"
@@ -1431,7 +1565,8 @@ const ProjectList: React.FC = () => {
             />
           </Tooltip>
         </Space>
-      ),
+        );
+      },
     },
   ];
 
@@ -1558,8 +1693,19 @@ const ProjectList: React.FC = () => {
           size="middle"
           dataSource={dataSource}
           columns={columns}
-          scroll={{ x: 1560 }}
-          rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
+          // scroll.x 是按列宽算出来的常量：加了一列「Jenkins 执行」（156），
+          // 这里必须跟着加，否则右侧会多出一段空白（删列时同理）。
+          scroll={{ x: 1716 }}
+          // 正在执行的项目整行变灰：让"为什么这个不能点"一眼可见，
+          // 而不是点下去才发现按钮是禁用的。
+          rowClassName={(r) => (jenkinsRunningOf(r) ? 'yn-row-jenkins-busy' : '')}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: setSelectedRowKeys,
+            // 正在执行的不可勾选：否则批量编译会把它带上，
+            // 到后端被逐个拒绝，用户看到的是一串失败。
+            getCheckboxProps: (r) => ({ disabled: !!jenkinsRunningOf(r) }),
+          }}
           pagination={{
             // 默认 20：项目从 6 个涨到 14 个之后，10 条/页已经装不下（新项目排在前面，
             // 老项目被挤到第 2 页，用户找 aioai 时以为它不见了 —— 实测踩过）。

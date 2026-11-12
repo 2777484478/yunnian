@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -31,6 +32,16 @@ type CIService struct {
 	// sys 复用系统服务的「默认模型通道」解析（含密钥解密、超时兜底与"未配置通道"的提示文案），
 	// 与 AIService 同一个理由：多一份实现就多一个漏改点，换加密方案时必漏一处。
 	sys *SystemService
+
+	// activity Jenkins 运行态缓存：此刻哪些 Job 正在执行。
+	//
+	// 为什么必须缓存：这一项**只能问 Jenkins**（平台只记录自己发起的构建，
+	// 别人直接在 Jenkins 上点的构建平台看不见），而项目列表每打开一次都要它。
+	// 43 个已绑定 Job 逐个查就是 43 次 HTTP，不缓存会把 Jenkins 打满、
+	// 把列表拖慢。
+	activityMu    sync.Mutex
+	activityAt    time.Time
+	activityCache map[string]JenkinsJobActivityDTO
 }
 
 // --------------------------------------------------------------------------- 入参

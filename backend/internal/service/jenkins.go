@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -109,7 +110,197 @@ func (s *CIService) ListJenkinsJobs(ctx context.Context, refresh bool) (*Jenkins
 	return out, nil
 }
 
-// jenkinsBindings 返回 jenkinsJob（含文件夹路径）→ 平台项目 key 的映射。
+// --------------------------------------------------------------------------- 运行态
+
+// Jenkins 运行态的三档取值。
+//
+// **必须三档**，不能把"查不到"并进 idle：查不到时如果当成"空闲"，
+// 界面就会把一个其实正在跑的 Job 显示成可点，用户点下去才失败；
+// 当成"在跑"又会把正常的 Job 锁死。查不到就如实说查不到。
+const (
+	JenkinsActivityRunning = "running"
+	JenkinsActivityIdle    = "idle"
+	JenkinsActivityUnknown = "unknown"
+)
+
+// jenkinsActivityTTL 运行态缓存时长。
+//
+// 20 秒是权衡：这一项是"别处会改"的状态（有人直接在 Jenkins 上点构建），
+// 太长会让用户看着"空闲"实际在跑；太短则每次刷新列表都打一轮 Jenkins。
+// 真正的拦截不依赖它——触发时**现查一次**（见 TriggerJenkinsBuild）。
+const jenkinsActivityTTL = 20 * time.Second
+
+// jenkinsActivityTimeout 一轮运行态采集的总超时。
+//
+// 采集本身是**锦上添花**（只影响界面上灰不灰），不能让它把项目列表拖住，
+// 所以给一个比自己会等的上限，超了就把没查完的标成 unknown。
+const jenkinsActivityTimeout = 8 * time.Second
+
+// JenkinsJobActivityDTO 某个 Jenkins Job 此刻是否正在执行。
+type JenkinsJobActivityDTO struct {
+	// State running / idle / unknown
+	State string `json:"state"`
+	// BuildNo 正在执行（idle 时是最近一次）的构建号
+	BuildNo int `json:"buildNo,omitempty"`
+	// Since 这次构建的开始时间
+	Since string `json:"since,omitempty"`
+	// ElapsedSec 已运行秒数。
+	//
+	// 由服务端算而不是前端算：前端用的是**浏览器**的时钟，用户机器时间
+	// 偏了几分钟就会显示"已运行 -3 分钟"，看着像平台算错了。
+	ElapsedSec int `json:"elapsedSec,omitempty"`
+	// Message state=unknown 时的原因（Job 已不存在 / 网络读不到）
+	Message string `json:"message,omitempty"`
+}
+
+// JenkinsActivityDTO 平台已绑定的全部 Jenkins Job 的运行态。
+type JenkinsActivityDTO struct {
+	// Jobs jenkinsJob(fullName) → 运行态。
+	//
+	// 只含**平台已绑定**的 Job：Jenkins 上有 531 个 Job，全查一遍既没必要
+	// （平台不关心没有项目的那些）也承担不起（531 次 HTTP）。
+	Jobs      map[string]JenkinsJobActivityDTO `json:"jobs"`
+	FetchedAt string                           `json:"fetchedAt"`
+	// Source 固定 real，与 Job 列表同一契约。
+	Source string `json:"source"`
+}
+
+// JenkinsActivity 采集"平台绑定的这些 Jenkins Job，此刻谁在跑"。
+//
+// 存在的理由是一个平台结构上看不见的事实：**别人可以直接在 Jenkins 上点构建**。
+// 平台只记录自己发起的构建，所以"Jenkins 正在执行"必须现问 Jenkins，
+// 否则用户会在平台里对着一个其实正在跑的 Job 再点一次。
+func (s *CIService) JenkinsActivity(ctx context.Context, force bool) (*JenkinsActivityDTO, error) {
+	if !force {
+		s.activityMu.Lock()
+		if s.activityCache != nil && time.Since(s.activityAt) < jenkinsActivityTTL {
+			cached := make(map[string]JenkinsJobActivityDTO, len(s.activityCache))
+			for k, v := range s.activityCache {
+				cached[k] = v
+			}
+			at := s.activityAt
+			s.activityMu.Unlock()
+			return &JenkinsActivityDTO{Jobs: cached, FetchedAt: formatTime(at), Source: "real"}, nil
+		}
+		s.activityMu.Unlock()
+	}
+
+	client, err := s.jenkinsClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bound, err := s.jenkinsBindings(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &JenkinsActivityDTO{Jobs: make(map[string]JenkinsJobActivityDTO, len(bound)), Source: "real"}
+	if len(bound) == 0 {
+		out.FetchedAt = formatTime(now())
+		return out, nil
+	}
+
+	// 总超时自己兜一层：调用方（项目列表）不该为了"灰不灰"等超过 8 秒。
+	actx, cancel := context.WithTimeout(ctx, jenkinsActivityTimeout)
+	defer cancel()
+
+	type result struct {
+		job string
+		dto JenkinsJobActivityDTO
+	}
+	jobs := make([]string, 0, len(bound))
+	for job := range bound {
+		jobs = append(jobs, job)
+	}
+
+	var (
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, 8)
+	)
+	for _, job := range jobs {
+		wg.Add(1)
+		go func(fullName string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			item := JenkinsJobActivityDTO{State: JenkinsActivityUnknown}
+			snap, serr := client.JobSnapshot(actx, fullName)
+			switch {
+			case errors.Is(serr, integration.ErrJobNotFound):
+				item.Message = "Jenkins 上已不存在该 Job（可能被改名或删除），请重新绑定"
+			case serr != nil:
+				item.Message = "读取 Jenkins 状态失败"
+			case snap != nil && snap.LastBuild != nil:
+				lb := snap.LastBuild
+				item.BuildNo = lb.Number
+				if lb.Building {
+					item.State = JenkinsActivityRunning
+					if lb.Timestamp > 0 {
+						started := time.UnixMilli(lb.Timestamp)
+						item.Since = formatTime(started)
+						item.ElapsedSec = int(time.Since(started).Seconds())
+					}
+				} else {
+					item.State = JenkinsActivityIdle
+				}
+			default:
+				// Job 存在但一次都没构建过：确实是空闲。
+				item.State = JenkinsActivityIdle
+			}
+
+			mu.Lock()
+			out.Jobs[fullName] = item
+			mu.Unlock()
+		}(job)
+	}
+	wg.Wait()
+
+	at := now()
+	out.FetchedAt = formatTime(at)
+
+	s.activityMu.Lock()
+	s.activityCache = out.Jobs
+	s.activityAt = at
+	s.activityMu.Unlock()
+
+	return out, nil
+}
+
+// jenkinsBusyError 把"这个 Job 正在跑"翻译成一句能直接照做的话。
+//
+// 单独抽出来是因为它有**两个**调用点（触发前拦截、运行态展示），
+// 而措辞恰恰是这段逻辑里最容易写坏的部分：只写"正在执行"用户不知道
+// 是谁跑的、跑了多久、要不要等 —— 于是他会去 Jenkins 上再点一次。
+func jenkinsBusyError(fullName string, lb *integration.JenkinsBuildRef) error {
+	extra := ""
+	if lb.Timestamp > 0 {
+		started := time.UnixMilli(lb.Timestamp)
+		extra = fmt.Sprintf("（%s 开始，已运行 %s）",
+			started.Format("01-02 15:04:05"), jenkinsElapsedHuman(time.Since(started)))
+	}
+	return errs.StateConflict(fmt.Sprintf(
+		"Jenkins Job「%s」正在执行 #%d%s，不能重复触发；"+
+			"请等它结束再操作。若这次构建不是从平台发起的，请到 Jenkins 上确认它确实停了",
+		fullName, lb.Number, extra))
+}
+
+// jenkinsElapsedHuman 把时长写成人话。
+//
+// 只说"正在执行"用户不知道还要等多久；给一个具体数字（哪怕只是"23 分钟"）
+// 他就能自己判断是"等一下"还是"去看一眼是不是卡住了"。
+func jenkinsElapsedHuman(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "不到 1 分钟"
+	case d < time.Hour:
+		return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%d 小时 %d 分钟", int(d.Hours()), int(d.Minutes())%60)
+	}
+}
+
 //
 // 用 fullName 而不是裸名匹配：用了 Folders 插件之后，不同文件夹下可以有同名 Job，
 // 拿裸名匹配会把两个不同的 Job 当成同一个。
@@ -289,9 +480,16 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 	// 绑定失效（Job 被改名/删除）应当在用户点下去的这一刻就报 404，
 	// 而不是先告诉他"排队中"、等轮到他了再说"其实这个 Job 不存在"。
 	//
+	// 同时**顺手拦住"这个 Job 正在跑"**（2026-11-12）。
+	//
+	// 平台只记录自己发起的构建，别人直接在 Jenkins 上点的那次平台完全看不见 ——
+	// 于是用户会对着一个正在执行的 Job 再点一次，两个构建抢同一个工作区
+	// 和同一个镜像 tag。这一步是唯一能在"点下去之前"知道真相的地方，
+	// 所以必须**现查**，不能读 JenkinsActivity 的缓存（那最多滞后 20 秒）。
+	//
 	// ⚠️ 这里**不再**取 nextBuildNumber —— 那个快照必须在**触发前**拍
 	// （编号会随别人的构建往前走），所以它跟着触发一起挪进了队列任务。
-	_, snapErr := client.JobSnapshot(ctx, fullName)
+	snap, snapErr := client.JobSnapshot(ctx, fullName)
 	switch {
 	case errors.Is(snapErr, integration.ErrJobNotFound):
 		// 绑定关系过期了（Job 在 Jenkins 上被改名/删除）。**在这里就返回**，
@@ -307,7 +505,18 @@ func (s *CIService) TriggerJenkinsBuild(ctx context.Context, in JenkinsTriggerIn
 			p.ProjectKey, fullName)
 	case snapErr != nil:
 		// 读快照失败不影响触发本身，只是失去构建号兜底，降级为告警继续。
+		// 也正因为读不到，这里**无法判断**它是否正在跑 —— 交给 Jenkins 侧
+		// 的并发策略（若 Job 配了 "Do not allow concurrent builds"，最多是排队）。
 		s.log("ci.jenkins").Warn("读取 Job 快照失败，将无法用构建号兜底", "job", fullName, "err", snapErr)
+	case snap != nil && snap.LastBuild != nil && snap.LastBuild.Building:
+		// 正在执行。**拒绝发单**，理由要写全：谁的构建、跑了多久、该等多久。
+		// 只说"正在执行"用户会去 Jenkins 上再点一次，问题反而更大。
+		s.audit(ctx, c, auditInput{
+			Module: "CI", Action: "build:trigger-jenkins", TargetType: "build",
+			TargetName: fullName, Detail: "拒绝触发：Jenkins 上该 Job 正在执行",
+			Result: "failed", ErrMsg: fmt.Sprintf("build #%d running", snap.LastBuild.Number),
+		})
+		return nil, jenkinsBusyError(fullName, snap.LastBuild)
 	}
 
 	params, err := s.jenkinsBranchAndSnapshot(p, fullName, in.Parameters)

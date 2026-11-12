@@ -70,6 +70,24 @@ func (h *handler) testJenkinsConnection(c *gin.Context) {
 //
 // refresh 不改变后端行为（每次都实时去 Jenkins 拉，平台这一层不做缓存），
 // 保留它只是为了前端契约稳定，以及将来真需要缓存时有位置可落。
+// jenkinsActivity GET /system/integrations/jenkins/activity
+//
+// 返回「平台已绑定的这些 Jenkins Job，此刻谁正在执行」。
+//
+// 它解决的是一个平台结构上看不见的事实：**别人可以直接在 Jenkins 上点构建**。
+// 平台只记录自己发起的构建，所以项目列表要靠这个接口把"正在跑"标出来，
+// 否则用户会对着一个其实正在执行的 Job 再点一次。
+//
+// ?refresh=1 跳过 20 秒缓存（用户手动点刷新时用）。
+func (h *handler) jenkinsActivity(c *gin.Context) {
+	dto, err := h.svc.CI.JenkinsActivity(c.Request.Context(), httpx.QueryBool(c, "refresh", false))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, dto)
+}
+
 func (h *handler) listJenkinsJobs(c *gin.Context) {
 	dto, err := h.svc.CI.ListJenkinsJobs(c.Request.Context(), httpx.QueryBool(c, "refresh", false))
 	if err != nil {

@@ -886,7 +886,13 @@ func (s *CDService) liveStates(ctx context.Context, env *model.Environment, svcs
 	if len(svcs) == 0 {
 		return out
 	}
-	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	// 总超时 8 秒（2026-11-10 用户拍板，原 4 秒）：GCP 集群（境外）读 25 个服务的
+	// Deployment / Pod / 指标要 5s+，4 秒会让整批失败并显示
+	// "查询环境失败：context deadline exceeded"。
+	//
+	// 8 秒不等于让用户等 8 秒 —— 非 GCP 环境实测 0.1~1.5s 就返回，
+	// 只有链路差的集群会用到这个上限。不要为了"统一"把它调回 4 秒。
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 
 	// 用量**先批量取一次**：整个命名空间的 Deployment / Pod / 指标各查一遍，

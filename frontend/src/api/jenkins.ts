@@ -277,10 +277,45 @@ export interface JenkinsTriggerResult {
   parameters?: JenkinsBuildParam[];
 }
 
+// --------------------------------------------------------------------------- 运行态
+
+/**
+ * 某个 Jenkins Job 此刻是否正在执行。
+ *
+ * 存在的理由是一个平台结构上看不见的事实：**别人可以直接在 Jenkins 上点构建**。
+ * 平台只记录自己发起的构建，所以"正在执行"必须现问 Jenkins，
+ * 否则用户会对着一个其实在跑的 Job 在平台里再点一次（两个构建抢同一个
+ * 工作区和镜像 tag）。
+ */
+export interface JenkinsJobActivity {
+  /**
+   * running 正在执行 / idle 空闲 / unknown 查不到。
+   *
+   * **必须三档**：把 unknown 当成 idle，界面会把一个正在跑的 Job 显示成可点，
+   * 用户点下去才失败；当成 running，又会把正常的 Job 锁死。查不到就如实说查不到。
+   */
+  state: 'running' | 'idle' | 'unknown';
+  /** 正在执行（idle 时是最近一次）的构建号 */
+  buildNo?: number;
+  /** 这次构建的开始时间 */
+  since?: string;
+  /** 已运行秒数。服务端算好给的——浏览器时钟偏了会显示负数 */
+  elapsedSec?: number;
+  /** state=unknown 时的原因（Job 已不存在 / 网络读不到） */
+  message?: string;
+}
+
+/** 平台已绑定的全部 Jenkins Job 的运行态。 */
+export interface JenkinsActivity {
+  /** jenkinsJob(fullName) → 运行态。只含**平台已绑定**的 Job（Jenkins 上有 531 个，全查没意义） */
+  jobs: Record<string, JenkinsJobActivity>;
+  fetchedAt: string;
+  source: string;
+}
+
 export const jenkinsApi = {
   /** 读取当前配置。需要 user:manage——响应里带凭据元信息。 */
   settings: () => http.get<JenkinsSettings>('/system/integrations/jenkins'),
-
   /** 保存。token 留空表示保持原凭据不变；clearToken 显式删除。二者互斥。 */
   save: (body: JenkinsSettingsInput) =>
     http.put<JenkinsSettings>('/system/integrations/jenkins', body),
@@ -298,6 +333,21 @@ export const jenkinsApi = {
   /** 拉取 job 列表（含文件夹内）。带 refresh 时后端会跳过缓存。 */
   jobs: (opts?: { refresh?: boolean }) =>
     http.get<JenkinsJobList>('/system/integrations/jenkins/jobs', opts?.refresh ? { refresh: '1' } : undefined),
+
+  /**
+   * 平台已绑定的 Job 此刻谁正在执行。
+   *
+   * 后端对结果有 20 秒缓存（43 个绑定 Job 逐个问一次 Jenkins 才是真实成本，
+   * 项目列表每次打开都会要这份数据）。用户手动点刷新时传 `refresh: true` 跳过缓存。
+   *
+   * 注意：**这个接口只用于展示**（把项目置灰）。真正的拦截在后端触发接口里现查，
+   * 不依赖这里的缓存，所以滞后 20 秒不会导致"点了还是能发出去"。
+   */
+  activity: (opts?: { refresh?: boolean }) =>
+    http.get<JenkinsActivity>(
+      '/system/integrations/jenkins/activity',
+      opts?.refresh ? { refresh: '1' } : undefined,
+    ),
 
   /**
    * 读取某个 Job 的参数定义（**不含 GitParameter 的可选值**）。

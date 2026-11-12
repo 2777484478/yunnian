@@ -78,6 +78,8 @@ export type {
   JenkinsParamKind,
   JenkinsParamValues,
   JenkinsBuildParam,
+  JenkinsJobActivity,
+  JenkinsActivity,
 } from './jenkins';
 
 export { aiApi } from './ai';
