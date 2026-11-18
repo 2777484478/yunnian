@@ -249,7 +249,13 @@ const SystemRoles: React.FC = () => {
     const v = await newForm.validateFields();
     setCreating(true);
     try {
-      const perms = points.map((p) => p.code).filter((c) => c !== '*');
+      // 只排除**会把环境多选锁死**的那几个通配：`*`（超管）、`env:*`、`deploy:*`。
+      //
+      // 为什么：界面上一旦看到 `env:*` / `deploy:*`，对应的环境多选就被禁用
+      // （它们代表"全部环境"），新建出来的角色直接是"全环境可见且点不动"。
+      // `build:*`、`rollback:*` 不影响环境选择，保留（否则用户要逐个勾 4 个构建权限）。
+      const LOCK_ENV = new Set(['*', 'env:*', 'deploy:*']);
+      const perms = points.map((p) => p.code).filter((c) => !LOCK_ENV.has(c));
       const created = await roleApi.create({ name: v.name, desc: v.desc, perms });
       message.success(
         `已创建「${created.name}」，默认授予 ${created.perms?.length ?? perms.length} 个权限点（不含超级管理员通配），可在右侧按需取消`,
@@ -462,6 +468,22 @@ const SystemRoles: React.FC = () => {
                       <Text type="secondary" style={{ fontSize: 11.5 }}>
                         没配过 = 全部不可见；勾了哪些，环境管理列表 / 详情里就只看得到这些
                       </Text>
+                      {draft.includes('env:*') && canWrite ? (
+                        <Button
+                          type="link"
+                          size="small"
+                          style={{ padding: 0, height: 'auto', fontSize: 11.5 }}
+                          onClick={() => {
+                            // `env:*` 等于"全部可见"。拆成逐个选择时应等值全选，
+                            // 否则用户点一下就从"全看得见"变成"全看不见"。
+                            setDraft((prev) => prev.filter((p) => p !== 'env:*'));
+                            setVisibleDraft(allEnvs.map((e) => e.key));
+                            message.info('已改为逐个选择：默认勾了全部环境，取消不需要的再保存');
+                          }}
+                        >
+                          改为逐个选择
+                        </Button>
+                      ) : null}
                     </div>
                     <Select
                       mode="multiple"
@@ -483,6 +505,20 @@ const SystemRoles: React.FC = () => {
                       <Text type="secondary" style={{ fontSize: 11.5 }}>
                         勾了哪些，发布拓扑里就展示哪几个圈；没勾的环境不展示、也找不到发布入口
                       </Text>
+                      {draft.includes('deploy:*') && canWrite ? (
+                        <Button
+                          type="link"
+                          size="small"
+                          style={{ padding: 0, height: 'auto', fontSize: 11.5 }}
+                          onClick={() => {
+                            setDraft((prev) => prev.filter((p) => p !== 'deploy:*'));
+                            setDeployDraft(allEnvs.map((e) => e.key));
+                            message.info('已改为逐个选择：默认勾了全部环境，取消不需要的再保存');
+                          }}
+                        >
+                          改为逐个选择
+                        </Button>
+                      ) : null}
                     </div>
                     <Select
                       mode="multiple"
@@ -615,10 +651,14 @@ const SystemRoles: React.FC = () => {
           type="info"
           showIcon
           style={{ marginBottom: 14 }}
-          message="默认授予全部权限点（不含超级管理员通配）"
+          message="默认授予具体权限点，环境范围由你自己勾"
           description={
             <span style={{ fontSize: 12.5 }}>
-              创建后会自动选中这个角色，你可以在右侧把它不需要的权限点取消。
+              创建后会自动选中这个角色，你在右侧取消不需要的权限点即可。
+              <br />
+              <b>不含</b>超级管理员通配（<code>*</code>）与「全部环境」（<code>env:*</code> /
+              <code>deploy:*</code>）—— 那两个会把环境多选锁死，环境请在右侧自己选。
+              <br />
               角色只决定「能做什么」；能看到哪些项目由「团队」决定。
             </span>
           }
