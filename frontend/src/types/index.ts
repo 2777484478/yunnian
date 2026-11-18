@@ -560,20 +560,30 @@ export interface SysUser {
   name: string;
   email: string;
   phone: string;
-  role: UserRole;
+  /**
+   * 角色 code。**不是** UserRole 联合类型：自建角色的 code 是 `custom_N`，
+   * 收窄成枚举会让"新建角色"这件事在类型层面就做不了。
+   */
+  role: string;
+  /** 所属团队的名字（多值，来自 user_team 关系） */
   teams: string[];
+  /** 与 teams 一一对应的团队 ID，编辑弹窗预填用 */
+  teamIds: string[];
   enabled: boolean;
   lastLoginAt: string;
   createdAt: string;
 }
 
 export interface SysRole {
-  key: UserRole;
+  /** 角色 code：内置的 admin/ops/dev/qa/readonly，自建的是 custom_N */
+  key: string;
   name: string;
   desc: string;
   users: number;
   color: string;
   perms: string[];
+  /** 内置角色不可删除（后端拒绝）；自建角色可删（还有用户在用时会拒绝） */
+  builtin: boolean;
 }
 
 export interface NotifyChannel {

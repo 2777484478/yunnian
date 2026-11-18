@@ -26,7 +26,7 @@ func (h *handler) listProjects(c *gin.Context) {
 		PageSize: q.PageSize,
 		SortBy:   q.SortBy,
 		Order:    q.Order,
-	})
+	}, caller(c))
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -36,7 +36,7 @@ func (h *handler) listProjects(c *gin.Context) {
 
 // getProject GET /projects/{key}
 func (h *handler) getProject(c *gin.Context) {
-	p, err := h.svc.CI.GetProject(c.Request.Context(), httpx.PathString(c, "key"))
+	p, err := h.svc.CI.GetProject(c.Request.Context(), httpx.PathString(c, "key"), caller(c))
 	if err != nil {
 		httpx.Fail(c, err)
 		return

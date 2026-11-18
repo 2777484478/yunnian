@@ -100,15 +100,17 @@ export const userApi = {
   list: async (q: UserQuery = {}): Promise<PageResult<SysUser>> =>
     unwrapPage<SysUser>(await http.get('/users', params(q))),
 
-  invite: (body: { username: string; name: string; email: string; role: string }) =>
+  invite: (body: { username: string; name: string; email: string; role: string; teams?: string[] }) =>
     http.post<SysUser>('/users/invite', body),
 
   /**
    * 改角色 / 启停。后端用指针字段接收，只传要改的键即可（其它保持原值）。
    * 注意：不能停用当前登录账号，后端返回 40000。
    */
-  update: (id: string, body: { role?: string; enabled?: boolean; name?: string; email?: string }) =>
-    http.patch<SysUser>(`/users/${id}`, body),
+  update: (
+    id: string,
+    body: { role?: string; enabled?: boolean; name?: string; email?: string; teams?: string[] },
+  ) => http.patch<SysUser>(`/users/${id}`, body),
 
   /** 删除用户（硬删）。后端拒绝删自己与最后一个超级管理员。 */
   remove: (id: string) => http.del<{ deleted: boolean }>(`/users/${id}`),
@@ -132,4 +134,23 @@ export const roleApi = {
    */
   setPermissions: (code: string, perms: string[], confirmEmpty = false) =>
     http.put<SysRole>(`/roles/${code}/permissions`, { perms }, { confirmEmpty }),
+
+  /**
+   * 新建自定义角色（code 由后端生成 `custom_N`）。
+   *
+   * 权限点必须一起提交：分两步会出现"角色建好了但没有任何权限"的中间态，
+   * 用户以为成功了，用起来什么都点不了。
+   *
+   * ⚠️ 不要传 `*`（全部权限）——后端会拒绝：它绕过的不只是权限点，
+   * 还有按团队的数据可见范围。界面上"默认全选"必须把它排除。
+   */
+  create: (body: { name: string; desc?: string; perms: string[] }) =>
+    http.post<SysRole>('/roles', body),
+
+  /** 改角色名称/描述。code 与权限点不在这里改。 */
+  update: (code: string, body: { name: string; desc?: string }) =>
+    http.put<SysRole>(`/roles/${code}`, body),
+
+  /** 删自定义角色。内置角色、还有用户在用的角色都会被后端拒绝并说明原因。 */
+  remove: (code: string) => http.del<{ deleted: boolean }>(`/roles/${code}`),
 };

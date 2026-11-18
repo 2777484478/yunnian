@@ -26,6 +26,8 @@ func Models() []any {
 		&model.Permission{},
 		&model.UserRole{},
 		&model.RolePermission{},
+		// 用户 ↔ 团队（数据可见范围：决定在「项目管理」里能看到哪些项目）
+		&model.UserTeam{},
 
 		// 2. 项目
 		&model.Project{},

@@ -131,9 +131,22 @@ func (h *handler) registerUsers(g *gin.RouterGroup) {
 	g.POST("/teams", middleware.RequirePerm("team:manage"), h.createTeam)
 	g.PATCH("/teams/:id", middleware.RequirePerm("team:manage"), h.updateTeam)
 	g.DELETE("/teams/:id", middleware.RequirePerm("team:manage"), h.deleteTeam)
+	// 团队成员与项目归属。
+	//
+	// 读用 team:read（配用户时要看"这个团队有谁"），写用 team:manage。
+	// 注意这两个接口写的是**同一张 user_team 表**，与用户编辑里的「所属团队」
+	// 是同一个数据源，两个入口不会冲突。
+	g.GET("/teams/:id/members", middleware.RequirePerm("team:read"), h.teamMembers)
+	g.PUT("/teams/:id/members", middleware.RequirePerm("team:manage"), h.setTeamMembers)
+	g.GET("/teams/:id/projects", middleware.RequirePerm("team:read"), h.teamProjects)
+	g.PUT("/teams/:id/projects", middleware.RequirePerm("team:manage"), h.moveTeamProjects)
 	// 权限点清单给"角色权限编辑"页面用，同属角色管理
 	g.GET("/permissions", middleware.RequirePerm("role:manage", "user:manage"), h.listPermissions)
 	g.PUT("/roles/:code/permissions", middleware.RequirePerm("role:manage"), h.updateRolePermissions)
+	// 自定义角色的建/改/删（内置角色由服务层拒绝删除）。
+	g.POST("/roles", middleware.RequirePerm("role:manage"), h.createRole)
+	g.PUT("/roles/:code", middleware.RequirePerm("role:manage"), h.updateRole)
+	g.DELETE("/roles/:code", middleware.RequirePerm("role:manage"), h.deleteRole)
 }
 
 func (h *handler) registerProjects(g *gin.RouterGroup) {

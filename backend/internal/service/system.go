@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1388,13 +1389,14 @@ func (s *SystemService) ListUsers(ctx context.Context, q UserQuery) (*httpx.Page
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	teamByUser, err := s.teamsOf(ctx, userIDs(users))
+	teamNames, teamIDs, err := s.userTeamsOf(ctx, userIDs(users))
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	out := make([]SysUserDTO, 0, len(users))
 	for i := range users {
-		out = append(out, userToDTO(&users[i], roleByUser[users[i].ID], teamByUser[users[i].ID]))
+		out = append(out, userToDTO(&users[i], roleByUser[users[i].ID],
+			teamNames[users[i].ID], teamIDs[users[i].ID]))
 	}
 	return &pq, out, total, nil
 }
@@ -1430,7 +1432,12 @@ type InviteUserInput struct {
 	Email    string `json:"email" binding:"required,email,max=128"`
 	Phone    string `json:"phone" binding:"omitempty,max=20"`
 	Role     string `json:"role" binding:"required,oneof=admin ops dev qa readonly"`
-	Team     string `json:"team" binding:"omitempty,max=64"`
+	// Teams 所属团队的 ID 列表（可空）。
+	//
+	// 空 = 这个人暂时不属于任何团队 → 在「项目管理」里看不到任何项目
+	// （超级管理员除外）。这里**不强制必填**：建号时还没定团队是常事，
+	// 强行拦住只会让人先随便选一个，反而更难纠正。
+	Teams    []string `json:"teams" binding:"omitempty,max=32,dive,max=32"`
 	// Password 留空则使用平台初始密码。
 	Password string `json:"password" binding:"omitempty,min=8,max=128"`
 }
@@ -1469,14 +1476,96 @@ func (s *SystemService) InviteUser(ctx context.Context, in InviteUserInput, c Ca
 	if err := s.db(ctx).Create(&model.UserRole{UserID: u.ID, RoleID: role.ID}).Error; err != nil {
 		return nil, errs.Internalf(err, "分配角色失败")
 	}
+	if err := s.setUserTeams(ctx, u.ID, in.Teams); err != nil {
+		return nil, err
+	}
 
 	s.audit(ctx, c, auditInput{
 		Module: "系统", Action: "user:invite", TargetType: "user",
 		TargetID: &u.ID, TargetName: u.Name,
 		Detail: fmt.Sprintf("新增用户 %s（%s，角色 %s）", u.Username, u.Name, role.Code),
 	})
-	dto := userToDTO(&u, role.Code, in.Team)
+	names, ids, err := s.userTeamsOf(ctx, []uint64{u.ID})
+	if err != nil {
+		return nil, err
+	}
+	dto := userToDTO(&u, role.Code, names[u.ID], ids[u.ID])
 	return &dto, nil
+}
+
+// setUserTeams 覆盖式写入用户的团队归属（先删后插，同一事务）。
+//
+// 覆盖式而不是增量：调用方传的是"这个用户最终属于哪些团队"，
+// 增量接口会让前端必须自己算差集，那是最容易算错的地方。
+func (s *SystemService) setUserTeams(ctx context.Context, userID uint64, teamIDs []string) error {
+	resolved, err := s.resolveTeamIDs(ctx, teamIDs)
+	if err != nil {
+		return err
+	}
+	return s.db(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", userID).Delete(&model.UserTeam{}).Error; err != nil {
+			return errs.Internalf(err, "清理用户团队失败")
+		}
+		if len(resolved) == 0 {
+			return nil
+		}
+		rows := make([]model.UserTeam, 0, len(resolved))
+		for _, id := range resolved {
+			rows = append(rows, model.UserTeam{UserID: userID, TeamID: id})
+		}
+		if err := tx.Create(&rows).Error; err != nil {
+			return errs.Internalf(err, "写入用户团队失败")
+		}
+		return nil
+	})
+}
+
+// resolveTeamIDs 把字符串 ID 解析成团队主键，并校验团队存在且启用。
+//
+// 停用的团队不允许再分配（与「项目」的团队校验同一口径）：否则用户会被
+// 挂到一个已经没人管的团队上，而界面上那个团队还灰着，看不出问题在哪。
+func (s *SystemService) resolveTeamIDs(ctx context.Context, ids []string) ([]uint64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	out := make([]uint64, 0, len(ids))
+	seen := map[uint64]bool{}
+	for _, raw := range ids {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		id, perr := strconv.ParseUint(v, 10, 64)
+		if perr != nil {
+			return nil, errs.Invalidf("团队 ID %q 格式不对", raw)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	var teams []model.Team
+	if err := s.db(ctx).Where("id IN ?", out).Find(&teams).Error; err != nil {
+		return nil, errs.Internalf(err, "校验团队失败")
+	}
+	byID := make(map[uint64]model.Team, len(teams))
+	for _, t := range teams {
+		byID[t.ID] = t
+	}
+	for _, id := range out {
+		t, ok := byID[id]
+		if !ok {
+			return nil, errs.Invalidf("团队不存在（ID %d），请刷新页面后重选", id)
+		}
+		if !t.Enabled {
+			return nil, errs.Invalidf("团队 %q 已停用，不能把用户加入已停用的团队", t.Name)
+		}
+	}
+	return out, nil
 }
 
 // UpdateUserInput 修改用户入参。
@@ -1486,6 +1575,10 @@ type UpdateUserInput struct {
 	Phone   *string `json:"phone"`
 	Role    *string `json:"role"`
 	Enabled *bool   `json:"enabled"`
+	// Teams 用指针区分"没传"和"传了空数组"：
+	// 前者 = 不动，后者 = 明确清空（这个人不再属于任何团队）。
+	// 用值类型会把"只改手机号"的请求理解成"把他的团队全删了"。
+	Teams *[]string `json:"teams"`
 }
 
 // UpdateUser 改角色 / 启停 / 改资料。
@@ -1563,6 +1656,12 @@ func (s *SystemService) UpdateUser(ctx context.Context, id uint64, in UpdateUser
 		}
 	}
 
+	if in.Teams != nil {
+		if err := s.setUserTeams(ctx, u.ID, *in.Teams); err != nil {
+			return nil, err
+		}
+	}
+
 	// 权限或启用状态变了，必须把该用户的所有会话踢掉：
 	// 否则旧令牌里的权限快照还有效，降权要等令牌过期才生效（最长 2 小时）。
 	if (in.Role != nil && *in.Role != "") || (in.Enabled != nil && !*in.Enabled) {
@@ -1585,11 +1684,11 @@ func (s *SystemService) UpdateUser(ctx context.Context, id uint64, in UpdateUser
 	if err != nil {
 		return nil, err
 	}
-	teams, err := s.teamsOf(ctx, []uint64{fresh.ID})
+	teams, teamIDs, err := s.userTeamsOf(ctx, []uint64{fresh.ID})
 	if err != nil {
 		return nil, err
 	}
-	dto := userToDTO(&fresh, roles[fresh.ID], teams[fresh.ID])
+	dto := userToDTO(&fresh, roles[fresh.ID], teams[fresh.ID], teamIDs[fresh.ID])
 	return &dto, nil
 }
 
@@ -1645,12 +1744,13 @@ func (s *SystemService) ListRoles(ctx context.Context) ([]SysRoleDTO, error) {
 	out := make([]SysRoleDTO, 0, len(roles))
 	for i := range roles {
 		out = append(out, SysRoleDTO{
-			Key:   roles[i].Code,
-			Name:  roles[i].Name,
-			Desc:  roles[i].Description,
-			Users: countByRole[roles[i].ID],
-			Color: roleColor(roles[i].Code),
-			Perms: permByRole[roles[i].ID],
+			Key:     roles[i].Code,
+			Name:    roles[i].Name,
+			Desc:    roles[i].Description,
+			Users:   countByRole[roles[i].ID],
+			Color:   roleColor(roles[i].Code),
+			Perms:   permByRole[roles[i].ID],
+			Builtin: roles[i].Builtin,
 		})
 	}
 	return out, nil
@@ -1677,6 +1777,17 @@ func (s *SystemService) UpdateRolePermissions(ctx context.Context, code string, 
 	}
 	if len(in.Perms) == 0 && !allowEmpty {
 		return nil, errs.Invalid("将角色权限清空会影响该角色下所有用户，请显式确认（allowEmpty=true）")
+	}
+
+	// ⚠️ `*`（全部权限）只能属于 admin。
+	//
+	// 它绕过的不只是权限点，还有**数据可见范围**（visibleTeamNames 判的就是
+	// hasAnyPerm("*")）。前端新建角色时"默认全选 48 个"必须把它排除，
+	// 但接口不能只靠前端自觉 —— 手拼一个请求就能造出一个超管。
+	for _, p := range in.Perms {
+		if strings.TrimSpace(p) == "*" {
+			return nil, errs.Forbidden("只有超级管理员角色（admin）可以拥有 * 权限；自定义角色请用具体权限点")
+		}
 	}
 
 	// ⚠️ 动态权限点：`env:view:<envKey>` 与 `deploy:<envKey>` 是按环境生成的，不预先在
@@ -2544,29 +2655,42 @@ func (s *SystemService) roleCodesOf(ctx context.Context, ids []uint64) (map[uint
 	return out, nil
 }
 
-func (s *SystemService) teamsOf(ctx context.Context, ids []uint64) (map[uint64]string, error) {
-	out := map[uint64]string{}
+// userTeamsOf 每个用户所属的团队（名字 + ID）。
+//
+// 数据源是 **user_team 关系表**，不是从 `project.owner_id` 反查。
+//
+// 2026-11-18 之前这里查的是 `SELECT DISTINCT owner_id, team FROM project`，
+// 两个后果：① 只有"项目负责人"才显示团队，普通成员永远是空；
+// ② 一个人负责多个团队的项目时只显示第一个（还在用 `if !ok` 去重）。
+// 现在用户与团队是真关系，可以多值。
+func (s *SystemService) userTeamsOf(ctx context.Context, ids []uint64) (
+	map[uint64][]string, map[uint64][]string, error) {
+
+	names := map[uint64][]string{}
+	teamIDs := map[uint64][]string{}
 	uniq := dedupeUint64(ids)
 	if len(uniq) == 0 {
-		return out, nil
+		return names, teamIDs, nil
 	}
 	type row struct {
-		OwnerID uint64 `gorm:"column:owner_id"`
-		Team    string `gorm:"column:team"`
+		UserID uint64 `gorm:"column:user_id"`
+		TeamID uint64 `gorm:"column:team_id"`
+		Name   string `gorm:"column:name"`
 	}
 	var rows []row
-	if err := s.db(ctx).Table("project").
-		Select("DISTINCT owner_id, team").
-		Where("owner_id IN ? AND team <> '' AND deleted_at IS NULL", uniq).
+	if err := s.db(ctx).Table("user_team").
+		Select("user_team.user_id, team.id AS team_id, team.name").
+		Joins("JOIN team ON team.id = user_team.team_id").
+		Where("user_team.user_id IN ?", uniq).
+		Order("team.sort, team.id").
 		Scan(&rows).Error; err != nil {
-		return nil, errs.Internalf(err, "查询用户团队失败")
+		return nil, nil, errs.Internalf(err, "查询用户团队失败")
 	}
 	for _, r := range rows {
-		if _, ok := out[r.OwnerID]; !ok {
-			out[r.OwnerID] = r.Team
-		}
+		names[r.UserID] = append(names[r.UserID], r.Name)
+		teamIDs[r.UserID] = append(teamIDs[r.UserID], httpx.IDString(r.TeamID))
 	}
-	return out, nil
+	return names, teamIDs, nil
 }
 
 func (s *SystemService) permsOfRoles(ctx context.Context, ids []uint64) (map[uint64][]string, error) {

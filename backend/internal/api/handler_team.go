@@ -67,3 +67,84 @@ func (h *handler) deleteTeam(c *gin.Context) {
 	}
 	httpx.OK(c, gin.H{"deleted": true})
 }
+
+// --------------------------------------------------------------------------- 团队成员 / 项目
+
+// teamMembers GET /teams/:id/members
+func (h *handler) teamMembers(c *gin.Context) {
+	id, ok := pathUint(c, "id")
+	if !ok {
+		return
+	}
+	list, err := h.svc.System.TeamMembers(c.Request.Context(), id)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"list": list})
+}
+
+// setTeamMembers PUT /teams/:id/members
+//
+// 覆盖式：传的名单就是最终名单（空数组 = 清空）。
+func (h *handler) setTeamMembers(c *gin.Context) {
+	id, ok := pathUint(c, "id")
+	if !ok {
+		return
+	}
+	var in struct {
+		UserIDs []string `json:"userIds"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		httpx.Fail(c, errValidation("请求参数不合法："+err.Error()))
+		return
+	}
+	if err := h.svc.System.SetTeamMembers(c.Request.Context(), id, in.UserIDs, caller(c)); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	list, err := h.svc.System.TeamMembers(c.Request.Context(), id)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"list": list})
+}
+
+// teamProjects GET /teams/:id/projects
+//
+// 返回**全部项目**及各自当前归属（不是只返回本团队的）：这块的语义是"迁入"，
+// 只列本团队的就没法迁入了。前端按 inTeam 勾选。
+func (h *handler) teamProjects(c *gin.Context) {
+	id, ok := pathUint(c, "id")
+	if !ok {
+		return
+	}
+	list, err := h.svc.System.TeamProjectOptions(c.Request.Context(), id)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"list": list})
+}
+
+// moveTeamProjects PUT /teams/:id/projects
+func (h *handler) moveTeamProjects(c *gin.Context) {
+	id, ok := pathUint(c, "id")
+	if !ok {
+		return
+	}
+	var in struct {
+		ProjectKeys []string `json:"projectKeys"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		httpx.Fail(c, errValidation("请求参数不合法："+err.Error()))
+		return
+	}
+	n, err := h.svc.System.MoveProjectsToTeam(c.Request.Context(), id, in.ProjectKeys, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"moved": n})
+}

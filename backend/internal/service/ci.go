@@ -366,12 +366,106 @@ var projectSortColumns = map[string]string{
 	"updatedAt": "updated_at",
 }
 
+// visibleTeamNames 当前用户在「项目管理」里能看到的**团队名**集合。
+//
+// 这是**数据可见范围**，不是权限点：角色权限（`project:read` 等）回答"能不能
+// 打开项目管理"，这个函数回答"打开后看得到哪些项目"。
+//
+// restricted=false 表示不受限（超级管理员 `*`）。返回 names 为空 + restricted=true
+// 是一个合法状态：这个人还没被加进任何团队 —— 界面上必须明确告诉他这件事，
+// 而不是给他一个空白列表让他以为出 bug 了。
+func (s *CIService) visibleTeamNames(ctx context.Context, c Caller) ([]string, bool, error) {
+	if c.User == nil || c.User.HasAnyPerm("*") {
+		return nil, false, nil
+	}
+	if c.User.ID == 0 {
+		return nil, true, nil
+	}
+	type row struct {
+		Name string `gorm:"column:name"`
+	}
+	var rows []row
+	if err := s.db(ctx).Table("user_team").
+		Select("team.name").
+		Joins("JOIN team ON team.id = user_team.team_id").
+		Where("user_team.user_id = ?", c.User.ID).
+		Order("team.sort, team.id").
+		Scan(&rows).Error; err != nil {
+		return nil, true, errs.Internalf(err, "查询用户团队失败")
+	}
+	names := make([]string, 0, len(rows))
+	for _, r := range rows {
+		names = append(names, r.Name)
+	}
+	return names, true, nil
+}
+
+// assertProjectVisible 项目级的可见性校验（详情 / 编辑 / 删除 / 启停）。
+//
+// 为什么必须在后端拦：前端把列表藏起来只是"看不见"，知道 URL 或直接调接口
+// 照样能读能改 —— 那种隔离是假的。
+func (s *CIService) assertProjectVisible(ctx context.Context, p *model.Project, c Caller) error {
+	names, restricted, err := s.visibleTeamNames(ctx, c)
+	if err != nil {
+		return err
+	}
+	if !restricted {
+		return nil
+	}
+	for _, n := range names {
+		if n == p.Team {
+			return nil
+		}
+	}
+	return errs.Forbidden(fmt.Sprintf(
+		"项目 %s 属于团队「%s」，不在你可看到的范围内（你属于：%s）",
+		p.ProjectKey, stringOr(p.Team, "未分配"), strings.Join(names, "、")))
+}
+
+// assertTeamVisible 新建/改项目时校验"目标团队在不在我的可见范围里"。
+//
+// 少了这道：用户可以把项目建到自己看不到的团队里 —— 建完立刻消失，
+// 而他会以为"保存失败"。反过来也成立：可以借改团队把项目"藏"起来。
+func (s *CIService) assertTeamVisible(ctx context.Context, team string, c Caller) error {
+	names, restricted, err := s.visibleTeamNames(ctx, c)
+	if err != nil {
+		return err
+	}
+	if !restricted {
+		return nil
+	}
+	for _, n := range names {
+		if n == team {
+			return nil
+		}
+	}
+	if len(names) == 0 {
+		return errs.Forbidden("你还没有加入任何团队，无法创建或调整项目；请联系管理员把你加入对应团队")
+	}
+	return errs.Forbidden(fmt.Sprintf(
+		"不能把项目放到团队「%s」：你只属于 %s", team, strings.Join(names, "、")))
+}
+
 // ListProjects 项目列表（含最近构建与统计）。
-func (s *CIService) ListProjects(ctx context.Context, q ProjectQuery) (*httpx.PageQuery, any, int64, error) {
+func (s *CIService) ListProjects(ctx context.Context, q ProjectQuery, c Caller) (*httpx.PageQuery, any, int64, error) {
 	pq := httpx.PageQuery{Page: q.Page, PageSize: q.PageSize, SortBy: q.SortBy, Order: q.Order, Keyword: q.Keyword}
 	column, desc := pq.Normalize(projectSortColumns, "updated_at")
 
 	db := s.db(ctx).Model(&model.Project{})
+
+	// 团队可见范围：先于其他筛选加上，因为它决定"这个人有资格看到哪些项目"。
+	// 不属于任何团队的非管理员 → 直接空列表（不是报错：他能打开页面，
+	// 只是没有数据，前端据此显示"你还没有加入任何团队"的提示）。
+	teamNames, restricted, verr := s.visibleTeamNames(ctx, c)
+	if verr != nil {
+		return nil, nil, 0, verr
+	}
+	if restricted {
+		if len(teamNames) == 0 {
+			return &pq, []ProjectDTO{}, 0, nil
+		}
+		db = db.Where("team IN ?", teamNames)
+	}
 	if kw := strings.TrimSpace(q.Keyword); kw != "" {
 		like := "%" + kw + "%"
 		db = db.Where("name LIKE ? OR project_key LIKE ? OR description LIKE ?", like, like, like)
@@ -440,9 +534,12 @@ func (s *CIService) ListProjects(ctx context.Context, q ProjectQuery) (*httpx.Pa
 }
 
 // GetProject 项目详情。
-func (s *CIService) GetProject(ctx context.Context, key string) (*ProjectDTO, error) {
+func (s *CIService) GetProject(ctx context.Context, key string, c Caller) (*ProjectDTO, error) {
 	p, err := s.projectByKey(ctx, key)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.assertProjectVisible(ctx, p, c); err != nil {
 		return nil, err
 	}
 	ownerNames, err := s.userNames(ctx, []uint64{p.OwnerID})
@@ -497,6 +594,9 @@ func (s *CIService) CreateProject(ctx context.Context, in ProjectInput, c Caller
 	// 前端是下拉，但**后端不能依赖前端**：一条直接打 API 的请求照样能写进
 	// 一个不存在的团队名，而那种脏数据的后果是静默的（见 assertTeamAssignable）。
 	if err := s.assertTeamAssignable(ctx, in.Team, ""); err != nil {
+		return nil, err
+	}
+	if err := s.assertTeamVisible(ctx, in.Team, c); err != nil {
 		return nil, err
 	}
 
@@ -591,6 +691,9 @@ func (s *CIService) UpdateProject(ctx context.Context, key string, in ProjectInp
 	if err != nil {
 		return nil, err
 	}
+	if err := s.assertProjectVisible(ctx, p, c); err != nil {
+		return nil, err
+	}
 	// 负责人变更需要额外权限（相当于把项目交出去），只有运维/管理员能做。
 	if in.Owner != "" {
 		newOwner, err := s.resolveOwner(ctx, in.Owner, c)
@@ -628,6 +731,13 @@ func (s *CIService) UpdateProject(ctx context.Context, key string, in ProjectInp
 	team := stringOr(strings.TrimSpace(in.Team), p.Team)
 	if err := s.assertTeamAssignable(ctx, team, p.Team); err != nil {
 		return nil, err
+	}
+	// 只有"改成别的团队"才校验可见性：原地不动时上面 assertProjectVisible
+	// 已经确认过他能看到这个项目，无需再判一次。
+	if team != p.Team {
+		if err := s.assertTeamVisible(ctx, team, c); err != nil {
+			return nil, err
+		}
 	}
 
 	updates := map[string]any{
@@ -677,13 +787,16 @@ func (s *CIService) UpdateProject(ctx context.Context, key string, in ProjectInp
 		TargetID: &p.ID, TargetName: p.Name,
 		Detail: fmt.Sprintf("编辑项目 %s（%s）", p.ProjectKey, p.Name),
 	})
-	return s.GetProject(ctx, key)
+	return s.GetProject(ctx, key, c)
 }
 
 // SetProjectEnabled 启用/停用项目。
 func (s *CIService) SetProjectEnabled(ctx context.Context, key string, enabled bool, c Caller) error {
 	p, err := s.projectByKey(ctx, key)
 	if err != nil {
+		return err
+	}
+	if err := s.assertProjectVisible(ctx, p, c); err != nil {
 		return err
 	}
 	if err := s.db(ctx).Model(&model.Project{}).Where("id = ?", p.ID).
@@ -709,6 +822,9 @@ func (s *CIService) SetProjectEnabled(ctx context.Context, key string, enabled b
 func (s *CIService) DeleteProject(ctx context.Context, key string, c Caller) error {
 	p, err := s.projectByKey(ctx, key)
 	if err != nil {
+		return err
+	}
+	if err := s.assertProjectVisible(ctx, p, c); err != nil {
 		return err
 	}
 	var active int64

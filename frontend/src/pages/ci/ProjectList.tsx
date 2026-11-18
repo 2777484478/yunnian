@@ -8,6 +8,7 @@ import {
   Col,
   Divider,
   Drawer,
+  Empty,
   Form,
   Input,
   Modal,
@@ -1693,6 +1694,23 @@ const ProjectList: React.FC = () => {
           size="middle"
           dataSource={dataSource}
           columns={columns}
+          locale={{
+            emptyText: (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={
+                  <span style={{ fontSize: 13 }}>
+                    没有可显示的项目
+                    <br />
+                    <Text type="secondary" style={{ fontSize: 12.5 }}>
+                      项目可见范围按「团队」控制：你还不在任何团队里时，这里是空的。
+                      请联系管理员把你加入对应团队（超级管理员不受此限制）。
+                    </Text>
+                  </span>
+                }
+              />
+            ),
+          }}
           // scroll.x 是按列宽算出来的常量：加了一列「Jenkins 执行」（156），
           // 这里必须跟着加，否则右侧会多出一段空白（删列时同理）。
           scroll={{ x: 1716 }}

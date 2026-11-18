@@ -857,15 +857,20 @@ type SysUserDTO struct {
 	Phone       string   `json:"phone"`
 	Role        string   `json:"role"`
 	Teams       []string `json:"teams"`
+	// TeamIDs 与 Teams 一一对应。编辑弹窗预填用 ID：
+	// 只回名字的话，团队一改名表单就对不上了。
+	TeamIDs     []string `json:"teamIds"`
 	Enabled     bool     `json:"enabled"`
 	LastLoginAt string   `json:"lastLoginAt"`
 	CreatedAt   string   `json:"createdAt"`
 }
 
-func userToDTO(u *model.User, roleCode, team string) SysUserDTO {
-	teams := []string{}
-	if team != "" {
-		teams = append(teams, team)
+func userToDTO(u *model.User, roleCode string, teams, teamIDs []string) SysUserDTO {
+	if teams == nil {
+		teams = []string{}
+	}
+	if teamIDs == nil {
+		teamIDs = []string{}
 	}
 	return SysUserDTO{
 		ID:          httpx.IDString(u.ID),
@@ -875,6 +880,7 @@ func userToDTO(u *model.User, roleCode, team string) SysUserDTO {
 		Phone:       u.Phone,
 		Role:        roleCode,
 		Teams:       teams,
+		TeamIDs:     teamIDs,
 		Enabled:     u.Enabled,
 		LastLoginAt: formatTimePtr(u.LastLoginAt),
 		CreatedAt:   formatTime(u.CreatedAt),
@@ -904,6 +910,9 @@ type SysRoleDTO struct {
 	Users int64    `json:"users"`
 	Color string   `json:"color"`
 	Perms []string `json:"perms"`
+	// Builtin 内置角色（admin/ops/dev/qa/readonly）。它们不可删除，
+	// 只有内置角色可以被删除保护挡住 —— 自建的角色用户随时能删掉。
+	Builtin bool `json:"builtin"`
 }
 
 // NotifyChannelDTO 通知渠道。

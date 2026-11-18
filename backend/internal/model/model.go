@@ -222,6 +222,25 @@ type ProjectMember struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// UserTeam 用户与团队的关系（多对多）。
+//
+// 这是**数据可见范围**，不是权限：角色权限回答"能做什么"，
+// 这个关系回答"在「项目管理」里能看到哪些项目"。
+//
+// 为什么不复用 ProjectMember：那个是"项目成员"（建项目时把创建者塞进去，
+// 目前没有任何地方读它做判定），粒度是项目；这里的粒度是团队，
+// 一个团队下面有多个项目，用户跟着团队走。
+//
+// ⚠️ 存 team_id 而不是团队名：团队改名时不用回写这里。
+// 而 `project.team` 存的是**名字**（历史原因 + 改团队名时已有级联），
+// 所以判断"这个项目用户能不能看"时要 join 一次拿到名字再比。
+type UserTeam struct {
+	ID        uint64    `gorm:"primaryKey;autoIncrement" json:"-"`
+	UserID    uint64    `gorm:"not null;uniqueIndex:uk_user_team,priority:1;index:idx_ut_user" json:"userId"`
+	TeamID    uint64    `gorm:"not null;uniqueIndex:uk_user_team,priority:2;index:idx_ut_team" json:"teamId"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // --------------------------------------------------------------------------- 3. 构建
 
 // BuildRecord 构建记录。

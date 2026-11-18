@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, App as AntApp, Button, Checkbox, Select, Empty, Input, Space, Spin, Tag, Tooltip, Typography } from 'antd';
-import { LockOutlined, SaveOutlined } from '@ant-design/icons';
+import { Alert, App as AntApp, Button, Checkbox, Select, Empty, Form, Input, Modal, Space, Spin, Tag, Tooltip, Typography } from 'antd';
+import { DeleteOutlined, LockOutlined, PlusOutlined, SaveOutlined } from '@ant-design/icons';
 import { PageHeader, SectionCard } from '@/components/ui';
 import { environmentApi, roleApi } from '@/api';
 import { hasPerm } from '@/auth';
@@ -69,7 +69,7 @@ const DEPLOY_NON_ENV_SUFFIXES = new Set(['*', 'read', 'approve', 'restart', 'red
  * 前端一直没入口，等于权限模型只能靠种子数据。
  */
 const SystemRoles: React.FC = () => {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const canWrite = hasPerm('role:manage') || hasPerm('user:manage');
 
   const [roles, setRoles] = useState<SysRole[]>([]);
@@ -229,13 +229,78 @@ const SystemRoles: React.FC = () => {
     }
   };
 
+  // ------------------------------------------------------------------ 新建 / 删除
+  const [newOpen, setNewOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [newForm] = Form.useForm();
+
+  /**
+   * 新建角色。
+   *
+   * 权限点**默认全选，但排除 `*`**：
+   *   - `*` 是超级管理员通配，它绕过的不只是权限点，还有按团队的数据可见范围
+   *     （后端 visibleTeamNames 判的就是 hasAnyPerm("*")）；
+   *   - 后端也会拒绝非 admin 角色带 `*`，这里先排除，免得用户提交后吃一个 403。
+   *
+   * 建完立刻选中它，用户可以直接在右侧取消不需要的权限点 ——
+   * 这比"建角色时勾 48 个"更符合实际：多数人是从全集往下删，而不是从零往上加。
+   */
+  const createRole = async () => {
+    const v = await newForm.validateFields();
+    setCreating(true);
+    try {
+      const perms = points.map((p) => p.code).filter((c) => c !== '*');
+      const created = await roleApi.create({ name: v.name, desc: v.desc, perms });
+      message.success(
+        `已创建「${created.name}」，默认授予 ${created.perms?.length ?? perms.length} 个权限点（不含超级管理员通配），可在右侧按需取消`,
+      );
+      setNewOpen(false);
+      newForm.resetFields();
+      await load();
+      setActive(created.key);
+      setDraft(created.perms ?? perms);
+    } catch (e) {
+      message.error((e as Error)?.message ?? '创建失败');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const removeRole = (r: SysRole) => {
+    modal.confirm({
+      title: `删除角色「${r.name}」？`,
+      content: (
+        <span style={{ fontSize: 13 }}>
+          {r.users > 0 ? (
+            <>还有 <b>{r.users}</b> 个用户使用该角色，不能删除。请先把他们改到其它角色。</>
+          ) : (
+            <>该角色没有任何用户，可以删除。此操作不可撤销。</>
+          )}
+        </span>
+      ),
+      okText: '确认删除',
+      okButtonProps: { danger: true, disabled: r.users > 0 },
+      onOk: async () => {
+        await roleApi.remove(r.key);
+        message.success(`已删除「${r.name}」`);
+        if (active === r.key) setActive(undefined);
+        await load();
+      },
+    });
+  };
+
   return (
     <div>
       <PageHeader
         breadcrumb={[{ title: '系统管理' }, { title: '角色权限' }]}
         title="角色权限"
         subTitle="ROLES & PERMISSIONS"
-        description="配置每个角色拥有哪些权限点。改动对下一次请求生效（权限在每次请求时现查，不缓存在令牌里）"
+        description="角色决定「能做什么」。权限内嵌在登录令牌里，改完需要对方刷新页面或重新登录才生效"
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} disabled={!canWrite} onClick={() => setNewOpen(true)}>
+            新建角色
+          </Button>
+        }
       />
 
       {error ? (
@@ -331,6 +396,20 @@ const SystemRoles: React.FC = () => {
                       {role.desc}
                     </Text>
                   </span>
+                  {!role.builtin ? (
+                    <Tooltip title={role.users > 0 ? `还有 ${role.users} 个用户在用，不能删除` : '删除这个自建角色'}>
+                      <Button
+                        size="small"
+                        danger
+                        type="text"
+                        icon={<DeleteOutlined />}
+                        disabled={!canWrite || role.users > 0}
+                        onClick={() => removeRole(role)}
+                      >
+                        删除角色
+                      </Button>
+                    </Tooltip>
+                  ) : null}
                   <Tag color={isSuper ? 'red' : 'blue'} style={{ marginInlineEnd: 0 }}>
                     {isSuper ? '全部权限' : `${draft.length} / ${points.length} 个权限点`}
                   </Tag>
@@ -521,6 +600,42 @@ const SystemRoles: React.FC = () => {
           )}
         </SectionCard>
       </div>
+
+      <Modal
+        open={newOpen}
+        title="新建角色"
+        okText="创建"
+        cancelText="取消"
+        confirmLoading={creating}
+        onOk={() => void createRole()}
+        onCancel={() => setNewOpen(false)}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message="默认授予全部权限点（不含超级管理员通配）"
+          description={
+            <span style={{ fontSize: 12.5 }}>
+              创建后会自动选中这个角色，你可以在右侧把它不需要的权限点取消。
+              角色只决定「能做什么」；能看到哪些项目由「团队」决定。
+            </span>
+          }
+        />
+        <Form form={newForm} layout="vertical" requiredMark={false}>
+          <Form.Item
+            label="角色名称"
+            name="name"
+            rules={[{ required: true, message: '请填写角色名称' }]}
+          >
+            <Input maxLength={64} placeholder="如 产品经理" />
+          </Form.Item>
+          <Form.Item label="说明" name="desc">
+            <Input maxLength={255} placeholder="这个角色负责什么（会显示给分配角色的人看）" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 };

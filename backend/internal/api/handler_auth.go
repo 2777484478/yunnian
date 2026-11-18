@@ -304,3 +304,56 @@ func (h *handler) updateRolePermissions(c *gin.Context) {
 	}
 	httpx.OK(c, role)
 }
+
+// createRole POST /roles
+//
+// 新建自定义角色。权限点一起提交：分两步会出现"角色建好但没权限"的中间态，
+// 用户以为成功了，用起来什么都点不了。
+func (h *handler) createRole(c *gin.Context) {
+	var in service.RoleInput
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	role, err := h.svc.System.CreateRole(c.Request.Context(), in, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, role)
+}
+
+// updateRole PUT /roles/:code
+//
+// 只改名称与描述。code 不可改（审计、权限判定都按 code 走），
+// 权限点走 PUT /roles/:code/permissions。
+func (h *handler) updateRole(c *gin.Context) {
+	code := httpx.PathString(c, "code")
+	if code == "" {
+		httpx.Fail(c, errValidation("缺少角色标识"))
+		return
+	}
+	var in service.RoleInput
+	if !httpx.Bind(c, &in) {
+		return
+	}
+	role, err := h.svc.System.UpdateRole(c.Request.Context(), code, in, caller(c))
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, role)
+}
+
+// deleteRole DELETE /roles/:code
+func (h *handler) deleteRole(c *gin.Context) {
+	code := httpx.PathString(c, "code")
+	if code == "" {
+		httpx.Fail(c, errValidation("缺少角色标识"))
+		return
+	}
+	if err := h.svc.System.DeleteRole(c.Request.Context(), code, caller(c)); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"deleted": true})
+}

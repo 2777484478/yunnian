@@ -35,6 +35,7 @@ import { PageHeader, SectionCard, StatCard } from '@/components/ui';
 import { RoleTag } from '@/components/StatusTag';
 import { roleApi, userApi } from '@/api';
 import { getSession, hasPerm } from '@/auth';
+import { teamApi } from '@/api/team';
 import { useApi } from '@/hooks/useApi';
 import { fmt } from '@/utils/format';
 import type { PermissionPoint, SysRole, SysUser, UserRole } from '@/types';
@@ -133,24 +134,39 @@ const SystemUsers: React.FC = () => {
     }
   };
 
-  // -------------------------------------------------------------- 改角色
+  /**
+   * 团队候选（**所属团队**多选用）。
+   *
+   * 这个字段不是权限，是**数据可见范围**：决定他在「项目管理」里能看到
+   * 哪些项目。角色权限决定"能做什么"，团队决定"能看到哪些"。
+   */
+  const teamsApi = useApi(() => teamApi.list(), []);
+  const teamOptions = useMemo(
+    () => (teamsApi.data ?? []).filter((t) => t.enabled).map((t) => ({ label: t.name, value: t.id })),
+    [teamsApi.data],
+  );
+
+  // -------------------------------------------------------------- 编辑（角色 + 团队）
   const [roleTarget, setRoleTarget] = useState<SysUser | null>(null);
   const [roleValue, setRoleValue] = useState<string>('dev');
+  const [teamValue, setTeamValue] = useState<string[]>([]);
   const [savingRole, setSavingRole] = useState(false);
 
   const openRoleModal = (u: SysUser) => {
     setRoleTarget(u);
     setRoleValue(u.role);
+    setTeamValue(u.teamIds ?? []);
   };
 
   const submitRole = async () => {
     if (!roleTarget) return;
     setSavingRole(true);
     try {
-      await userApi.update(roleTarget.id, { role: roleValue });
+      await userApi.update(roleTarget.id, { role: roleValue, teams: teamValue });
       notification.success({
-        message: '角色已调整',
-        description: `${roleTarget.name} 的角色已改为「${roles.find((r) => r.key === roleValue)?.name ?? roleValue}」，下次请求即生效。`,
+        message: '已保存',
+        description: `${roleTarget.name} 的角色改为「${roles.find((r) => r.key === roleValue)?.name ?? roleValue}」，` +
+          `所属团队 ${teamValue.length ? `${teamValue.length} 个` : '（无，项目管理里将看不到项目）'}。`,
       });
       setRoleTarget(null);
       refresh();
@@ -229,6 +245,7 @@ const SystemUsers: React.FC = () => {
         name: v.name,
         email: v.email,
         role: v.role,
+        teams: v.teams ?? [],
         ...(v.phone ? { phone: v.phone } : {}),
         ...(v.password ? { password: v.password } : {}),
       });
@@ -418,7 +435,7 @@ const SystemUsers: React.FC = () => {
             disabled={!canManage}
             onClick={() => openRoleModal(r)}
           >
-            改角色
+            编辑
           </Button>
           <Tooltip
             title={
@@ -452,7 +469,7 @@ const SystemUsers: React.FC = () => {
       <PageHeader
         breadcrumb={[{ title: '系统管理' }, { title: '用户与权限' }]}
         title="用户与权限"
-        description="基于 RBAC 的角色权限模型：管理员 / 运维 / 开发 / 测试 / 只读用户，支持按团队与项目授权"
+        description="角色决定「能做什么」（管理员/运维/开发/测试/只读，也可自建角色）；所属团队决定「项目管理里能看到哪些项目」。两者互不影响"
         extra={
           <Space>
             <Button
@@ -678,7 +695,7 @@ const SystemUsers: React.FC = () => {
       {/* ---------------------------------------------------------- 改角色 */}
       <Modal
         open={!!roleTarget}
-        title={`调整角色 · ${roleTarget?.name ?? ''}`}
+        title={`编辑用户 · ${roleTarget?.name ?? ''}`}
         okText="保存"
         cancelText="取消"
         confirmLoading={savingRole}
@@ -694,13 +711,30 @@ const SystemUsers: React.FC = () => {
             description="若把最后一个启用的管理员降权，平台将无人可管理——后端会拒绝这类操作。"
           />
           <div>
-            <div style={{ fontSize: 13, marginBottom: 6 }}>目标角色</div>
+            <div style={{ fontSize: 13, marginBottom: 6 }}>角色（能做什么）</div>
             <Select
               style={{ width: '100%' }}
               value={roleValue}
               onChange={setRoleValue}
               options={roles.map((r) => ({ label: `${r.name} — ${r.desc}`, value: r.key }))}
             />
+          </div>
+          <div>
+            <div style={{ fontSize: 13, marginBottom: 6 }}>所属团队（能看到「项目管理」里的哪些项目）</div>
+            <Select
+              mode="multiple"
+              allowClear
+              style={{ width: '100%' }}
+              placeholder="不选 = 看不到任何项目（超级管理员不受限）"
+              value={teamValue}
+              onChange={setTeamValue}
+              optionFilterProp="label"
+              options={teamOptions}
+            />
+            <div style={{ fontSize: 12, color: '#9aa0aa', marginTop: 6 }}>
+              只影响「项目管理」里能看到哪些项目，<b>不影响</b>角色权限。
+              一个人可以属于多个团队，看到的是它们的并集。
+            </div>
           </div>
         </Space>
       </Modal>
@@ -789,6 +823,19 @@ const SystemUsers: React.FC = () => {
           </Form.Item>
           <Form.Item name="role" label="授予角色" rules={[{ required: true, message: '请选择角色' }]}>
             <Select options={roles.map((r) => ({ label: `${r.name} — ${r.desc}`, value: r.key }))} />
+          </Form.Item>
+          <Form.Item
+            name="teams"
+            label="所属团队"
+            extra="决定他在「项目管理」里能看到哪些项目，不影响角色权限。可以留空，但留空就看不到任何项目。"
+          >
+            <Select
+              mode="multiple"
+              allowClear
+              placeholder="可留空"
+              optionFilterProp="label"
+              options={teamOptions}
+            />
           </Form.Item>
           <Form.Item
             name="password"
