@@ -169,11 +169,13 @@ const ROLE_META: Record<UserRole, { text: string; color: string }> = {
  *   - 已知角色 → 中文名 + 配色；
  *   - 未知角色（后端将来新增）→ 原样显示字符串，别静默吞掉。
  */
-export const RoleTag: React.FC<{ role?: UserRole | string }> = ({ role }) => {
+export const RoleTag: React.FC<{ role?: UserRole | string; label?: string }> = ({ role, label }) => {
   if (!role) return null;
   const meta = ROLE_META[role as UserRole];
   if (!meta) {
-    return <Tag style={{ marginInlineEnd: 0 }}>{String(role)}</Tag>;
+    // 自建角色（custom_N）：优先显示后端给的中文名。
+    // 直接把 code 铺在界面上等于让用户看到 `custom_1`，他会以为角色建坏了。
+    return <Tag color="purple" style={{ marginInlineEnd: 0 }}>{label || String(role)}</Tag>;
   }
   return (
     <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>

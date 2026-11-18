@@ -1431,7 +1431,10 @@ type InviteUserInput struct {
 	Name     string `json:"name" binding:"required,max=64"`
 	Email    string `json:"email" binding:"required,email,max=128"`
 	Phone    string `json:"phone" binding:"omitempty,max=20"`
-	Role     string `json:"role" binding:"required,oneof=admin ops dev qa readonly"`
+	// ⚠️ 不能写 `oneof=admin ops dev qa readonly`：角色从 2026-11-18 起可以自建
+	// （custom_N），写死枚举会让**所有自建角色无法分配**——建得了角色、却没人能选它。
+	// 真正的校验交给 roleByCode（角色不存在返回 404 并说明是哪个 code）。
+	Role     string `json:"role" binding:"required,max=32"`
 	// Teams 所属团队的 ID 列表（可空）。
 	//
 	// 空 = 这个人暂时不属于任何团队 → 在「项目管理」里看不到任何项目

@@ -337,7 +337,12 @@ const SystemUsers: React.FC = () => {
         </Space>
       ),
     },
-    { title: '角色', dataIndex: 'role', width: 130, render: (v: UserRole) => <RoleTag role={v} /> },
+    {
+      title: '角色',
+      dataIndex: 'role',
+      width: 130,
+      render: (v: UserRole) => <RoleTag role={v} label={roles.find((r) => r.key === v)?.name} />,
+    },
     {
       title: '邮箱',
       dataIndex: 'email',
