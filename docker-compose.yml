@@ -44,6 +44,15 @@ services:
       # 平台自建构建需要复用宿主机的 docker daemon
     volumes:
       - yunnian-data:/app/data
+      # ⚠️ 邮件发件服务器（notify.email）**只存在于配置文件，没有界面**。
+      #
+      # 而 Dockerfile 里 COPY 的是 `config.yaml.example`（占位符
+      # `smtp.example.com` / `CHANGE_ME`）。不挂载这一行，容器里永远读的是
+      # 那套占位符 —— 表现是通知渠道页「连续失败 N 次」，
+      # 错误写着 `lookup smtp.example.com: no such host`（2026-11-20 实际发生）。
+      #
+      # 挂成只读：容器没有理由改它，写权限只会让"配置被容器改掉"这种问题更难查。
+      - ./backend/configs/config.yaml:/app/configs/config.yaml:ro
       # 让容器内的 docker CLI 能调用宿主机的 daemon
       - /var/run/docker.sock:/var/run/docker.sock
       # ⚠️ 构建工作目录，**必须容器内与宿主同一个绝对路径**。
