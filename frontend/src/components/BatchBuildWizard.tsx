@@ -174,6 +174,10 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
    * 却没有任何办法让它重新判一次（2026-11-26 实际发生）。
    */
   const [reloadToken, setReloadToken] = useState(0);
+  /** Jenkins 运行态：与"参数能不能用"分开存，因为它会变（可轮询刷新） */
+  const [runningJobs, setRunningJobs] = useState<Record<string, JenkinsJobActivity>>({});
+  /** 只有手动点「重新检查」才显示 loading；后台轮询静默 */
+  const [runningLoading, setRunningLoading] = useState(false);
   const [batchNo, setBatchNo] = useState('');
   // 一次性建单之后的新状态：已提交的构建单 + 正在建单 + 二次确认弹窗
   const [submitted, setSubmitted] = useState<SubmittedItem[]>([]);
@@ -218,6 +222,83 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
   }, [open]);
 
   /**
+   * Jenkins 运行态：**独立于参数检查**，可轮询刷新。
+   *
+   * 为什么必须拆出来：参数检查要对每个项目读一次 Job 定义（40+ 个项目就是
+   * 40+ 次 Jenkins 请求），不可能每几秒重跑；而运行态是会变的，必须刷。
+   *
+   * 项目列表页那边是每 3 秒静默刷新 activity（`useAutoRefresh`），这里用 10 秒——
+   * 后端有 20 秒缓存，更密也只是打缓存。
+   *
+   * ⚠️ 打开时带 `refresh: true` 绕过后端缓存：否则刚结束的构建会被 20 秒前的
+   * 缓存继续判成"正在执行"。（2026-11-26 用户实际踩到：Jenkins 上一个 job
+   * 都没在跑，向导却一直拦着不让选。）
+   */
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const pull = async (force: boolean) => {
+      if (force) setRunningLoading(true);
+      try {
+        const act = await jenkinsApi.activity(force ? { refresh: true } : undefined);
+        if (!cancelled) setRunningJobs(act.jobs ?? {});
+      } catch {
+        /* 读不到不拦：真正的权威拒绝点在触发接口 */
+      } finally {
+        if (force && !cancelled) setRunningLoading(false);
+      }
+    };
+    void pull(true);
+    const timer = window.setInterval(() => void pull(false), 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [open, reloadToken]);
+
+  /**
+   * 「Job 正在执行」导致不能进批量的项目（key → 原因）。
+   *
+   * 单独算而不是塞进 plan 里：plan 只在打开时算一次（要打 Jenkins 读参数），
+   * 运行态每 10 秒变一次，混在一起就只能二选一 —— 要么参数被反复重读，
+   * 要么运行态永远停在打开那一刻（就是这次的 bug）。
+   */
+  const runningBlocked = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const p of projects) {
+      if (p.buildMethod !== 'jenkins') continue;
+      const job = (p.jenkinsJob ?? '').trim();
+      if (!job) continue;
+      const a = runningJobs[job];
+      if (a && a.state === 'running') {
+        out[p.key] =
+          `Job「${job}」正在 Jenkins 上执行${a.buildNo ? ` #${a.buildNo}` : ''}，等它结束再加进批量`;
+      }
+    }
+    return out;
+  }, [projects, runningJobs]);
+
+  /**
+   * 「这个 Jenkins 项目为什么不能批量」的唯一出口。
+   *
+   * 参数类原因优先（那个改不了，只能去 Jenkins 改 Job），运行态其次（等就好）。
+   * 合成一个 map 是为了让「勾得动」和「卡片上写的理由」永远同源 ——
+   * 两个判据各自散在四处，迟早会出现"能勾但写着不能勾"。
+   */
+  const blockReasons = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const p of projects) {
+      if (p.buildMethod !== 'jenkins') continue;
+      if (!jenkinsPlan[p.key]) {
+        out[p.key] = jenkinsBlocked[p.key] ?? '当前不可批量构建';
+      } else if (runningBlocked[p.key]) {
+        out[p.key] = runningBlocked[p.key];
+      }
+    }
+    return out;
+  }, [projects, jenkinsPlan, jenkinsBlocked, runningBlocked]);
+
+  /**
    * 为列表里的 Jenkins 项目逐个读 **Job 参数定义**，判断它能不能进批量打包。
    *
    * 只读参数定义（轻量：纯读 job 配置，不碰仓库），所以可以一次全读；
@@ -239,23 +320,6 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     let cancelled = false;
     setPlanLoading(true);
     void (async () => {
-      /**
-       * 运行态只读一次，用来把"已在 Jenkins 上执行"的项目挡在批量之外。
-       *
-       * 读不到**不拦**：真正的权威拒绝点在触发接口（那里会现查），
-       * 这里读不到就把判断交给后端，不要把整个向导降级成错误态。
-       */
-      let running: Record<string, JenkinsJobActivity> = {};
-      try {
-        // refresh: true → 绕过后端 20 秒缓存。刚结束的构建若命中缓存，
-        // 会把一个已经空闲的 Job 继续判成"正在执行"。
-        const act = await jenkinsApi.activity({ refresh: true });
-        running = act.jobs ?? {};
-      } catch {
-        /* 忽略：见上 */
-      }
-      if (cancelled) return;
-
       const rows = await Promise.all(
       jenkinsProjects.map(async (p) => {
         const job = (p.jenkinsJob ?? '').trim();
@@ -264,15 +328,6 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
             key: p.key,
             plan: null as JenkinsBatchPlan | null,
             why: '该项目还没绑定 Jenkins Job，平台不知道该触发哪个 Job',
-          };
-        }
-        if (running[job]) {
-          // 正在跑的项目不能进批量：后端会逐个拒绝，用户看到的是一串失败。
-          // 这里**在勾选阶段**就说清楚，符合"勾得动 == 发得出"。
-          return {
-            key: p.key,
-            plan: null as JenkinsBatchPlan | null,
-            why: `Job「${job}」正在 Jenkins 上执行${running[job].buildNo ? ` #${running[job].buildNo}` : ''}，等它结束再加进批量`,
           };
         }
         try {
@@ -328,7 +383,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [open, projects, reloadToken]);
+  }, [open, projects]);
 
   /**
    * 项目数据到位后，把**不能进批量**的项目从勾选里剔除。
@@ -343,11 +398,15 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       const next = prev.filter((k) => {
         const p = projects.find((x) => x.key === k);
         if (!p) return false;
-        return p.buildMethod !== 'jenkins' || !!jenkinsPlan[k];
+        return p.buildMethod !== 'jenkins' || !blockReasons[k];
       });
       return next.length === prev.length ? prev : next;
     });
-  }, [projects, jenkinsPlan]);
+    // blockReasons 覆盖了"参数不行"和"Job 正在跑"两种情况：
+    // 后者是这次补的 —— 构建结束前勾上的项目，运行态变了之后要跟着剔除，
+    // 否则会带着一个"现在发不出去"的项目进第 2 步。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, blockReasons]);
 
   const projectMap = useMemo(
     () => Object.fromEntries(projects.map((p) => [p.key, p])),
@@ -374,14 +433,14 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
    * 做不到就挡住并把理由写在卡片上："能勾选"必须等于"后端会受理且出来的东西是对的"。
    */
   const pickable = useMemo(
-    () => list.filter((p) => p.buildMethod !== 'jenkins' || !!jenkinsPlan[p.key]),
-    [list, jenkinsPlan],
+    () => list.filter((p) => p.buildMethod !== 'jenkins' || !blockReasons[p.key]),
+    [list, blockReasons],
   );
 
   /** 当前筛选结果里因 Job 参数不合适而进不了批量的 Jenkins 项目 */
   const blockedList = useMemo(
-    () => list.filter((p) => p.buildMethod === 'jenkins' && !!jenkinsBlocked[p.key]),
-    [list, jenkinsBlocked],
+    () => list.filter((p) => p.buildMethod === 'jenkins' && !!blockReasons[p.key]),
+    [list, blockReasons],
   );
 
   const toggle = (key: string, on: boolean) =>
@@ -420,7 +479,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       const p = byKey.get(k) ?? byName.get(k);
       if (!p) {
         missed.push(n);
-      } else if (p.buildMethod === 'jenkins' && !jenkinsPlan[p.key]) {
+      } else if (p.buildMethod === 'jenkins' && blockReasons[p.key]) {
         blocked.push(n);
       } else {
         hit.push(p.key);
@@ -907,8 +966,8 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
       key: 'note',
       render: (_, p) => {
         const isJenkins = p.buildMethod === 'jenkins';
-        const ready = isJenkins && !!jenkinsPlan[p.key];
-        const blockReason = isJenkins ? (jenkinsBlocked[p.key] ?? '') : '';
+        const blockReason = isJenkins ? (blockReasons[p.key] ?? '') : '';
+        const ready = isJenkins && !blockReason;
         // 计划还没判定出来（参数正在读）—— 此时既不说"能"，也不说"不能"
         if (blockReason) {
           return (
@@ -1295,8 +1354,9 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
                     // 做不到就**不给勾选框**并把原因写在行里 —— "能勾选"必须等于
                     // "后端会受理且出来的东西是对的"。
                     const isJenkins = p.buildMethod === 'jenkins';
-                    const ready = isJenkins && !!jenkinsPlan[p.key];
-                    return { disabled: isJenkins && !ready };
+                    // 「参数不行」和「Job 正在跑」都不给勾：后者是这次补的 ——
+                    // 之前只在打开向导那一刻判一次，构建结束后也一直灰着。
+                    return { disabled: isJenkins && !!blockReasons[p.key] };
                   },
                 }}
               />
@@ -1324,7 +1384,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
                     <div>
                       {blockedList.map((p) => (
                         <div key={p.key}>
-                          <b>{p.name}</b>：{jenkinsBlocked[p.key]}
+                          <b>{p.name}</b>：{blockReasons[p.key]}
                         </div>
                       ))}
                     </div>
@@ -1342,8 +1402,8 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
               <Button
                 type="link"
                 size="small"
-                loading={planLoading}
-                disabled={planLoading}
+                loading={runningLoading}
+                disabled={runningLoading}
                 style={{ padding: 0, height: 'auto', fontSize: 12 }}
                 onClick={() => setReloadToken((t) => t + 1)}
               >
