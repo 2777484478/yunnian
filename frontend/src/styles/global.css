@@ -918,6 +918,16 @@ body {
     flex-direction: column;
   }
 
+  /* Content 与 .yn-ai-page 之间还有一层无 class 的包装（Outlet/边界层），
+     它不参与 flex 链的话，下面的 flex:1 就落不到实处 ——
+     实测它保持 1064px 高，只是被 Content 的 overflow:hidden 裁掉了。 */
+  .yn-content:has(.yn-ai-page) > * {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
   .yn-ai-page {
     flex: 1;
     min-height: 0;

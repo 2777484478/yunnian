@@ -753,6 +753,11 @@ const AiAssistant: React.FC = () => {
         </div>
 
         <div className="yn-ai-composer">
+          {/* 快捷问题只在**还没有对话**时露面。
+              一旦开聊，它就是常驻的 80 多 px 死高度，把消息区往下压 ——
+              用户的原话是"下面反而那么空，需要不停翻"（2026-11-26）。
+              收起后同样一屏能多显示两三条消息。 */}
+          {messages.length === 0 ? (
           <div className="yn-ai-suggest">
             {suggestions.map((s) => (
               <span
@@ -778,6 +783,7 @@ const AiAssistant: React.FC = () => {
               </span>
             ) : null}
           </div>
+          ) : null}
           {/* 这里刻意**不用** Space.Compact：它的子元素是等高拉伸的，
               输入框长高时按钮会被一起拉成一条竖块。普通 flex + flex-end
               让按钮固定在底部，长文本往上长。 */}
