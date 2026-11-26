@@ -51,6 +51,9 @@ type Pool struct {
 	kind    string
 	size    int
 	maxWait int
+	// autoWait 表示 maxWait 是"按 size 推出来的"，不是调用方指定的固定值。
+	// 只有它才允许在 SetSize 时跟着重算 —— 显式传进来的上限不该被悄悄改掉。
+	autoWait bool
 
 	mu      sync.Mutex
 	running int
@@ -58,20 +61,50 @@ type Pool struct {
 	items   map[uint64]*entry
 }
 
-// NewPool 构造任务池。size<1 时按 1 处理；maxWait<1 时按 size*20 处理。
+// minMaxWait 自动推导等待队列时允许的最小值。
+//
+// 为什么要有下限：原来是死板的 `size * 20`，而默认并发是 1 —— 于是**队列只能
+// 排 20 个**。批量发布一次建 20+ 个单（gcp 预生产那次就有 26 个），第 21 个
+// 开始直接被拒，界面上是一串红色"部署队列已满"（2026-11-26 用户实际撞到）。
+// 那些单不是执行失败，是**根本没排上**。
+//
+// 50 这个数的依据：一次批量发布/批量的典型规模是二三十个服务，加上同时有
+// 人在做零散发布，预留一倍余量。再多也不该靠"把队列调大"解决 ——
+// 那意味着用户要等几小时才能看到自己那一个。
+const minMaxWait = 50
+
+// NewPool 构造任务池。
+//
+// size<1 时按 1 处理；maxWait<1 时按 `max(size*20, 50)` 推导。
 func NewPool(kind string, size, maxWait int) *Pool {
 	if size < 1 {
 		size = 1
 	}
-	if maxWait < 1 {
-		maxWait = size * 20
+	auto := maxWait < 1
+	if auto {
+		maxWait = deriveMaxWait(size)
 	}
 	return &Pool{
-		kind:    kind,
-		size:    size,
-		maxWait: maxWait,
-		items:   make(map[uint64]*entry),
+		kind:     kind,
+		size:     size,
+		maxWait:  maxWait,
+		autoWait: auto,
+		items:    make(map[uint64]*entry),
 	}
+}
+
+// deriveMaxWait 并发数 → 等待队列上限。
+//
+// 下限 50 见 minMaxWait 的注释；并发调大时按 20 倍放大 ——
+// 并发 10 意味着同一时刻有 10 个在跑，排 200 个也合理。
+func deriveMaxWait(size int) int {
+	if size < 1 {
+		size = 1
+	}
+	if n := size * 20; n > minMaxWait {
+		return n
+	}
+	return minMaxWait
 }
 
 // Kind 池类型（build / deploy）。
@@ -183,6 +216,12 @@ func (p *Pool) SetSize(size int) {
 		return
 	}
 	p.size = size
+	// 自动推导的上限跟着并发走：并发从 1 调到 10 之后，队列还卡在 50
+	// 就白调了 —— 用户以为改完能排更多，实际仍然一批就被拒。
+	// 显式传过 maxWait 的池不动它（那是调用方的意图）。
+	if p.autoWait {
+		p.maxWait = deriveMaxWait(size)
+	}
 	p.dispatchLocked()
 }
 
