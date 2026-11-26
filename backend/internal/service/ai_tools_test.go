@@ -27,6 +27,7 @@ func TestAITools_OnlyReadOnlyTools(t *testing.T) {
 		"inspect_environment",
 		"list_deployments",
 		"list_builds",
+		"list_recent_builds",
 		"get_cluster_resources",
 	}
 	got := make([]string, 0, len(want))

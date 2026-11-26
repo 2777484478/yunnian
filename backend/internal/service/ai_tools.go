@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -97,6 +99,7 @@ func (a *AIService) aiTools() []aiTool {
 		a.toolInspectEnvironment(),
 		a.toolListDeployments(),
 		a.toolListBuilds(),
+		a.toolListRecentBuilds(),
 		a.toolClusterResources(),
 	}
 }
@@ -467,6 +470,103 @@ func (a *AIService) toolListBuilds() aiTool {
 	}
 }
 
+// toolListRecentBuilds 跨项目查最近构建。
+//
+// 为什么必须有它：`list_builds` 强制要求 projectKey，问一句「今天编译了哪些
+// 项目」就得遍历 40+ 个项目 —— 模型只能做几十轮工具调用，用户等几十秒。
+// 2026-11-26 用户就是被这句话挡住的：AI 回答"list_builds 必须指定 projectKey，
+// 无法跨项目聚合查询"，然后开始"遍历全部 44 个项目"（一轮都跑不完）。
+//
+// 返回里同时给**明细**和**按项目汇总**：用户要的是"哪些项目"，模型不必自己
+// 对着几十条明细做聚合（它做聚合容易数错）。
+func (a *AIService) toolListRecentBuilds() aiTool {
+	return aiTool{
+		Name: "list_recent_builds",
+		Description: "**跨项目**查全平台最近的构建。「今天/最近 24 小时编译了哪些项目」「哪些项目构建失败最多」" +
+			"这类问题用这个一次就能拿到答案，**不要**逐个项目去调 list_builds。" +
+			"返回按时间倒序的明细 + 按项目聚合的次数（byProject）。",
+		Parameters: schema(map[string]any{
+			"hours":  map[string]any{"type": "integer", "description": "回看多少小时，默认 24，范围 1–168"},
+			"status": map[string]any{"type": "string", "description": "只看该状态：success / failed / running / queued / interrupted / canceled；留空为全部"},
+			"limit":  map[string]any{"type": "integer", "description": "明细返回条数，默认 20，最多 50"},
+		}, nil),
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
+			hours := argInt(args, "hours", 24, 1, 168)
+			since := now().Add(-time.Duration(hours) * time.Hour)
+
+			q := a.db(ctx).Model(&model.BuildRecord{}).Where("created_at >= ?", since)
+			if st := strings.TrimSpace(argStr(args, "status")); st != "" {
+				q = q.Where("status = ?", st)
+			}
+			var bs []model.BuildRecord
+			if err := q.Order("id desc").Limit(argInt(args, "limit", 20, 1, 50)).Find(&bs).Error; err != nil {
+				return "", err
+			}
+
+			// 项目名一次查出来做映射，不在循环里逐条查库
+			keys := make([]string, 0, len(bs))
+			seen := map[string]bool{}
+			for _, b := range bs {
+				if b.ProjectKey != "" && !seen[b.ProjectKey] {
+					seen[b.ProjectKey] = true
+					keys = append(keys, b.ProjectKey)
+				}
+			}
+			nameOf := map[string]string{}
+			if len(keys) > 0 {
+				var ps []model.Project
+				if err := a.db(ctx).Select("project_key", "name").
+					Where("project_key IN ?", keys).Find(&ps).Error; err == nil {
+					for _, p := range ps {
+						nameOf[p.ProjectKey] = p.Name
+					}
+				}
+			}
+
+			out := make([]map[string]any, 0, len(bs))
+			countBy := map[string]int{}
+			for _, b := range bs {
+				countBy[b.ProjectKey]++
+				item := map[string]any{
+					"projectKey": b.ProjectKey, "projectName": nameOf[b.ProjectKey],
+					"buildNo": b.BuildNo, "branch": b.Branch, "commit": shortCommit(b.CommitID),
+					"status": b.Status, "triggerType": b.TriggerType, "triggerName": b.TriggerName,
+					"createdAt": formatTime(b.CreatedAt),
+				}
+				if b.DurationSec != nil {
+					item["durationSec"] = *b.DurationSec
+				}
+				if strings.TrimSpace(b.ErrorCode) != "" {
+					item["errorCode"] = b.ErrorCode
+				}
+				out = append(out, item)
+			}
+
+			type projStat struct {
+				ProjectKey  string `json:"projectKey"`
+				ProjectName string `json:"projectName"`
+				Count       int    `json:"count"`
+			}
+			stats := make([]projStat, 0, len(countBy))
+			for k, n := range countBy {
+				stats = append(stats, projStat{ProjectKey: k, ProjectName: nameOf[k], Count: n})
+			}
+			sort.Slice(stats, func(i, j int) bool {
+				if stats[i].Count != stats[j].Count {
+					return stats[i].Count > stats[j].Count
+				}
+				return stats[i].ProjectKey < stats[j].ProjectKey
+			})
+
+			return jsonText(map[string]any{
+				"ok": true, "hours": hours, "since": formatTime(since),
+				"buildCount": len(out), "projectCount": len(stats),
+				"byProject": stats, "builds": out,
+			})
+		},
+	}
+}
+
 func (a *AIService) toolClusterResources() aiTool {
 	return aiTool{
 		Name: "get_cluster_resources",
@@ -595,6 +695,8 @@ func aiToolLabel(name string) string {
 		return "读取部署记录"
 	case "list_builds":
 		return "读取构建记录"
+	case "list_recent_builds":
+		return "汇总最近的构建"
 	case "get_cluster_resources":
 		return "读取集群资源"
 	}
