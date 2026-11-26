@@ -888,6 +888,8 @@ body {
 .yn-ai-shell {
   display: flex;
   flex-direction: column;
+  /* 兜底高度：不支持 :has() 的浏览器仍按这个算（会多出 PageHeader 那 96px，
+     表现为底部有一点空白，不影响功能）。支持 :has() 时由下面那段接管。 */
   height: calc(100vh - var(--yn-header-h) - 48px);
   min-height: 520px;
   background: var(--yn-card);
@@ -897,6 +899,39 @@ body {
   /* 横向 18px：和左栏"卡片 padding 12 + 会话项 padding 10 = 22px"对齐，
      两栏里的文字左边界落在同一条竖线上。 */
   padding: 0 18px 14px;
+}
+
+/* ---- AI 页：整页不滚，两栏各自内部滚动 ----
+   原来只给 .yn-ai-shell 算 `calc(100vh - header - 48px)`，漏掉了 PageHeader
+   （标题 82px + margin 14px），于是对话区底部被顶出视口 96px：
+   用户得滚整个页面才看得到输入框，而消息区只有 452px 高 —— 长回答一直在翻
+   （2026-11-26 用户反馈"窗口有点小、要不停翻来翻去"）。
+   现在改成 flex 链：content → page → shell 逐级吃满剩余高度，
+   以后谁在里面加一层 padding 都不会再算错。
+   `:has()` 内部平台浏览器都支持；不支持时退回上面的 100vh 公式，只是底下多
+   一条空白，不会坏。 */
+@supports selector(:has(*)) {
+  .yn-content:has(.yn-ai-page) {
+    height: calc(100vh - var(--yn-header-h));
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .yn-ai-page {
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* flex 子项默认 min-height:auto，会被会话列表撑破 —— 加这一行它才会
+     真的交出滚动权给内部的 __list。 */
+  .yn-ai-side {
+    min-height: 0;
+  }
+
+  .yn-ai-shell {
+    height: 100%;
+  }
 }
 
 /* 输入区。分隔线用负 margin 通到卡片两边，才像"卡片底部的输入区"，

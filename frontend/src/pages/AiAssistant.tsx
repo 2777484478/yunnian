@@ -642,7 +642,9 @@ const AiAssistant: React.FC = () => {
         </aside>
 
         {/* ---------------------------------------------------- 右：对话 */}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        {/* 这层必须 display:flex + minHeight:0，否则 .yn-ai-shell 的 height:100%
+            相对一个高度 auto 的父级无效，会退回内容高度。 */}
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex' }}>
       <div className="yn-ai-shell">
         <div className="yn-ai-body" ref={bodyRef}>
           {messages.length === 0 ? (
