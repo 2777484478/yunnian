@@ -165,6 +165,15 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
   /** key → 不能进批量的原因，原样显示在卡片上（"勾不动"必须给出理由） */
   const [jenkinsBlocked, setJenkinsBlocked] = useState<Record<string, string>>({});
   const [planLoading, setPlanLoading] = useState(false);
+  /**
+   * 「重新检查」用的重试计数。
+   *
+   * 为什么需要它：下面那段运行态采集只在**打开向导时**跑一次，
+   * 之后向导开着就一直拿着那一份快照。而 Jenkins 上的构建随时会结束 ——
+   * 用户会盯着"Job 正在执行 #4564"的提示，同时在 Jenkins 上确认早已跑完，
+   * 却没有任何办法让它重新判一次（2026-11-26 实际发生）。
+   */
+  const [reloadToken, setReloadToken] = useState(0);
   const [batchNo, setBatchNo] = useState('');
   // 一次性建单之后的新状态：已提交的构建单 + 正在建单 + 二次确认弹窗
   const [submitted, setSubmitted] = useState<SubmittedItem[]>([]);
@@ -238,7 +247,9 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
        */
       let running: Record<string, JenkinsJobActivity> = {};
       try {
-        const act = await jenkinsApi.activity();
+        // refresh: true → 绕过后端 20 秒缓存。刚结束的构建若命中缓存，
+        // 会把一个已经空闲的 Job 继续判成"正在执行"。
+        const act = await jenkinsApi.activity({ refresh: true });
         running = act.jobs ?? {};
       } catch {
         /* 忽略：见上 */
@@ -317,7 +328,7 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [open, projects]);
+  }, [open, projects, reloadToken]);
 
   /**
    * 项目数据到位后，把**不能进批量**的项目从勾选里剔除。
@@ -1328,6 +1339,16 @@ const BatchBuildWizard: React.FC<BatchBuildWizardProps> = ({
                 全平台共 {projects.length} 个项目（前端 {projects.filter((p) => p.type === 'frontend').length} / 后端{' '}
                 {projects.filter((p) => p.type === 'backend').length}）
               </Text>
+              <Button
+                type="link"
+                size="small"
+                loading={planLoading}
+                disabled={planLoading}
+                style={{ padding: 0, height: 'auto', fontSize: 12 }}
+                onClick={() => setReloadToken((t) => t + 1)}
+              >
+                重新检查运行态
+              </Button>
             </Space>
           </div>
 
