@@ -156,6 +156,43 @@ func (h *handler) envResources(c *gin.Context) {
 	httpx.OK(c, st)
 }
 
+// envResourcesBatch GET /environments/resources?keys=a,b,c
+//
+// 一次拿多个环境的集群资源。存在的理由是浏览器的 6 连接限制 ——
+// 详见 service 层 EnvResourcesBatch 的注释。
+func (h *handler) envResourcesBatch(c *gin.Context) {
+	var keys []string
+	for _, k := range strings.Split(c.Query("keys"), ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			keys = append(keys, k)
+		}
+	}
+	// 权限收口：只查看得见的环境。**不可见的直接从入参里去掉**，
+	// 而不是返回"无权访问"—— 后者等于告诉调用方这个环境存在。
+	if allowed, restricted := caller(c).VisibleEnvKeys(); restricted {
+		ok := make(map[string]bool, len(allowed))
+		for _, k := range allowed {
+			ok[k] = true
+		}
+		kept := keys[:0]
+		for _, k := range keys {
+			if ok[k] {
+				kept = append(kept, k)
+			}
+		}
+		keys = kept
+	}
+	// 上限 20：这是列表页用的，没人会一次要 200 个环境的实时资源。
+	if len(keys) > 20 {
+		keys = keys[:20]
+	}
+	items := h.svc.CD.EnvResourcesBatch(c.Request.Context(), keys)
+	if items == nil {
+		items = []service.EnvResourceItem{}
+	}
+	httpx.OK(c, gin.H{"items": items})
+}
+
 // syncEnvironment POST /environments/{key}/sync
 func (h *handler) syncEnvironment(c *gin.Context) {
 	e, err := h.svc.CD.SyncEnvironment(c.Request.Context(), httpx.PathString(c, "key"), caller(c))

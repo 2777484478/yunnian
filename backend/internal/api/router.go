@@ -229,6 +229,9 @@ func (h *handler) registerEnvironments(g *gin.RouterGroup) {
 	e := g.Group("/environments")
 	e.GET("", middleware.RequirePerm("env:read"), h.listEnvironments)
 	e.POST("", middleware.RequirePerm("env:write"), h.createEnvironment)
+	// ⚠️ 静态段必须注册在 `/:key` **之前**，否则 /environments/resources
+	// 会被当成 key=resources 命中下面那条。（clusters/parse 同理。）
+	e.GET("/resources", middleware.RequirePerm("env:read"), h.envResourcesBatch)
 	e.GET("/:key", middleware.RequirePerm("env:read"), h.requireEnvVisible(), h.getEnvironment)
 	e.PUT("/:key", middleware.RequirePerm("env:write"), h.requireEnvVisible(), h.updateEnvironment)
 	e.DELETE("/:key", middleware.RequirePerm("env:write"), h.requireEnvVisible(), h.deleteEnvironment)

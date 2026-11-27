@@ -64,6 +64,8 @@ export const envResStatusOf = (
 export interface EnvResourcesResult {
   /** 环境标识 → 实时结果；**读不到的是 null**（不是 0，也不是快照值） */
   map: Map<string, EnvResources | null> | null;
+  /** 环境标识 → 读不到的原因（"集群读取超时（8 秒）"）。读到了就没有这一项。 */
+  errors: Map<string, string> | null;
   loading: boolean;
   error: ApiError | null;
   refresh: () => void;
@@ -86,20 +88,34 @@ export function useEnvResources(envKeys: string[]): EnvResourcesResult {
   const api = useApi(
     async () => {
       const keys = key ? key.split(',') : [];
-      const pairs = await Promise.all(
-        keys.map(async (k): Promise<[string, EnvResources | null]> => {
-          try {
-            return [k, await environmentApi.resources(k)];
-          } catch {
-            return [k, null];
-          }
-        }),
-      );
-      return new Map(pairs);
+      if (!keys.length) {
+        return { map: new Map<string, EnvResources | null>(), errs: new Map<string, string>() };
+      }
+      // 一次请求拿全部：**不要**回到 Promise.all(keys.map(...))。
+      // 那样每个环境占一个浏览器连接，5 个环境就把同域 6 个并发连接吃干，
+      // 页面上 /stats、/projects 这些本该 50ms 的请求只能排队等集群超时。
+      // 服务端已经改成并发查 + 单环境 8 秒超时（cd.go EnvResourcesBatch）。
+      const res = await environmentApi.resourcesBatch(keys);
+      const map = new Map<string, EnvResources | null>();
+      const errs = new Map<string, string>();
+      for (const k of keys) map.set(k, null);
+      for (const it of res.items ?? []) {
+        map.set(it.envKey, it.ok ? (it.data ?? null) : null);
+        if (!it.ok && it.error) errs.set(it.envKey, it.error);
+      }
+      return { map, errs };
     },
     [key],
     { enabled: !!key },
   );
 
-  return { map: api.data, loading: api.loading, error: api.error, refresh: api.refresh };
+  return {
+    map: api.data?.map ?? null,
+    // 每个环境各自的失败原因（"集群超时（8 秒）"这类），给卡片显示用。
+    // 整体 error 只覆盖"这一个请求本身失败"，单个环境读不到走 errors。
+    errors: api.data?.errs ?? null,
+    loading: api.loading,
+    error: api.error,
+    refresh: api.refresh,
+  };
 }

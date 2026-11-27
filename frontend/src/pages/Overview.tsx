@@ -64,10 +64,27 @@ const Overview: React.FC = () => {
    * 若将来环境数量上去了，应该由后端在环境列表里直接带上汇总字段。
    */
   const envServicesApi = useApi(async () => {
-        const pairs = await Promise.all(
-          envs.map(async (e) => [e.key, await environmentApi.services(e.key)] as const),
-        );
-        return new Map(pairs);
+        /**
+         * ⚠️ **不要**改回 Promise.all —— 浏览器同域 HTTP/1.1 只有 6 个并发连接。
+         *
+         * 这个接口每个环境都要现读集群（`liveStates`：30 个服务的 Pod 状态，
+         * 单环境最长 8 秒）。5 个环境并发 = 5 个连接被占住，加上环境资源那几个，
+         * 同域连接被吃干，`/stats`、`/projects` 这些本该 50ms 的请求只能排队 ——
+         * 用户看到的是"一个集群慢，整页数据都出不来"（2026-11-27 实际发生）。
+         *
+         * 现在限成 2 并发：慢的那个自己慢慢转，剩下的连接留给别的接口。
+         * 代价是"服务数"晚几秒出来 —— 它不在 loading 判据里，不影响页面渲染。
+         */
+        const limit = 2;
+        const out = new Map<string, Awaited<ReturnType<typeof environmentApi.services>>>();
+        for (let i = 0; i < envs.length; i += limit) {
+          const batch = envs.slice(i, i + limit);
+          const done = await Promise.all(
+            batch.map(async (e) => [e.key, await environmentApi.services(e.key)] as const),
+          );
+          for (const [k, v] of done) out.set(k, v);
+        }
+        return out;
       }, [envs], { enabled: envs.length > 0 });
   const envServices = useMemo(
     () => envServicesApi.data ?? new Map<string, Awaited<ReturnType<typeof environmentApi.services>>>(),

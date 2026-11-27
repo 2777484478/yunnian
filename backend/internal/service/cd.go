@@ -971,6 +971,94 @@ func (s *CDService) EnvResources(ctx context.Context, key string) (*integration.
 	return state, nil
 }
 
+// EnvResourceItem 批量查询里单个环境的结果。
+//
+// 单项带自己的 `ok` / `error`，是因为"其中一个集群挂了"绝不该让整批失败：
+// 用户要的是另外四个环境的真实数字，而不是一句"查询失败"。
+type EnvResourceItem struct {
+	EnvKey    string                    `json:"envKey"`
+	OK        bool                      `json:"ok"`
+	Error     string                    `json:"error,omitempty"`
+	Data      *integration.ClusterState `json:"data,omitempty"`
+	ElapsedMS int                       `json:"elapsedMs"`
+}
+
+// batchEnvResourceTimeout 批量查询里**单个环境**的超时。
+//
+// 比全局 kubernetes.timeout（15s）短得多，因为这里是列表/汇总场景：
+// 宁可 8 秒明确告诉用户"这个集群没读到"，也不要让他盯着转圈 15 秒。
+func batchEnvResourceTimeout() time.Duration { return 8 * time.Second }
+
+// EnvResourcesBatch 一次查多个环境的集群资源（服务端并发）。
+//
+// 为什么要有这个接口（2026-11-27）：
+//
+// 浏览器同域 HTTP/1.1 只允许 **6 个并发连接**。首页/环境列表一进来就要
+// 「N 个环境的 resources」+「N 个环境的 services」，5 个环境就是 10 个请求，
+// 全部在等集群（慢的那个 10~19 秒）—— 连接被占满，于是 /stats、/projects
+// 这些本该 50ms 返回的请求只能排队。
+//
+// 用户看到的现象是"一个接口慢，整页数据都出不来"，而根因纯属浏览器并发限制。
+// 收敛成一个请求后只占 1 个连接，其余接口照常走。
+func (s *CDService) EnvResourcesBatch(ctx context.Context, keys []string) []EnvResourceItem {
+	out := make([]EnvResourceItem, len(keys))
+	if len(keys) == 0 {
+		return out
+	}
+
+	// 并发上限 5：环境是一期个位数，且每个都是不同的 APIServer，
+	// 不存在"打同一个集群把它压垮"的风险。
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+	for i, key := range keys {
+		wg.Add(1)
+		go func(i int, key string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			start := time.Now()
+			item := EnvResourceItem{EnvKey: key}
+			e, err := s.envByKey(ctx, key)
+			if err != nil {
+				item.Error = "环境不存在，或你没有访问权限"
+			} else {
+				ectx, cancel := context.WithTimeout(ctx, batchEnvResourceTimeout())
+				state, err := s.deps.Up.Cluster.Nodes(ectx, clusterRefOf(e))
+				cancel()
+				if err != nil {
+					// 如实说明是超时还是别的：用户据此判断是等一会儿再试，还是找集群管理员。
+					if errors.Is(err, context.DeadlineExceeded) {
+						item.Error = fmt.Sprintf("集群 %s 读取超时（%d 秒）",
+							e.Cluster, int(batchEnvResourceTimeout().Seconds()))
+					} else {
+						item.Error = "读取集群失败：" + truncateErr(err)
+					}
+				} else {
+					item.OK = true
+					item.Data = state
+				}
+			}
+			item.ElapsedMS = int(time.Since(start).Milliseconds())
+			out[i] = item
+		}(i, key)
+	}
+	wg.Wait()
+	return out
+}
+
+// truncateErr 把上游错误压成一句话（详情看日志，界面只要方向）。
+func truncateErr(err error) string {
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i > 0 {
+		s = s[:i]
+	}
+	if len(s) > 120 {
+		s = s[:120] + "…"
+	}
+	return s
+}
+
 // SyncEnvironment 主动同步集群状态。
 //
 // 为什么需要手动同步：平台不可能每秒去轮询每个集群（成本高、也被集群限流），
