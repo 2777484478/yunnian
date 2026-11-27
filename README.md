@@ -282,6 +282,21 @@ cd backend && ./scripts/smoke.sh
 
 * * *
 
+## 日常运维
+
+代码改完怎么上线、怎么重启、磁盘满了怎么清、坏了怎么查——见
+**[docs/08-运维手册.md](./docs/08-运维手册.md)**。
+
+最容易搞错的一点先写在这里：**前后端都编进镜像，改完代码必须 `docker compose build app`
+重新出镜像，`restart` 重启的还是旧镜像。**
+
+```bash
+# 155 上（代码由 Mac 推过去，这台机器访问不了 GitHub）
+cd /opt/yunnian
+docker compose build app && docker compose up -d app
+curl -s --noproxy '*' -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/healthz
+```
+
 ## 工作原理
 
 ### 构建链路
