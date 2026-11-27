@@ -30,6 +30,7 @@ func TestAIToolsAreReadOnly(t *testing.T) {
 		"list_environments",
 		"list_projects",
 		"list_recent_builds",
+		"list_recent_services",
 		"search_service_logs",
 	}
 

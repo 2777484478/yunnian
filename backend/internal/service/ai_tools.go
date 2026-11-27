@@ -100,6 +100,7 @@ func (a *AIService) aiTools() []aiTool {
 		a.toolListDeployments(),
 		a.toolListBuilds(),
 		a.toolListRecentBuilds(),
+		a.toolListRecentServices(),
 		a.toolClusterResources(),
 	}
 }
@@ -567,6 +568,134 @@ func (a *AIService) toolListRecentBuilds() aiTool {
 	}
 }
 
+// toolListRecentServices 跨项目查最近**纳管**的服务。
+//
+// 为什么必须和 list_recent_builds 分开：用户说的「纳管 / 登记 / 上线到某环境」
+// 和「编译 / 打包」是两件事 ——
+//   · 纳管 = service_instance 的 created_at（把服务登记到某个环境，拓扑上多一个圈）
+//   · 构建 = build_record（编译出镜像）
+// 2026-11-27 用户问「最近 24 小时纳管过哪些项目（比如把 es-itms-mobile 纳管到
+// gcp 预生产）」，AI 拿 list_recent_builds 答成了"构建过的项目" —— 数据没错，
+// 但他问的完全是另一件事。根因是当时**根本没有查纳管的工具**。
+func (a *AIService) toolListRecentServices() aiTool {
+	return aiTool{
+		Name: "list_recent_services",
+		Description: "**跨项目**查最近**纳管**（登记到环境）的服务，按纳管时间倒序。" +
+			"用户问「最近纳管了哪些服务/项目」「X 什么时候被纳管到 Y 环境」时用这个。" +
+			"⚠️ 纳管 ≠ 构建：纳管是把服务登记到某个环境（拓扑上多一个圆圈），" +
+			"构建是编译出镜像。问纳管不要用 list_recent_builds。",
+		Parameters: schema(map[string]any{
+			"hours":      map[string]any{"type": "integer", "description": "回看多少小时，默认 24，范围 1–720"},
+			"envKey":     map[string]any{"type": "string", "description": "只看这个环境；留空为全部可见环境"},
+			"projectKey": map[string]any{"type": "string", "description": "只看这个项目；留空为全部项目"},
+			"limit":      map[string]any{"type": "integer", "description": "返回条数，默认 20，最多 50"},
+		}, nil),
+		Run: func(ctx context.Context, c Caller, args map[string]any) (string, error) {
+			hours := argInt(args, "hours", 24, 1, 720)
+			since := now().Add(-time.Duration(hours) * time.Hour)
+			envKey := strings.TrimSpace(argStr(args, "envKey"))
+			projectKey := strings.TrimSpace(argStr(args, "projectKey"))
+
+			if envKey != "" {
+				if err := assertToolEnvVisible(c, envKey); err != nil {
+					return "", err
+				}
+			}
+
+			q := a.db(ctx).Model(&model.ServiceInstance{}).Where("created_at >= ?", since)
+			if envKey != "" {
+				q = q.Where("env_key = ?", envKey)
+			} else if allowed, restricted := c.VisibleEnvKeys(); restricted {
+				// 不带 envKey 时按可见范围收口：否则有 ai:query 的人能借这个工具
+				// 把无权环境里的服务名与纳管时间全读出来。
+				if len(allowed) == 0 {
+					return jsonText(map[string]any{"ok": true, "hours": hours, "services": []any{},
+						"note": "你没有任何可见环境"})
+				}
+				q = q.Where("env_key IN ?", allowed)
+			}
+			if projectKey != "" {
+				q = q.Where("project_key = ?", projectKey)
+			}
+
+			var rows []model.ServiceInstance
+			if err := q.Order("created_at desc").
+				Limit(argInt(args, "limit", 20, 1, 50)).Find(&rows).Error; err != nil {
+				return "", err
+			}
+
+			// 项目名 / 环境名各查一次做映射，不在循环里打库
+			envKeys := make([]string, 0, len(rows))
+			projKeys := make([]string, 0, len(rows))
+			seenE, seenP := map[string]bool{}, map[string]bool{}
+			for _, r := range rows {
+				if r.EnvKey != "" && !seenE[r.EnvKey] {
+					seenE[r.EnvKey] = true
+					envKeys = append(envKeys, r.EnvKey)
+				}
+				if r.ProjectKey != "" && !seenP[r.ProjectKey] {
+					seenP[r.ProjectKey] = true
+					projKeys = append(projKeys, r.ProjectKey)
+				}
+			}
+			envName := map[string]string{}
+			if len(envKeys) > 0 {
+				var es []model.Environment
+				if err := a.db(ctx).Select("env_key", "name").
+					Where("env_key IN ?", envKeys).Find(&es).Error; err == nil {
+					for _, e := range es {
+						envName[e.EnvKey] = e.Name
+					}
+				}
+			}
+			projName := map[string]string{}
+			if len(projKeys) > 0 {
+				var ps []model.Project
+				if err := a.db(ctx).Select("project_key", "name").
+					Where("project_key IN ?", projKeys).Find(&ps).Error; err == nil {
+					for _, p := range ps {
+						projName[p.ProjectKey] = p.Name
+					}
+				}
+			}
+
+			out := make([]map[string]any, 0, len(rows))
+			countByEnv := map[string]int{}
+			for _, r := range rows {
+				countByEnv[r.EnvKey]++
+				item := map[string]any{
+					"projectKey": r.ProjectKey, "projectName": projName[r.ProjectKey],
+					"envKey": r.EnvKey, "envName": envName[r.EnvKey],
+					"status": r.Status, "replicas": r.Replicas, "readyReplicas": r.ReadyReplicas,
+					"tag": r.CurrentTag, "onboardedAt": formatTime(r.CreatedAt),
+				}
+				out = append(out, item)
+			}
+
+			type envStat struct {
+				EnvKey  string `json:"envKey"`
+				EnvName string `json:"envName"`
+				Count   int    `json:"count"`
+			}
+			stats := make([]envStat, 0, len(countByEnv))
+			for k, n := range countByEnv {
+				stats = append(stats, envStat{EnvKey: k, EnvName: envName[k], Count: n})
+			}
+			sort.Slice(stats, func(i, j int) bool {
+				if stats[i].Count != stats[j].Count {
+					return stats[i].Count > stats[j].Count
+				}
+				return stats[i].EnvKey < stats[j].EnvKey
+			})
+
+			return jsonText(map[string]any{
+				"ok": true, "hours": hours, "since": formatTime(since),
+				"serviceCount": len(out), "byEnv": stats, "services": out,
+			})
+		},
+	}
+}
+
 func (a *AIService) toolClusterResources() aiTool {
 	return aiTool{
 		Name: "get_cluster_resources",
@@ -697,6 +826,8 @@ func aiToolLabel(name string) string {
 		return "读取构建记录"
 	case "list_recent_builds":
 		return "汇总最近的构建"
+	case "list_recent_services":
+		return "汇总最近纳管的服务"
 	case "get_cluster_resources":
 		return "读取集群资源"
 	}
