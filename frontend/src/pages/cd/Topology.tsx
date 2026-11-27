@@ -128,7 +128,10 @@ const EMPTY_RT: Runtime = {
  * 读不到集群时**不回退到库里的值**：那正是要消掉的假数据。
  * 改为 unknown，让圆圈如实说"状态未知"。
  */
-const runtimeOf = (svc?: EnvService): Runtime => {
+const runtimeOf = (svc: EnvService | undefined, envLoaded = true): Runtime => {
+  // 该环境的**服务清单本身**还没读到 —— 这是"不知道"，不是"没部署"。
+  // 少了这一条，慢集群会让所有圆圈谎报「未部署」（2026-11-27）。
+  if (!envLoaded) return { ...EMPTY_RT, status: 'unknown' };
   if (!svc) return EMPTY_RT;
   const live = svc.live;
   // ① 读到了：字段即事实
@@ -547,38 +550,79 @@ const Topology: React.FC = () => {
   // 每个环境下的服务实例。拓扑要同时看"所有环境 × 当前项目"，
   // 所以需要跨环境的服务清单；环境数量是个位数，逐个取比让后端加聚合接口更直接。
   const envKeys = useMemo(() => envList.map((e) => e.key).sort().join(','), [envList]);
-  const servicesApi = useApi(
-    async () => {
+  /**
+   * 每个环境的服务清单**各自加载、各自落 state**。
+   *
+   * 为什么不一个 useApi 拉全部（原来那样）：
+   * `Promise.all(keys.map(...))` 要等**最慢的那个**，期间 `svcMap` 全空，
+   * 5 个圆圈全部落进 `runtimeOf(undefined)` → 显示「未部署」。
+   * 而"未部署"是一句**断言**（这个环境确实没纳管这个项目），数据没到就说
+   * 这句话是错的 —— 2026-11-27 用户看到的就是整页「已覆盖 0/5」。
+   *
+   * 现在：快的环境 0.3 秒就把自己的圆圈点亮，挂掉的那个单独显示「状态未知」。
+   */
+  const [svcByEnv, setSvcByEnv] = useState<Record<string, EnvService[]>>({});
+  const [loadedEnvs, setLoadedEnvs] = useState<Set<string>>(new Set());
+  const [svcLoading, setSvcLoading] = useState(false);
+  const [svcUpdatedAt, setSvcUpdatedAt] = useState<number | null>(null);
+  const [svcSilentErr, setSvcSilentErr] = useState<string | null>(null);
+  const svcPendingRef = useRef(false);
+  const [svcTick, setSvcTick] = useState(0);
+
+  const reloadServices = useCallback(
+    (silent: boolean) => {
       const keys = envKeys ? envKeys.split(',') : [];
-      /**
-       * ⚠️ 限成 2 并发，**不要**改回 `Promise.all(keys.map(...))`。
-       *
-       * 这个接口每个环境都要现读集群（30 个服务的 Pod 状态，单环境最长 8 秒）。
-       * 浏览器同域 HTTP/1.1 只有 6 个并发连接 —— 5 个环境并发就把连接吃干，
-       * 同页的图片列表、环境列表只能排队，表现成"一个集群慢，整个拓扑转圈"
-       * （2026-11-27 用户实际反馈）。
-       */
-      const limit = 2;
-      const groups: Awaited<ReturnType<typeof environmentApi.services>>[] = [];
-      for (let i = 0; i < keys.length; i += limit) {
-        const batch = keys.slice(i, i + limit);
-        groups.push(...(await Promise.all(batch.map((k) => environmentApi.services(k)))));
+      if (!keys.length || svcPendingRef.current) return;
+      svcPendingRef.current = true;
+      if (!silent) setSvcLoading(true);
+      let done = 0;
+      let firstErr = '';
+      for (const k of keys) {
+        void (async () => {
+          try {
+            const list = await environmentApi.services(k);
+            setSvcByEnv((prev) => ({ ...prev, [k]: list }));
+            // **只有读成功**才记进 loadedEnvs：读失败的环境绝不能算"已加载"，
+            // 否则它的每个圆圈都会从"状态未知"退回"未部署"——又变成谎报。
+            setLoadedEnvs((prev) => new Set(prev).add(k));
+          } catch (e) {
+            if (!firstErr) firstErr = e instanceof Error ? e.message : '读取失败';
+          } finally {
+            done += 1;
+            if (done === keys.length) {
+              svcPendingRef.current = false;
+              setSvcLoading(false);
+              setSvcUpdatedAt(Date.now());
+              setSvcSilentErr(firstErr || null);
+            }
+          }
+        })();
       }
-      return groups.flat();
     },
     [envKeys],
-    { enabled: !!envKeys },
   );
-  const allServices: EnvService[] = useMemo(() => servicesApi.data ?? [], [servicesApi.data]);
+
+  useEffect(() => {
+    // 换项目/环境时先清空：否则会短暂显示上一个项目的服务清单
+    setSvcByEnv({});
+    setLoadedEnvs(new Set());
+    reloadServices(false);
+    // reloadServices 依赖 envKeys，放进来会因函数标识变化重复触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [envKeys, svcTick]);
+
+  const allServices: EnvService[] = useMemo(
+    () => Object.values(svcByEnv).flat(),
+    [svcByEnv],
+  );
 
   /**
-   * 服务实例清单到底读到没有 —— 与上面 `clusterRegistryKnown` 同一个道理。
+   * 某个环境的服务清单读到了没有。
    *
-   * 「未纳管」是一句**断言**（"这个环境确实没关联这个项目"），只有真读到清单才配说。
-   * 请求失败时 svcMap 是空的，若不加区分就会把全部环境的「部署新版」一起灰掉
-   * —— 那是"没读到"，不是"没纳管"。（同款判据见 EnvironmentList 的 removeEnv）
+   * 必须**按环境**判：用一个全局 known 的话，一个集群超时会把另外四个环境的
+   * 部署入口一起灰掉（"未纳管"也是一句断言，不能拿别人的失败去说它）。
    */
-  const servicesKnown = !servicesApi.error && !servicesApi.loading;
+  const envServicesKnown = (envKey: string) => loadedEnvs.has(envKey);
 
   /** envKey → projectKey → 服务实例 */
   const svcMap = useMemo(() => {
@@ -601,7 +645,7 @@ const Topology: React.FC = () => {
   const refreshAll = () => {
     projectsApi.refresh();
     envsApi.refresh();
-    servicesApi.refresh();
+    setSvcTick((t) => t + 1);
     imagesApi.refresh();
   };
 
@@ -628,14 +672,14 @@ const Topology: React.FC = () => {
     onTick: () => {
       envsApi.refreshSilent();
       // 拓扑是全环境的服务清单（N 个环境 = N 个请求），所以这里也更不该按 3 秒打
-      servicesApi.refreshSilent();
+      reloadServices(true);
       clustersApi.refreshSilent();
       imagesApi.refreshSilent();
     },
     // 任一请求还在飞就跳过这一拍，避免慢后端下滚出一串在飞请求
     isBusy: () =>
       envsApi.pendingRef.current ||
-      servicesApi.pendingRef.current ||
+      svcPendingRef.current ||
       clustersApi.pendingRef.current ||
       imagesApi.pendingRef.current,
   });
@@ -660,7 +704,7 @@ const Topology: React.FC = () => {
   /** 节点运行态：集群实时状态（读不到则为未知） + 正在进行的编排覆盖 */
   const nodeOf = (envKey: string): Runtime => {
     const svc = svcMap[envKey]?.[projectKey];
-    const base = runtimeOf(svc);
+    const base = runtimeOf(svc, loadedEnvs.has(envKey));
 
     if (flow && flow.envKey === envKey && !stream.ended) {
       const p = stream.status?.progress ?? 0;
@@ -956,7 +1000,7 @@ const Topology: React.FC = () => {
     const clusterOpsBlocked = st === 'unknown';
     const gate = (t: ActionType) => {
       if (clusterOpsBlocked && t !== 'logs' && t !== 'params') return disabledItem;
-      if (t === 'deploy' && servicesKnown && !linked) return disabledItem;
+      if (t === 'deploy' && envServicesKnown(env.key) && !linked) return disabledItem;
       if (undeployed && t !== 'deploy') return disabledItem;
       return item;
     };
@@ -1016,7 +1060,7 @@ const Topology: React.FC = () => {
           ) : null}
           {/* 置灰必须给出路，而且是**能点的**出路：只说"未纳管"不说去哪儿纳，
               等于把用户丢在死路口。?link=1 让详情页直接弹开纳管弹窗。 */}
-          {servicesKnown && !linked ? (
+          {envServicesKnown(env.key) && !linked ? (
             <div
               className="yn-topo-menu__sub"
               style={{ color: '#ff6a00', cursor: 'pointer' }}
@@ -1036,7 +1080,7 @@ const Topology: React.FC = () => {
           </span>
           部署新版
           <span className="yn-topo-menu__kbd">
-            {kbd(servicesKnown && !linked ? '未纳管' : '主操作')}
+            {kbd(envServicesKnown(env.key) && !linked ? '未纳管' : '主操作')}
           </span>
         </div>
         <div className={gate('redeploy')} onClick={gate('redeploy') === item ? () => openAction('redeploy', env.key) : undefined}>
@@ -1180,8 +1224,8 @@ const Topology: React.FC = () => {
             <AutoRefreshButton
               value={autoRefreshMs}
               onChange={setAutoRefreshMs}
-              updatedAt={servicesApi.updatedAt}
-              errorText={servicesApi.silentError?.message}
+              updatedAt={svcUpdatedAt}
+              errorText={svcSilentErr ?? undefined}
             />
             <Tooltip title="重新读取各环境与服务的实际状态">
               <Button icon={<ReloadOutlined />} loading={syncing} onClick={syncAllClusters} disabled={!envList.length}>
@@ -1300,6 +1344,11 @@ const Topology: React.FC = () => {
           <div className="yn-topo__meta-spacer" />
           <div className="yn-topo__meta-item">
             已覆盖环境 <b>{stats.deployed}</b> / {stats.total}
+            {/* 「读取中」只在**还没读完**时出现：每个环境各自加载，
+                先回来的先算进覆盖率，挂掉的那个不算（它显示"状态未知"）。 */}
+            {svcLoading ? (
+              <span style={{ marginLeft: 6, color: '#8c8c95', fontSize: 12 }}>读取中…</span>
+            ) : null}
           </div>
           {stats.busy ? (
             <div className="yn-topo__meta-item">
