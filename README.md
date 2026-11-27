@@ -291,9 +291,10 @@ cd backend && ./scripts/smoke.sh
 重新出镜像，`restart` 重启的还是旧镜像。**
 
 ```bash
-# 155 上（代码由 Mac 推过去，这台机器访问不了 GitHub）
 cd /opt/yunnian
-docker compose build app && docker compose up -d app
+git pull                          # 拉最新代码
+docker compose build app          # 重新出镜像
+docker compose up -d app          # 替换容器（中断约 10 秒）
 curl -s --noproxy '*' -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/healthz
 ```
 
