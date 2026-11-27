@@ -33,15 +33,6 @@ export interface EnvProjectCandidate {
   hasBuild: boolean;
 }
 
-/** 批量查询里单个环境的结果：ok=false 时 error 是给人看的原因 */
-export interface EnvResourceItem {
-  envKey: string;
-  ok: boolean;
-  error?: string;
-  data?: EnvResources;
-  elapsedMs?: number;
-}
-
 /** 环境集群资源占用（GET /environments/{key}/resources） */
 export interface EnvResources {
   cpuUsage: number;
@@ -208,17 +199,6 @@ export const environmentApi = {
   /** 环境的集群资源占用（CPU/内存/节点） */
   resources: (key: string) => http.get<EnvResources>(`/environments/${key}/resources`),
 
-  /**
-   * 批量版：一次拿多个环境的资源。
-   *
-   * **为什么必须批量**：浏览器同域 HTTP/1.1 只有 6 个并发连接。列表页一进来要
-   * N 个环境的 resources + N 个环境的 services，5 个环境就是 10 个请求，全部在等
-   * 集群（慢的那个 10~19 秒）—— 连接被占满，/stats、/projects 只能排队，
-   * 用户看到的是"一个接口慢，整页数据都出不来"（2026-11-27 实际发生）。
-   * 收敛成一个请求后只占 1 个连接。
-   */
-  resourcesBatch: (keys: string[]) =>
-    http.get<{ items: EnvResourceItem[] }>('/environments/resources', { keys: keys.join(',') }),
 
   /** 同步集群状态（拉取 namespace 实际副本数等） */
   sync: (key: string) => http.post<Environment>(`/environments/${key}/sync`),

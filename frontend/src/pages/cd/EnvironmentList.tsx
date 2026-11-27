@@ -111,6 +111,8 @@ const EnvironmentList: React.FC = () => {
   const liveResOf = (envKey: string): EnvResources | null => envRes.map?.get(envKey) ?? null;
   const usageOf = (envKey: string): EnvResources | null => envUsageOf(envRes.map, envKey);
   const resStatusOf = (envKey: string): Environment['status'] => envResStatusOf(envRes.map, envKey);
+  /** 该环境读不到集群资源的原因（"集群 X 读取超时（4 秒）"）；读到了就是空串 */
+  const resErrorOf = (envKey: string): string => envRes.errors?.get(envKey) ?? '';
 
   const refreshAll = () => {
     envApi.refresh();
@@ -567,11 +569,16 @@ const EnvironmentList: React.FC = () => {
                       </div>
                     ) : (
                       <div style={{ marginTop: 14, fontSize: 12, color: '#9aa0aa' }}>
-                        {envRes.error
-                          ? '读不到集群用量'
-                          : envRes.loading
-                            ? '正在读取集群用量…'
-                            : '集群未提供用量指标（需安装 metrics-server）'}
+                        {/* 每个卡片**自己**的原因：别的环境读到了不影响这一张，
+                            这一张读不到也不影响别人。后端 4 秒超时，所以这里
+                            不会一直停在"正在读取…"。 */}
+                        {resErrorOf(env.key) ? (
+                          <span style={{ color: '#d46b08' }}>{resErrorOf(env.key)}</span>
+                        ) : envRes.loading ? (
+                          '正在读取集群用量…'
+                        ) : (
+                          '集群未提供用量指标（需安装 metrics-server）'
+                        )}
                       </div>
                     )}
                   </div>

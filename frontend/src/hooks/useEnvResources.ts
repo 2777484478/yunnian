@@ -1,7 +1,7 @@
+import { useEffect, useState } from 'react';
 import { environmentApi } from '@/api';
 import type { ApiError } from '@/api';
 import type { EnvResources } from '@/api/cd';
-import { useApi } from '@/hooks/useApi';
 import type { Environment } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -81,41 +81,81 @@ export interface EnvResourcesResult {
  */
 export function useEnvResources(envKeys: string[]): EnvResourcesResult {
   // ⚠️ 依赖传的是**字符串**而不是 `envKeys` 数组本身：调用方每次渲染都会造一个
-  // 新数组（`envs.map(e => e.key)`），直接当依赖会让 useApi 每渲染打一次请求。
+  // 新数组（`envs.map(e => e.key)`），直接当依赖会让 effect 每渲染打一次请求。
   // 排序 + 去重后 join，值稳定，环境增减时才真的变化。
   const key = [...new Set(envKeys.filter(Boolean))].sort().join(',');
 
-  const api = useApi(
-    async () => {
-      const keys = key ? key.split(',') : [];
-      if (!keys.length) {
-        return { map: new Map<string, EnvResources | null>(), errs: new Map<string, string>() };
-      }
-      // 一次请求拿全部：**不要**回到 Promise.all(keys.map(...))。
-      // 那样每个环境占一个浏览器连接，5 个环境就把同域 6 个并发连接吃干，
-      // 页面上 /stats、/projects 这些本该 50ms 的请求只能排队等集群超时。
-      // 服务端已经改成并发查 + 单环境 8 秒超时（cd.go EnvResourcesBatch）。
-      const res = await environmentApi.resourcesBatch(keys);
-      const map = new Map<string, EnvResources | null>();
-      const errs = new Map<string, string>();
-      for (const k of keys) map.set(k, null);
-      for (const it of res.items ?? []) {
-        map.set(it.envKey, it.ok ? (it.data ?? null) : null);
-        if (!it.ok && it.error) errs.set(it.envKey, it.error);
-      }
-      return { map, errs };
-    },
-    [key],
-    { enabled: !!key },
-  );
+  const [map, setMap] = useState<Map<string, EnvResources | null>>(new Map());
+  const [errs, setErrs] = useState<Map<string, string>>(new Map());
+  const [loading, setLoading] = useState(false);
+  const [error] = useState<ApiError | null>(null);
+  const [tick, setTick] = useState(0);
+
+  /**
+   * 逐个环境**独立请求、独立落 state**。
+   *
+   * 为什么不 `Promise.all(keys.map(...))` 再一次性 setMap：那样快的环境也得
+   * 等最慢的那个（现在是 4 秒超时）才上屏 —— 用户的原话是"不要等到一起超时了
+   * 才把数据给其他环境"。逐个 setState 之后，0.2 秒回来的那张卡片立刻显示，
+   * 挂掉的那个自己转 4 秒再显示"读取超时"，互不牵连。
+   *
+   * 每个请求的 4 秒超时在后端（`cd.go envResourceTimeout`）—— 前端不另设，
+   * 避免两处超时打架。
+   */
+  useEffect(() => {
+    const keys = key ? key.split(',') : [];
+    // 换了一批环境就清掉旧值，否则会短暂显示上一批的数字
+    setMap(new Map());
+    setErrs(new Map());
+    if (!keys.length) {
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    let done = 0;
+    setLoading(true);
+
+    for (const k of keys) {
+      void (async () => {
+        try {
+          const r = await environmentApi.resources(k);
+          if (cancelled) return;
+          setMap((prev) => {
+            const next = new Map(prev);
+            next.set(k, r);
+            return next;
+          });
+        } catch (e) {
+          if (cancelled) return;
+          setMap((prev) => {
+            const next = new Map(prev);
+            next.set(k, null);
+            return next;
+          });
+          setErrs((prev) => {
+            const next = new Map(prev);
+            // 后端的"集群 X 读取超时（4 秒）"直接展示，比自己拼一句更准
+            next.set(k, e instanceof Error ? e.message : '读取失败');
+            return next;
+          });
+        } finally {
+          done += 1;
+          if (!cancelled && done === keys.length) setLoading(false);
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [key, tick]);
 
   return {
-    map: api.data?.map ?? null,
-    // 每个环境各自的失败原因（"集群超时（8 秒）"这类），给卡片显示用。
-    // 整体 error 只覆盖"这一个请求本身失败"，单个环境读不到走 errors。
-    errors: api.data?.errs ?? null,
-    loading: api.loading,
-    error: api.error,
-    refresh: api.refresh,
+    map,
+    errors: errs,
+    loading,
+    error,
+    refresh: () => setTick((t) => t + 1),
   };
 }

@@ -550,7 +550,20 @@ const Topology: React.FC = () => {
   const servicesApi = useApi(
     async () => {
       const keys = envKeys ? envKeys.split(',') : [];
-      const groups = await Promise.all(keys.map((k) => environmentApi.services(k)));
+      /**
+       * ⚠️ 限成 2 并发，**不要**改回 `Promise.all(keys.map(...))`。
+       *
+       * 这个接口每个环境都要现读集群（30 个服务的 Pod 状态，单环境最长 8 秒）。
+       * 浏览器同域 HTTP/1.1 只有 6 个并发连接 —— 5 个环境并发就把连接吃干，
+       * 同页的图片列表、环境列表只能排队，表现成"一个集群慢，整个拓扑转圈"
+       * （2026-11-27 用户实际反馈）。
+       */
+      const limit = 2;
+      const groups: Awaited<ReturnType<typeof environmentApi.services>>[] = [];
+      for (let i = 0; i < keys.length; i += limit) {
+        const batch = keys.slice(i, i + limit);
+        groups.push(...(await Promise.all(batch.map((k) => environmentApi.services(k)))));
+      }
       return groups.flat();
     },
     [envKeys],
